@@ -87,8 +87,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Cli::Onboard { interactive: true } => {
-            println!("Interactive setup not yet implemented");
-            println!("Please set environment variables in .env file");
+            praxis::onboard::run_interactive_onboard()?;
         }
         Cli::Onboard { interactive: false } => {
             anyhow::bail!("Onboard requires --interactive flag");
