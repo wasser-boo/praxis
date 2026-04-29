@@ -1,0 +1,105 @@
+use std::env;
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub poml_cli: String,
+    pub use_provider: String,
+    pub openai_api_key: Option<String>,
+    pub openai_model: String,
+    pub openai_api_base: String,
+    pub ollama_api_base: String,
+    pub ollama_model: String,
+    pub gateway_port: u16,
+    pub gateway_api_key: String,
+    pub dashboard_port: u16,
+    pub dashboard_admin_password: String,
+    pub data_dir: String,
+    pub rust_log: String,
+}
+
+impl Config {
+    pub fn from_env() -> Self {
+        Self {
+            poml_cli: env::var("POML_CLI").unwrap_or_else(|_| "./poml/js/cli.cjs".to_string()),
+            use_provider: env::var("USE_PROVIDER").unwrap_or_else(|_| "openai".to_string()),
+            openai_api_key: env::var("OPENAI_API_KEY").ok(),
+            openai_model: env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string()),
+            openai_api_base: env::var("OPENAI_API_BASE")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            ollama_api_base: env::var("OLLAMA_API_BASE")
+                .unwrap_or_else(|_| "http://localhost:11434".to_string()),
+            ollama_model: env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3".to_string()),
+            gateway_port: env::var("GATEWAY_PORT")
+                .unwrap_or_else(|_| "3537".to_string())
+                .parse()
+                .unwrap_or(3537),
+            gateway_api_key: env::var("GATEWAY_API_KEY").unwrap_or_else(|_| {
+                let key = uuid::Uuid::new_v4().to_string();
+                tracing::warn!("GATEWAY_API_KEY not set, generated: {}", key);
+                key
+            }),
+            dashboard_port: env::var("DASHBOARD_PORT")
+                .unwrap_or_else(|_| "1337".to_string())
+                .parse()
+                .unwrap_or(1337),
+            dashboard_admin_password: env::var("DASHBOARD_ADMIN_PASSWORD").unwrap_or_else(|_| {
+                tracing::warn!("DASHBOARD_ADMIN_PASSWORD not set, using default 'admin'");
+                "admin".to_string()
+            }),
+            data_dir: env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string()),
+            rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.gateway_api_key.len() < 16 {
+            anyhow::bail!("GATEWAY_API_KEY must be at least 16 characters");
+        }
+        if self.dashboard_admin_password.len() < 8 {
+            anyhow::bail!("DASHBOARD_ADMIN_PASSWORD must be at least 8 characters");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn test_config_defaults() {
+        let config = Config::from_env();
+        assert!(!config.data_dir.is_empty());
+        assert!(!config.rust_log.is_empty());
+    }
+
+    #[test]
+    fn test_validate_short_api_key() {
+        let config = Config {
+            gateway_api_key: "short".to_string(),
+            dashboard_admin_password: "longpassword".to_string(),
+            ..Config::from_env()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_short_password() {
+        let config = Config {
+            gateway_api_key: "a".repeat(20),
+            dashboard_admin_password: "short".to_string(),
+            ..Config::from_env()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_ok() {
+        let config = Config {
+            gateway_api_key: "a".repeat(20),
+            dashboard_admin_password: "longpassword".to_string(),
+            ..Config::from_env()
+        };
+        assert!(config.validate().is_ok());
+    }
+}

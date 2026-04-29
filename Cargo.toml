@@ -1,0 +1,65 @@
+[package]
+name = "praxis"
+version = "0.2.0"
+edition = "2021"
+description = "AI Agent Platform — Praxis"
+
+[features]
+default = []
+voice_vosk = ["vosk"]
+voice_whisper = ["whisper-rs"]
+voice_songbird = ["songbird"]
+vosk = ["dep:vosk"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tracing = "0.1"
+tracing-attributes = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+serenity = { version = "0.12", features = ["voice"] }
+axum = { version = "0.7", features = ["ws", "json"] }
+tokio-stream = "0.1"
+tempfile = "3"
+tokio-util = { version = "0.7", features = ["codec"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
+once_cell = "1"
+regex = "1"
+base64 = "0.22"
+lazy_static = "1"
+async-trait = "0.1"
+dashmap = "6"
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+rpassword = "7"
+shlex = "1.3"
+urlencoding = "2.1"
+jsonwebtoken = "9"
+bcrypt = "0.16"
+tower-http = { version = "0.6", features = ["cors", "auth"] }
+governor = "0.8"
+cron = "0.15"
+rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
+backon = "1"
+
+vosk = { version = "0.3", optional = true }
+whisper-rs = { version = "0.1", optional = true }
+songbird = { version = "0.6", optional = true, features = ["driver", "builtin-queue", "serenity", "receive"] }
+symphonia = { version = "0.5", features = ["all"] }
+minimp3 = "0.5"
+hound = "3.5"
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
