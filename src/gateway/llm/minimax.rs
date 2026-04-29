@@ -3,13 +3,17 @@ use super::provider::*;
 
 pub struct MiniMaxProvider {
     api_key: String,
+    model: String,
+    base_url: String,
     client: reqwest::Client,
 }
 
 impl MiniMaxProvider {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, model: String, base_url: String) -> Self {
         Self {
             api_key,
+            model,
+            base_url,
             client: reqwest::Client::new(),
         }
     }
@@ -18,7 +22,7 @@ impl MiniMaxProvider {
 #[async_trait]
 impl LLMProvider for MiniMaxProvider {
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        let url = "https://api.minimax.chat/v1/text/chatcompletion_v2";
+        let url = format!("{}/text/chatcompletion_v2", self.base_url);
 
         let messages: Vec<serde_json::Value> = request
             .messages
@@ -32,13 +36,13 @@ impl LLMProvider for MiniMaxProvider {
             .collect();
 
         let body = serde_json::json!({
-            "model": "MiniMax-Text-01",
+            "model": self.model,
             "messages": messages,
         });
 
         let resp = self
             .client
-            .post(url)
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
             .send()

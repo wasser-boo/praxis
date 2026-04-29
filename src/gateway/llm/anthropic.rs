@@ -3,13 +3,17 @@ use super::provider::*;
 
 pub struct AnthropicProvider {
     api_key: String,
+    model: String,
+    base_url: String,
     client: reqwest::Client,
 }
 
 impl AnthropicProvider {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, model: String, base_url: String) -> Self {
         Self {
             api_key,
+            model,
+            base_url,
             client: reqwest::Client::new(),
         }
     }
@@ -18,7 +22,7 @@ impl AnthropicProvider {
 #[async_trait]
 impl LLMProvider for AnthropicProvider {
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        let url = "https://api.anthropic.com/v1/messages";
+        let url = format!("{}/v1/messages", self.base_url);
 
         let messages: Vec<serde_json::Value> = request
             .messages
@@ -32,14 +36,14 @@ impl LLMProvider for AnthropicProvider {
             .collect();
 
         let body = serde_json::json!({
-            "model": "claude-3-5-sonnet-20241022",
+            "model": self.model,
             "messages": messages,
             "max_tokens": request.max_tokens.unwrap_or(4096),
         });
 
         let resp = self
             .client
-            .post(url)
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .json(&body)

@@ -25,7 +25,11 @@ impl LLMRouter {
         }
 
         if let Some(ref key) = secrets.anthropic_api_key {
-            providers.push(Box::new(anthropic::AnthropicProvider::new(key.clone())));
+            providers.push(Box::new(anthropic::AnthropicProvider::new(
+                key.clone(),
+                config.anthropic_model.clone(),
+                config.anthropic_api_base.clone(),
+            )));
         }
 
         providers.push(Box::new(ollama::OllamaProvider::new(
@@ -34,11 +38,19 @@ impl LLMRouter {
         )));
 
         if let Some(ref key) = secrets.minimax_api_key {
-            providers.push(Box::new(minimax::MiniMaxProvider::new(key.clone())));
+            providers.push(Box::new(minimax::MiniMaxProvider::new(
+                key.clone(),
+                config.minimax_model.clone(),
+                config.minimax_api_base.clone(),
+            )));
         }
 
         if let Some(ref key) = secrets.mimo_api_key {
-            providers.push(Box::new(mimo::MiMoProvider::new(key.clone())));
+            providers.push(Box::new(mimo::MiMoProvider::new(
+                key.clone(),
+                config.mimo_model.clone(),
+                config.mimo_api_base.clone(),
+            )));
         }
 
         Self {

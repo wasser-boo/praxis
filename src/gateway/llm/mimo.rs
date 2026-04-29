@@ -3,13 +3,17 @@ use super::provider::*;
 
 pub struct MiMoProvider {
     api_key: String,
+    model: String,
+    base_url: String,
     client: reqwest::Client,
 }
 
 impl MiMoProvider {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, model: String, base_url: String) -> Self {
         Self {
             api_key,
+            model,
+            base_url,
             client: reqwest::Client::new(),
         }
     }
@@ -18,7 +22,7 @@ impl MiMoProvider {
 #[async_trait]
 impl LLMProvider for MiMoProvider {
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        let url = "https://api.mimo.com/v1/chat/completions";
+        let url = format!("{}/chat/completions", self.base_url);
 
         let messages: Vec<serde_json::Value> = request
             .messages
@@ -32,13 +36,13 @@ impl LLMProvider for MiMoProvider {
             .collect();
 
         let body = serde_json::json!({
-            "model": "mimo",
+            "model": self.model,
             "messages": messages,
         });
 
         let resp = self
             .client
-            .post(url)
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
             .send()

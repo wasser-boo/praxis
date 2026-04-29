@@ -20,37 +20,49 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     println!();
 
     let provider_choice = prompt_choice("Select provider", &["1", "2", "3", "4", "5"], "1")?;
-    let (provider_name, _provider_config) = match provider_choice.as_str() {
+    let provider_name = match provider_choice.as_str() {
         "1" => {
             let api_key = prompt_required("OpenAI API Key")?;
             let model = prompt_with_default("OpenAI Model", "gpt-4o");
-            let base_url = prompt_with_default("OpenAI API Base", "https://api.openai.com/v1");
+            let base_url = prompt_with_default("OpenAI API Base URL", "https://api.openai.com/v1");
             env_lines.push(format!("OPENAI_API_KEY={}", api_key));
             env_lines.push(format!("OPENAI_MODEL={}", model));
             env_lines.push(format!("OPENAI_API_BASE={}", base_url));
-            ("openai", vec!["OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_API_BASE"])
+            "openai"
         }
         "2" => {
             let api_key = prompt_required("Anthropic API Key")?;
+            let model = prompt_with_default("Anthropic Model", "claude-3-5-sonnet-20241022");
+            let base_url = prompt_with_default("Anthropic API Base URL", "https://api.anthropic.com");
             env_lines.push(format!("ANTHROPIC_API_KEY={}", api_key));
-            ("anthropic", vec!["ANTHROPIC_API_KEY"])
+            env_lines.push(format!("ANTHROPIC_MODEL={}", model));
+            env_lines.push(format!("ANTHROPIC_API_BASE={}", base_url));
+            "anthropic"
         }
         "3" => {
-            let base_url = prompt_with_default("Ollama API Base", "http://localhost:11434");
+            let base_url = prompt_with_default("Ollama API Base URL", "http://localhost:11434");
             let model = prompt_with_default("Ollama Model", "llama3");
             env_lines.push(format!("OLLAMA_API_BASE={}", base_url));
             env_lines.push(format!("OLLAMA_MODEL={}", model));
-            ("ollama", vec!["OLLAMA_API_BASE", "OLLAMA_MODEL"])
+            "ollama"
         }
         "4" => {
             let api_key = prompt_required("MiniMax API Key")?;
+            let model = prompt_with_default("MiniMax Model", "MiniMax-Text-01");
+            let base_url = prompt_with_default("MiniMax API Base URL", "https://api.minimax.chat/v1");
             env_lines.push(format!("MINIMAX_API_KEY={}", api_key));
-            ("minimax", vec!["MINIMAX_API_KEY"])
+            env_lines.push(format!("MINIMAX_MODEL={}", model));
+            env_lines.push(format!("MINIMAX_API_BASE={}", base_url));
+            "minimax"
         }
         "5" => {
             let api_key = prompt_required("MiMo API Key")?;
+            let model = prompt_with_default("MiMo Model", "mimo");
+            let base_url = prompt_with_default("MiMo API Base URL", "https://api.mimo.com/v1");
             env_lines.push(format!("MIMO_API_KEY={}", api_key));
-            ("mimo", vec!["MIMO_API_KEY"])
+            env_lines.push(format!("MIMO_MODEL={}", model));
+            env_lines.push(format!("MIMO_API_BASE={}", base_url));
+            "mimo"
         }
         _ => unreachable!(),
     };

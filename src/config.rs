@@ -7,8 +7,17 @@ pub struct Config {
     pub openai_api_key: Option<String>,
     pub openai_model: String,
     pub openai_api_base: String,
+    pub anthropic_api_key: Option<String>,
+    pub anthropic_model: String,
+    pub anthropic_api_base: String,
     pub ollama_api_base: String,
     pub ollama_model: String,
+    pub minimax_api_key: Option<String>,
+    pub minimax_model: String,
+    pub minimax_api_base: String,
+    pub mimo_api_key: Option<String>,
+    pub mimo_model: String,
+    pub mimo_api_base: String,
     pub gateway_port: u16,
     pub gateway_api_key: String,
     pub dashboard_port: u16,
@@ -26,9 +35,23 @@ impl Config {
             openai_model: env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string()),
             openai_api_base: env::var("OPENAI_API_BASE")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok(),
+            anthropic_model: env::var("ANTHROPIC_MODEL")
+                .unwrap_or_else(|_| "claude-3-5-sonnet-20241022".to_string()),
+            anthropic_api_base: env::var("ANTHROPIC_API_BASE")
+                .unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
             ollama_api_base: env::var("OLLAMA_API_BASE")
                 .unwrap_or_else(|_| "http://localhost:11434".to_string()),
             ollama_model: env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3".to_string()),
+            minimax_api_key: env::var("MINIMAX_API_KEY").ok(),
+            minimax_model: env::var("MINIMAX_MODEL")
+                .unwrap_or_else(|_| "MiniMax-Text-01".to_string()),
+            minimax_api_base: env::var("MINIMAX_API_BASE")
+                .unwrap_or_else(|_| "https://api.minimax.chat/v1".to_string()),
+            mimo_api_key: env::var("MIMO_API_KEY").ok(),
+            mimo_model: env::var("MIMO_MODEL").unwrap_or_else(|_| "mimo".to_string()),
+            mimo_api_base: env::var("MIMO_API_BASE")
+                .unwrap_or_else(|_| "https://api.mimo.com/v1".to_string()),
             gateway_port: env::var("GATEWAY_PORT")
                 .unwrap_or_else(|_| "3537".to_string())
                 .parse()
