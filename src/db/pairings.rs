@@ -56,6 +56,29 @@ impl Database {
         }
     }
 
+    pub fn get_pairing_by_internal_user(&self, user_id: &str) -> anyhow::Result<Option<Pairing>> {
+        let conn = self.conn();
+        let result = conn.query_row(
+            "SELECT user_id, discord_user_id, discord_guild_id, paired_at, last_seen_at FROM pairings WHERE user_id = ?1",
+            rusqlite::params![user_id],
+            |row| {
+                Ok(Pairing {
+                    user_id: row.get(0)?,
+                    discord_user_id: row.get(1)?,
+                    discord_guild_id: row.get(2)?,
+                    paired_at: row.get(3)?,
+                    last_seen_at: row.get(4)?,
+                })
+            },
+        );
+
+        match result {
+            Ok(pairing) => Ok(Some(pairing)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn update_last_seen(&self, discord_user_id: &str) -> anyhow::Result<()> {
         let conn = self.conn();
         conn.execute(

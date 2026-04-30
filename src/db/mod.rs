@@ -5,6 +5,7 @@ pub mod memory;
 pub mod pairings;
 pub mod secrets;
 pub mod templates;
+pub mod tools;
 pub mod enc2;
 pub mod logs;
 
@@ -60,6 +61,10 @@ impl Database {
 
     pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap()
+    }
+
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        std::path::PathBuf::from(&self.data_dir)
     }
 
     pub async fn ping(&self) -> anyhow::Result<()> {

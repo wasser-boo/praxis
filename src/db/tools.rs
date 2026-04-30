@@ -1,0 +1,272 @@
+use serde::{Deserialize, Serialize};
+use super::Database;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tool {
+    pub name: String,
+    pub description: Option<String>,
+    pub parameters: serde_json::Value,
+    pub is_enabled: bool,
+}
+
+fn tools_file(db: &Database) -> std::path::PathBuf {
+    db.data_dir().join("tools.json")
+}
+
+fn load_tools(db: &Database) -> anyhow::Result<Vec<Tool>> {
+    let path = tools_file(db);
+    if path.exists() {
+        let data = std::fs::read_to_string(&path)?;
+        Ok(serde_json::from_str(&data)?)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn save_tools(db: &Database, tools: &[Tool]) -> anyhow::Result<()> {
+    let path = tools_file(db);
+    let json = serde_json::to_string_pretty(tools)?;
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
+pub fn list_enabled(db: &Database) -> anyhow::Result<Vec<Tool>> {
+    let tools = load_tools(db)?;
+    Ok(tools.into_iter().filter(|t| t.is_enabled).collect())
+}
+
+pub fn list(db: &Database) -> anyhow::Result<Vec<Tool>> {
+    load_tools(db)
+}
+
+pub fn get(db: &Database, name: &str) -> anyhow::Result<Tool> {
+    let tools = load_tools(db)?;
+    tools.into_iter()
+        .find(|t| t.name == name)
+        .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", name))
+}
+
+pub fn save(db: &Database, tool: &Tool) -> anyhow::Result<()> {
+    let mut tools = load_tools(db)?;
+    if let Some(existing) = tools.iter_mut().find(|t| t.name == tool.name) {
+        *existing = tool.clone();
+    } else {
+        tools.push(tool.clone());
+    }
+    save_tools(db, &tools)?;
+    Ok(())
+}
+
+pub fn enable(db: &Database, name: &str) -> anyhow::Result<()> {
+    let mut tools = load_tools(db)?;
+    if let Some(tool) = tools.iter_mut().find(|t| t.name == name) {
+        tool.is_enabled = true;
+        save_tools(db, &tools)?;
+    }
+    Ok(())
+}
+
+pub fn disable(db: &Database, name: &str) -> anyhow::Result<()> {
+    let mut tools = load_tools(db)?;
+    if let Some(tool) = tools.iter_mut().find(|t| t.name == name) {
+        tool.is_enabled = false;
+        save_tools(db, &tools)?;
+    }
+    Ok(())
+}
+
+pub fn set_enabled(db: &Database, name: &str, enabled: bool) -> anyhow::Result<()> {
+    let mut tools = load_tools(db)?;
+    if let Some(tool) = tools.iter_mut().find(|t| t.name == name) {
+        tool.is_enabled = enabled;
+        save_tools(db, &tools)?;
+    }
+    Ok(())
+}
+
+pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
+    let existing = load_tools(db)?;
+    if !existing.is_empty() {
+        return Ok(());
+    }
+
+    let defaults = vec![
+        Tool { name: "execute_terminal".into(), description: Some("Run shell command".into()), parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}), is_enabled: true },
+        Tool { name: "write_file".into(), description: Some("Create or overwrite file".into()), parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}), is_enabled: true },
+        Tool { name: "edit_file".into(), description: Some("Edit file with find/replace".into()), parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}), is_enabled: true },
+        Tool { name: "read_file".into(), description: Some("Read file contents".into()), parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}), is_enabled: true },
+        Tool { name: "web_search".into(), description: Some("Search the web".into()), parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}), is_enabled: true },
+        Tool { name: "get_context".into(), description: Some("Read current context".into()), parameters: serde_json::json!({"type":"object","properties":{}}), is_enabled: true },
+        Tool { name: "set_context".into(), description: Some("Set context variable".into()), parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string"},"value":{}},"required":["key","value"]}), is_enabled: true },
+        Tool { name: "delete_context".into(), description: Some("Delete context variable".into()), parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}), is_enabled: true },
+        Tool { name: "agent_next".into(), description: Some("Advance to next step".into()), parameters: serde_json::json!({"type":"object","properties":{}}), is_enabled: true },
+        Tool { name: "agent_complete".into(), description: Some("Mark task as done".into()), parameters: serde_json::json!({"type":"object","properties":{}}), is_enabled: true },
+        Tool { name: "agent_set_path".into(), description: Some("Set working directory".into()), parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}), is_enabled: true },
+        Tool { name: "agent_feedback".into(), description: Some("Send progress update".into()), parameters: serde_json::json!({"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}), is_enabled: true },
+        Tool { name: "discord_upload_file".into(), description: Some("Upload file to Discord".into()), parameters: serde_json::json!({"type":"object","properties":{"filename":{"type":"string"},"base64_content":{"type":"string"}},"required":["filename","base64_content"]}), is_enabled: true },
+        Tool { name: "discord_send_message".into(), description: Some("Send message to Discord channel".into()), parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string"},"message":{"type":"string"}},"required":["channel_id","message"]}), is_enabled: true },
+        Tool { name: "learn_fact".into(), description: Some("Learn and store a fact".into()), parameters: serde_json::json!({"type":"object","properties":{"fact":{"type":"string"}},"required":["fact"]}), is_enabled: true },
+        Tool { name: "learn_preference".into(), description: Some("Learn a user preference".into()), parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"]}), is_enabled: true },
+        Tool { name: "learn_topic".into(), description: Some("Track a conversation topic".into()), parameters: serde_json::json!({"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}), is_enabled: true },
+    ];
+
+    save_tools(db, &defaults)?;
+    Ok(())
+}
+
+/// Convert enabled tools to LLM tool definitions
+pub fn to_tool_definitions(db: &Database) -> anyhow::Result<Vec<crate::gateway::llm::provider::ToolDefinition>> {
+    let tools = list_enabled(db)?;
+    Ok(tools.into_iter().map(|t| crate::gateway::llm::provider::ToolDefinition {
+        tool_type: "function".to_string(),
+        function: crate::gateway::llm::provider::FunctionDefinition {
+            name: t.name,
+            description: t.description.unwrap_or_default(),
+            parameters: t.parameters,
+        },
+    }).collect())
+}
+
+#[cfg(test)]
+mod tool_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_db() -> (Database, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Database::new(dir.path()).unwrap();
+        (db, dir)
+    }
+
+    #[test]
+    fn test_init_default_tools() {
+        let (db, _dir) = test_db();
+        init_default_tools(&db).unwrap();
+        let tools = list(&db).unwrap();
+        assert_eq!(tools.len(), 17);
+    }
+
+    #[test]
+    fn test_init_default_tools_idempotent() {
+        let (db, _dir) = test_db();
+        init_default_tools(&db).unwrap();
+        init_default_tools(&db).unwrap();
+        let tools = list(&db).unwrap();
+        assert_eq!(tools.len(), 17);
+    }
+
+    #[test]
+    fn test_list_enabled() {
+        let (db, _dir) = test_db();
+        init_default_tools(&db).unwrap();
+        let enabled = list_enabled(&db).unwrap();
+        assert_eq!(enabled.len(), 17);
+
+        disable(&db, "execute_terminal").unwrap();
+        let enabled = list_enabled(&db).unwrap();
+        assert_eq!(enabled.len(), 16);
+    }
+
+    #[test]
+    fn test_get_tool() {
+        let (db, _dir) = test_db();
+        init_default_tools(&db).unwrap();
+        let tool = get(&db, "execute_terminal").unwrap();
+        assert_eq!(tool.name, "execute_terminal");
+        assert!(tool.is_enabled);
+    }
+
+    #[test]
+    fn test_get_tool_not_found() {
+        let (db, _dir) = test_db();
+        assert!(get(&db, "nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_enable_disable() {
+        let (db, _dir) = test_db();
+        init_default_tools(&db).unwrap();
+
+        disable(&db, "write_file").unwrap();
+        let tool = get(&db, "write_file").unwrap();
+        assert!(!tool.is_enabled);
+
+        enable(&db, "write_file").unwrap();
+        let tool = get(&db, "write_file").unwrap();
+        assert!(tool.is_enabled);
+    }
+
+    #[test]
+    fn test_set_enabled() {
+        let (db, _dir) = test_db();
+        init_default_tools(&db).unwrap();
+
+        set_enabled(&db, "edit_file", false).unwrap();
+        let tool = get(&db, "edit_file").unwrap();
+        assert!(!tool.is_enabled);
+
+        set_enabled(&db, "edit_file", true).unwrap();
+        let tool = get(&db, "edit_file").unwrap();
+        assert!(tool.is_enabled);
+    }
+
+    #[test]
+    fn test_save_custom_tool() {
+        let (db, _dir) = test_db();
+        let tool = Tool {
+            name: "custom_tool".to_string(),
+            description: Some("My custom tool".to_string()),
+            parameters: serde_json::json!({"type": "object"}),
+            is_enabled: true,
+        };
+        save(&db, &tool).unwrap();
+
+        let loaded = get(&db, "custom_tool").unwrap();
+        assert_eq!(loaded.description, Some("My custom tool".to_string()));
+    }
+
+    #[test]
+    fn test_save_update_existing() {
+        let (db, _dir) = test_db();
+        let tool = Tool {
+            name: "my_tool".to_string(),
+            description: Some("v1".to_string()),
+            parameters: serde_json::json!({}),
+            is_enabled: true,
+        };
+        save(&db, &tool).unwrap();
+
+        let tool2 = Tool {
+            name: "my_tool".to_string(),
+            description: Some("v2".to_string()),
+            parameters: serde_json::json!({}),
+            is_enabled: false,
+        };
+        save(&db, &tool2).unwrap();
+
+        let loaded = get(&db, "my_tool").unwrap();
+        assert_eq!(loaded.description, Some("v2".to_string()));
+        assert!(!loaded.is_enabled);
+    }
+
+    #[test]
+    fn test_to_tool_definitions() {
+        let (db, _dir) = test_db();
+        init_default_tools(&db).unwrap();
+        let defs = to_tool_definitions(&db).unwrap();
+        assert_eq!(defs.len(), 17);
+        assert_eq!(defs[0].function.name, "execute_terminal");
+    }
+
+    #[test]
+    fn test_to_tool_definitions_filtered() {
+        let (db, _dir) = test_db();
+        init_default_tools(&db).unwrap();
+        disable(&db, "execute_terminal").unwrap();
+        disable(&db, "write_file").unwrap();
+
+        let defs = to_tool_definitions(&db).unwrap();
+        assert_eq!(defs.len(), 15);
+        assert!(defs.iter().all(|d| d.function.name != "execute_terminal"));
+    }
+}

@@ -44,22 +44,32 @@ pub async fn login_handler(
     Ok(Json(LoginResponse { token }))
 }
 
-pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCode> {
-    let config = crate::config::Config::from_env();
-
+pub async fn auth_middleware_fn(
+    axum::extract::State(state): axum::extract::State<crate::gateway::GatewayState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
     let auth_header = req
         .headers()
         .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .and_then(|v| v.to_str().ok());
 
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = match auth_header {
+        Some(header) => match header.strip_prefix("Bearer ") {
+            Some(t) => t,
+            None => return Err(StatusCode::UNAUTHORIZED),
+        },
+        None => {
+            if req.uri().path() == "/ws" {
+                return Ok(next.run(req).await);
+            }
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
 
     let jwt_result = decode::<Claims>(
         token,
-        &DecodingKey::from_secret(config.gateway_api_key.as_bytes()),
+        &DecodingKey::from_secret(state.config.gateway_api_key.as_bytes()),
         &Validation::default(),
     );
 
@@ -67,7 +77,7 @@ pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, Statu
         return Ok(next.run(req).await);
     }
 
-    if token == config.gateway_api_key {
+    if token == state.config.gateway_api_key {
         return Ok(next.run(req).await);
     }
 

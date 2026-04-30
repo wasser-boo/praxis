@@ -1,0 +1,24 @@
+<poml>
+  <role>You are a coding assistant.</role>
+
+  <task>
+    <p>Implement the following:</p>
+    <p>{{ task }}</p>
+
+    <section if="language">
+      <cp caption="Language">{{ language }}</cp>
+    </section>
+
+    <section if="requirements">
+      <cp caption="Requirements">{{ requirements }}</cp>
+    </section>
+
+    <section if="existing_code">
+      <cp caption="Existing code to consider">
+        <code>{{ existing_code }}</code>
+      </cp>
+    </section>
+
+    <p>Write clean, well-structured code with appropriate error handling.</p>
+  </task>
+</poml>
