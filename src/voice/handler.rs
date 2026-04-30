@@ -107,37 +107,51 @@ impl VoiceHandler {
             }
         }
 
+        let max_amp = audio.iter().map(|s| s.abs()).max().unwrap_or(0);
+        let has_content = max_amp > 10;
+
+        if !has_content {
+            tracing::trace!("VOICE_HANDLER: Noise filtered ssrc={} max_amp={}", ssrc, max_amp);
+            return;
+        }
+
         self.user_buffers.entry(ssrc).or_insert_with(Vec::new).extend_from_slice(audio);
         self.user_last_speech.insert(ssrc, std::time::Instant::now());
 
         let mut buffer = self.audio_buffer.lock().await;
         buffer.extend_from_slice(audio);
 
-        let has_content = audio.iter().any(|&s| s.abs() > 50);
-        if has_content {
-            let mut last_time = self.last_speech_time.lock().await;
-            *last_time = std::time::Instant::now();
-            drop(last_time);
-            let mut last_ssrc = self.last_active_ssrc.lock().await;
-            *last_ssrc = Some(ssrc);
-        }
+        let buffer_len = self.user_buffers.get(&ssrc).map(|b| b.len()).unwrap_or(0);
+        let mut last_time = self.last_speech_time.lock().await;
+        *last_time = std::time::Instant::now();
+        drop(last_time);
+        let mut last_ssrc = self.last_active_ssrc.lock().await;
+        *last_ssrc = Some(ssrc);
+        tracing::debug!("VOICE_HANDLER: Audio content ssrc={} samples={} buffer_len={}", ssrc, audio.len(), buffer_len);
     }
 
     pub async fn process_audio(&self, current_ssrc: u32) {
         let user_id = match self.get_user_from_ssrc(current_ssrc) {
             Some(discord_id) => {
                 if !self.is_user_allowed(discord_id).await {
+                    tracing::debug!("VOICE_HANDLER: SSRC {} mapped to user {} (not allowed), dropping", current_ssrc, discord_id);
                     return;
                 }
                 discord_id.to_string()
             }
             None => {
+                tracing::debug!("VOICE_HANDLER: No SSRC mapping for {}, waiting for SpeakingStateUpdate", current_ssrc);
                 return;
             }
         };
 
-        let time_since_speech = self.time_since_last_speech().await;
         let pause_threshold = std::time::Duration::from_secs_f32(0.5);
+
+        let time_since_speech = if let Some(last) = self.user_last_speech.get(&current_ssrc) {
+            last.elapsed()
+        } else {
+            return;
+        };
 
         if time_since_speech < pause_threshold {
             return;
@@ -156,6 +170,7 @@ impl VoiceHandler {
         let min_samples = (self.sample_rate as f32 * min_duration_secs) as usize;
 
         if buffer_len < min_samples {
+            tracing::debug!("VOICE_HANDLER: Pause detected but buffer too short ({} samples < {} min), discarding ssrc={}", buffer_len, min_samples, current_ssrc);
             return;
         }
 
@@ -165,6 +180,16 @@ impl VoiceHandler {
         let tx_guard = self.transcription_tx.lock().await;
         if let Some(tx) = tx_guard.as_ref() {
             let _ = tx.send((user_id, audio_data)).await;
+        }
+    }
+
+    pub async fn process_all_buffers(&self) {
+        let ssrcs: Vec<u32> = self.user_buffers.iter().map(|e| *e.key()).collect();
+        if !ssrcs.is_empty() {
+            tracing::debug!("VOICE_HANDLER: process_all_buffers checking {} buffered ssrcs", ssrcs.len());
+        }
+        for ssrc in ssrcs {
+            self.process_audio(ssrc).await;
         }
     }
 
@@ -219,6 +244,13 @@ pub mod songbird_integration {
                     }
                 },
                 EventContext::VoiceTick(tick) => {
+                    if !tick.speaking.is_empty() {
+                        let ssrc_info: Vec<String> = tick.speaking.iter().map(|(ssrc, data)| {
+                            let has_voice = data.decoded_voice.as_ref().map(|v| v.iter().filter(|&&s| s != 0).count()).unwrap_or(0);
+                            format!("ssrc={}({} nonzero samples)", ssrc, has_voice)
+                        }).collect();
+                        tracing::info!("VOICE_EVENT: VoiceTick with {} speaker(s): {}", tick.speaking.len(), ssrc_info.join(", "));
+                    }
                     for (ssrc, data) in &tick.speaking {
                         if let Some(decoded_voice) = &data.decoded_voice {
                             let non_zero = decoded_voice.iter().filter(|&&s| s != 0).count();
@@ -355,10 +387,7 @@ mod handler_tests {
         let audio = vec![1000i16; 16000];
         handler.add_audio_raw(&audio, 100).await;
 
-        {
-            let mut last = handler.last_speech_time.lock().await;
-            *last = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        }
+        handler.user_last_speech.insert(100, std::time::Instant::now() - std::time::Duration::from_secs(1));
 
         handler.process_audio(100).await;
 
@@ -380,15 +409,13 @@ mod handler_tests {
         assert!(handler.user_buffers.get(&999).is_some());
         assert_eq!(handler.user_buffers.get(&999).unwrap().len(), 16000);
 
-        {
-            let mut last = handler.last_speech_time.lock().await;
-            *last = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        }
+        handler.user_last_speech.insert(999, std::time::Instant::now() - std::time::Duration::from_secs(1));
 
         handler.process_audio(999).await;
 
         handler.set_ssrc_user(999, 12345).await;
-        assert!(handler.user_buffers.get(&999).is_none() || handler.user_buffers.get(&999).unwrap().is_empty());
+        assert!(handler.user_buffers.get(&999).is_some());
+        assert_eq!(handler.user_buffers.get(&999).unwrap().len(), 16000);
     }
 
     #[tokio::test]
@@ -401,10 +428,7 @@ mod handler_tests {
         let audio = vec![1000i16; 100];
         handler.add_audio_raw(&audio, 100).await;
 
-        {
-            let mut last = handler.last_speech_time.lock().await;
-            *last = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        }
+        handler.user_last_speech.insert(100, std::time::Instant::now() - std::time::Duration::from_secs(1));
 
         handler.process_audio(100).await;
 

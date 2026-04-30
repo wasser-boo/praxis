@@ -523,6 +523,16 @@ impl EventHandler for DiscordHandler {
                                     let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Vec<i16>)>(10);
                                     voice_handler.set_transcription_channel(tx).await;
 
+                                    // Spawn periodic buffer flusher (independent of VoiceTick)
+                                    let flush_handler = voice_handler.clone();
+                                    tokio::spawn(async move {
+                                        let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+                                        loop {
+                                            interval.tick().await;
+                                            flush_handler.process_all_buffers().await;
+                                        }
+                                    });
+
                                     // Spawn transcription processing task
                                     let db = self.db.clone();
                                     let ws_client = self.ws_client.clone();
@@ -539,9 +549,16 @@ impl EventHandler for DiscordHandler {
 
                                             tracing::info!("VOICE_PIPELINE: Received {} samples from user {}", audio_data.len(), user_id);
 
+                                            // Resolve Discord ID → Praxis user ID for context lookup
+                                            let praxis_user_id = if let Ok(Some(pairing)) = db.get_pairing_by_discord(&user_id) {
+                                                pairing.user_id.clone()
+                                            } else {
+                                                user_id.clone()
+                                            };
+
                                             // Get STT config from context
-                                            let ctx = db.load_context(&user_id).unwrap_or_else(|_| crate::db::contexts::Context {
-                                                user_id: user_id.clone(),
+                                            let ctx = db.load_context(&praxis_user_id).unwrap_or_else(|_| crate::db::contexts::Context {
+                                                user_id: praxis_user_id.clone(),
                                                 ..Default::default()
                                             });
                                             let stt_type = ctx.settings.voice_stt_type.clone();
@@ -604,7 +621,7 @@ impl EventHandler for DiscordHandler {
 
                                             // Send to gateway via WsClient
                                             let payload = crate::discord::ws_client::OutgoingMessage::Message {
-                                                user_id: user_id.clone(),
+                                                user_id: praxis_user_id.clone(),
                                                 content: message_text,
                                                 channel_id: format!("voice:{}", guild_id),
                                             };
