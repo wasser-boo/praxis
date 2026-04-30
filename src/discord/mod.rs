@@ -45,15 +45,15 @@ pub async fn set_discord_voice_state(guild_id: Option<u64>, user_id: Option<u64>
 
 // ── Songbird Manager ─────────────────────────────────────────────────────────
 
-#[cfg(feature = "voice_songbird")]
+#[cfg(feature = "songbird")]
 static SONGBIRD_MANAGER: OnceCell<Arc<songbird::Songbird>> = OnceCell::new();
 
-#[cfg(feature = "voice_songbird")]
+#[cfg(feature = "songbird")]
 pub fn set_songbird_manager(manager: Arc<songbird::Songbird>) {
     SONGBIRD_MANAGER.set(manager).ok();
 }
 
-#[cfg(feature = "voice_songbird")]
+#[cfg(feature = "songbird")]
 pub fn get_songbird_manager() -> Option<&'static Arc<songbird::Songbird>> {
     SONGBIRD_MANAGER.get()
 }
@@ -98,9 +98,10 @@ impl DiscordBot {
         let _voice_state = init_discord_voice_state();
         let handler = DiscordHandler::new(self.db.clone(), self.ws_client.clone(), self.secrets.clone());
 
-        let client_builder = Client::builder(
+        let mut client_builder = Client::builder(
             token,
-            GatewayIntents::MESSAGE_CONTENT
+            GatewayIntents::GUILDS
+                | GatewayIntents::MESSAGE_CONTENT
                 | GatewayIntents::DIRECT_MESSAGES
                 | GatewayIntents::GUILD_MESSAGES
                 | GatewayIntents::GUILD_VOICE_STATES
@@ -110,7 +111,7 @@ impl DiscordBot {
         .event_handler(handler);
 
         // Register songbird for voice support
-        #[cfg(feature = "voice_songbird")]
+        #[cfg(feature = "songbird")]
         {
             use songbird::SerenityInit;
             use songbird::driver::DecodeMode;
@@ -120,14 +121,6 @@ impl DiscordBot {
         }
 
         let mut client = client_builder.await?;
-
-        // Store songbird manager reference
-        #[cfg(feature = "voice_songbird")]
-        {
-            if let Some(manager) = songbird::serenity::get(&client).await {
-                set_songbird_manager(manager.clone());
-            }
-        }
 
         // Spawn event listener for file uploads, feedback, voice TTS
         let db = self.db.clone();
@@ -281,7 +274,7 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
 }
 
 /// Handle voice TTS - play audio in Discord voice channel
-#[cfg(feature = "voice_songbird")]
+#[cfg(feature = "songbird")]
 async fn handle_voice_tts(user_id: String, audio_data: Vec<u8>) {
     tracing::info!("Voice TTS for user {}: {} bytes", user_id, audio_data.len());
 
@@ -316,9 +309,9 @@ async fn handle_voice_tts(user_id: String, audio_data: Vec<u8>) {
     }
 }
 
-#[cfg(not(feature = "voice_songbird"))]
+#[cfg(not(feature = "songbird"))]
 async fn handle_voice_tts(_user_id: String, _audio_data: Vec<u8>) {
-    tracing::debug!("Voice TTS skipped - voice_songbird not enabled");
+    tracing::debug!("Voice TTS skipped - songbird not enabled");
 }
 
 pub async fn start(db: Database) -> anyhow::Result<()> {

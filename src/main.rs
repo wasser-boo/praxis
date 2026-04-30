@@ -143,6 +143,14 @@ async fn run_services(cli_password: Option<String>, enable_discord: bool, enable
 
     tracing::info!("Starting Praxis v{}...", env!("CARGO_PKG_VERSION"));
 
+    // Initialize default tools if needed
+    if let Err(e) = praxis::db::tools::init_default_tools(&db) {
+        tracing::warn!("Failed to init default tools: {}", e);
+    }
+
+    // Sync templates from disk to database
+    praxis::dashboard::routes::sync_templates_from_disk(&db);
+
     // Load secrets (encrypted or plaintext)
     let secrets = if let Some(ref password) = master_password {
         praxis::db::secrets::load_secrets_with_password(password)?

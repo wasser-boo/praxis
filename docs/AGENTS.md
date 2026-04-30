@@ -125,7 +125,7 @@ cargo test --test '*'
 
 # Build
 cargo build --release
-cargo build --release --features voice_songbird
+cargo build --release --features songbird
 
 # Run
 cargo run -- run

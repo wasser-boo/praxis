@@ -106,8 +106,9 @@ pub async fn run_agent_loop(
             });
         }
 
-        // Get tool definitions
-        let tools = get_tool_definitions();
+        // Get tool definitions from database
+        let tools = crate::db::tools::to_tool_definitions(&state.db)
+            .unwrap_or_default();
 
         let request = ChatRequest {
             messages,
@@ -143,7 +144,7 @@ pub async fn run_agent_loop(
                     }
                 }
 
-                let result = execute_tool_call(tc).await;
+                let result = execute_tool_call(&state.db, user_id, tc).await;
                 state.db.add_message(user_id, &crate::db::messages::Message {
                     role: "tool".to_string(),
                     content: result.clone(),
@@ -387,85 +388,7 @@ async fn build_system_prompt(
     }
 }
 
-fn get_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: crate::gateway::llm::provider::FunctionDefinition {
-                name: "execute_terminal".to_string(),
-                description: "Execute a shell command and return output".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string", "description": "The shell command to execute"}
-                    },
-                    "required": ["command"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: crate::gateway::llm::provider::FunctionDefinition {
-                name: "write_file".to_string(),
-                description: "Write content to a file".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File path"},
-                        "content": {"type": "string", "description": "Content to write"}
-                    },
-                    "required": ["path", "content"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: crate::gateway::llm::provider::FunctionDefinition {
-                name: "edit_file".to_string(),
-                description: "Edit a file by replacing text".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File path"},
-                        "old_text": {"type": "string", "description": "Text to find"},
-                        "new_text": {"type": "string", "description": "Replacement text"}
-                    },
-                    "required": ["path", "old_text", "new_text"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: crate::gateway::llm::provider::FunctionDefinition {
-                name: "read_file".to_string(),
-                description: "Read file contents".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File path to read"}
-                    },
-                    "required": ["path"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: crate::gateway::llm::provider::FunctionDefinition {
-                name: "web_search".to_string(),
-                description: "Search the web".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query"}
-                    },
-                    "required": ["query"]
-                }),
-            },
-        },
-    ]
-}
-
-async fn execute_tool_call(tc: &ToolCall) -> String {
+async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCall) -> String {
     let args: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
         Ok(v) => v,
         Err(e) => return format!("Error parsing arguments: {}", e),
@@ -499,8 +422,12 @@ async fn execute_tool_call(tc: &ToolCall) -> String {
         }
         "edit_file" => {
             let path = args["path"].as_str().unwrap_or("");
-            let old_text = args["old_text"].as_str().unwrap_or("");
-            let new_text = args["new_text"].as_str().unwrap_or("");
+            let old_text = args["old_text"].as_str()
+                .or_else(|| args["old_string"].as_str())
+                .unwrap_or("");
+            let new_text = args["new_text"].as_str()
+                .or_else(|| args["new_string"].as_str())
+                .unwrap_or("");
             match crate::tools::edit_file::edit_file(path, old_text, new_text).await {
                 Ok(_) => format!("File edited: {}", path),
                 Err(e) => format!("Error: {}", e),
@@ -536,6 +463,75 @@ async fn execute_tool_call(tc: &ToolCall) -> String {
                 Err(e) => format!("Search error: {}", e),
             }
         }
+        "get_context" => {
+            match db.load_context(user_id) {
+                Ok(ctx) => serde_json::to_string_pretty(&ctx).unwrap_or_else(|_| "Failed to serialize".to_string()),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "set_context" => {
+            let key = args["key"].as_str().unwrap_or("");
+            let value = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
+            match db.merge_context(user_id, serde_json::json!({key: value})) {
+                Ok(_) => format!("Context key '{}' set", key),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "delete_context" => {
+            let key = args["key"].as_str().unwrap_or("");
+            match db.merge_context(user_id, serde_json::json!({key: null})) {
+                Ok(_) => format!("Context key '{}' deleted", key),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "agent_next" => "Advanced to next step".to_string(),
+        "agent_complete" => "Task marked as complete".to_string(),
+        "agent_set_path" => {
+            let path = args["path"].as_str().unwrap_or("");
+            format!("Working directory set to: {}", path)
+        }
+        "agent_feedback" => {
+            let message = args["message"].as_str().unwrap_or("");
+            format!("Feedback: {}", message)
+        }
+        "discord_upload_file" => {
+            let filename = args["filename"].as_str().unwrap_or("");
+            let base64_content = args["base64_content"].as_str().unwrap_or("");
+            match crate::tools::discord_upload::upload_file(user_id, filename, base64_content, "").await {
+                Ok(_) => format!("File '{}' uploaded", filename),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "discord_send_message" => {
+            let channel_id = args["channel_id"].as_str().unwrap_or("");
+            let message = args["message"].as_str().unwrap_or("");
+            match crate::tools::discord_send_message::send_message(channel_id, message).await {
+                Ok(_) => "Message sent".to_string(),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "learn_fact" => {
+            let fact = args["fact"].as_str().unwrap_or("");
+            match db.add_memory(user_id, fact, Some("fact")) {
+                Ok(_) => format!("Learned: {}", fact),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "learn_preference" => {
+            let key = args["key"].as_str().unwrap_or("");
+            let value = args["value"].as_str().unwrap_or("");
+            match db.merge_context(user_id, serde_json::json!({"custom_data": {format!("pref_{}", key): value}})) {
+                Ok(_) => format!("Preference '{}' = '{}'", key, value),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "learn_topic" => {
+            let topic = args["topic"].as_str().unwrap_or("");
+            match db.add_memory(user_id, topic, Some("topic")) {
+                Ok(_) => format!("Topic tracked: {}", topic),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
         _ => format!("Unknown tool: {}", tc.function.name),
     }
 }
@@ -556,7 +552,12 @@ mod agent_tests {
 
     #[test]
     fn test_get_tool_definitions() {
-        let tools = get_tool_definitions();
+        // Tool definitions now come from the database
+        // This test verifies the structure is compatible
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = crate::db::Database::new(dir.path()).unwrap();
+        crate::db::tools::init_default_tools(&db).unwrap();
+        let tools = crate::db::tools::to_tool_definitions(&db).unwrap();
         assert!(!tools.is_empty());
         let names: Vec<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
         assert!(names.contains(&"execute_terminal"));

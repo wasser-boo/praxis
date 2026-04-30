@@ -150,6 +150,23 @@ impl Database {
         .collect::<Result<Vec<_>, _>>()?;
         Ok(pairings)
     }
+
+    pub fn list_all_pending_pairings(&self) -> anyhow::Result<Vec<PendingPairing>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT code, discord_user_id, expires_at, created_at FROM pending_pairings ORDER BY created_at DESC"
+        )?;
+        let pending = stmt.query_map([], |row| {
+            Ok(PendingPairing {
+                code: row.get(0)?,
+                discord_user_id: row.get(1)?,
+                expires_at: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(pending)
+    }
 }
 
 #[cfg(test)]

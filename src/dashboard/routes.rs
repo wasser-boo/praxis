@@ -97,6 +97,44 @@ pub struct DashboardLoginResponse {
     pub token: String,
 }
 
+pub fn sync_templates_from_disk(db: &crate::db::Database) {
+    let templates_dir = std::path::Path::new("templates");
+    if !templates_dir.exists() {
+        return;
+    }
+    sync_templates_dir(db, templates_dir, "");
+}
+
+fn sync_templates_dir(db: &crate::db::Database, dir: &std::path::Path, prefix: &str) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let sub_prefix = if prefix.is_empty() {
+                    entry.file_name().to_string_lossy().to_string()
+                } else {
+                    format!("{}/{}", prefix, entry.file_name().to_string_lossy())
+                };
+                sync_templates_dir(db, &path, &sub_prefix);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("poml") {
+                let file_stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                let name = if prefix.is_empty() {
+                    file_stem.to_string()
+                } else {
+                    format!("{}/{}", prefix, file_stem)
+                };
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let existing = db.get_template(&name).ok().flatten();
+                    if existing.is_none() {
+                        let _ = db.save_template(&name, &content, None, true);
+                        tracing::info!("Synced template from disk: {}", name);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn routes(db: crate::db::Database) -> Router {
     let secrets = crate::db::secrets::get_secrets();
     let config = crate::config::Config::from_env();
@@ -123,6 +161,9 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/secrets", axum::routing::put(update_secrets))
         .route("/pairings", axum::routing::get(list_pairings))
         .route("/pairings/{user_id}", axum::routing::delete(delete_pairing))
+        .route("/pairings/pending", axum::routing::get(list_pending_pairings))
+        .route("/pairings/pending/{code}/approve", axum::routing::post(approve_pending_pairing))
+        .route("/pairings/pending/{code}", axum::routing::delete(delete_pending_pairing))
         .route("/cl-files", axum::routing::get(list_cl_files))
         .route("/cl-files/{name}", axum::routing::get(get_cl_file))
         .route("/cl-files/{name}", axum::routing::put(save_cl_file))
@@ -134,6 +175,7 @@ pub fn routes(db: crate::db::Database) -> Router {
 
     Router::new()
         .route("/", axum::routing::get(index))
+        .route("/logo.svg", axum::routing::get(logo_svg))
         .route("/api/status", axum::routing::get(status))
         .route("/api/auth/login", axum::routing::post(login_handler))
         .nest_service("/static", static_service)
@@ -205,6 +247,18 @@ async fn index() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../static/index.html"))
 }
 
+async fn logo_svg() -> impl axum::response::IntoResponse {
+    (
+        axum::http::header::HeaderMap::from_iter([
+            (
+                axum::http::header::CONTENT_TYPE,
+                "image/svg+xml".parse().unwrap(),
+            ),
+        ]),
+        include_str!("../../static/logo.svg"),
+    )
+}
+
 async fn status(State(_state): State<Arc<DashboardState>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
@@ -251,6 +305,9 @@ async fn get_context(
         "turn": ctx.turn,
         "mode": ctx.mode,
         "user_name": ctx.user_name,
+        "cl_file": ctx.cl_file,
+        "active_state": ctx.active_state,
+        "active_templates": ctx.active_templates,
         "settings": ctx.settings,
         "custom_data": ctx.custom_data,
     })))
@@ -260,20 +317,20 @@ async fn update_context(
     State(state): State<Arc<DashboardState>>,
     Path(user_id): Path<String>,
     Json(update): Json<serde_json::Value>,
-) -> Result<String, StatusCode> {
-    let mut ctx = state.db.load_context(&user_id)
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let ctx = state.db.merge_context(&user_id, update)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Merge update into custom_data
-    if let (Some(map), Some(update_obj)) = (ctx.custom_data.as_object_mut(), update.as_object()) {
-        for (key, value) in update_obj {
-            map.insert(key.clone(), value.clone());
-        }
-    }
-
-    state.db.save_context(&ctx)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok("Context updated".to_string())
+    Ok(Json(serde_json::json!({
+        "user_id": ctx.user_id,
+        "turn": ctx.turn,
+        "mode": ctx.mode,
+        "user_name": ctx.user_name,
+        "cl_file": ctx.cl_file,
+        "active_state": ctx.active_state,
+        "active_templates": ctx.active_templates,
+        "settings": ctx.settings,
+        "custom_data": ctx.custom_data,
+    })))
 }
 
 // ── Messages ─────────────────────────────────────────────────────────────────
@@ -475,7 +532,7 @@ async fn list_pairings(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let conn = state.db.conn();
     let mut stmt = conn
-        .prepare("SELECT user_id, discord_user_id, internal_user_id, last_seen FROM pairings ORDER BY last_seen DESC")
+        .prepare("SELECT user_id, discord_user_id, discord_guild_id, paired_at, last_seen_at FROM pairings ORDER BY paired_at DESC")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let pairings: Vec<serde_json::Value> = stmt
@@ -483,8 +540,9 @@ async fn list_pairings(
             Ok(serde_json::json!({
                 "user_id": row.get::<_, String>(0)?,
                 "discord_user_id": row.get::<_, String>(1)?,
-                "internal_user_id": row.get::<_, Option<String>>(2)?,
-                "last_seen": row.get::<_, Option<String>>(3)?,
+                "discord_guild_id": row.get::<_, Option<String>>(2)?,
+                "paired_at": row.get::<_, Option<String>>(3)?,
+                "last_seen_at": row.get::<_, Option<String>>(4)?,
             }))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -504,21 +562,84 @@ async fn delete_pairing(
     Ok("Pairing deleted".to_string())
 }
 
+async fn list_pending_pairings(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let conn = state.db.conn();
+    let mut stmt = conn
+        .prepare("SELECT code, discord_user_id, expires_at, created_at FROM pending_pairings ORDER BY created_at DESC")
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let pending: Vec<serde_json::Value> = stmt
+        .query_map([], |row| {
+            Ok(serde_json::json!({
+                "code": row.get::<_, String>(0)?,
+                "discord_user_id": row.get::<_, String>(1)?,
+                "expires_at": row.get::<_, String>(2)?,
+                "created_at": row.get::<_, Option<String>>(3)?,
+            }))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_default();
+
+    Ok(Json(serde_json::json!({ "pending_pairings": pending })))
+}
+
+async fn approve_pending_pairing(
+    State(state): State<Arc<DashboardState>>,
+    Path(code): Path<String>,
+) -> Result<String, StatusCode> {
+    let pending = state.db.get_pending_pairing(&code)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let pending = match pending {
+        Some(p) => p,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+
+    let user_id = uuid::Uuid::new_v4().to_string();
+    state.db.create_pairing(&user_id, &pending.discord_user_id, None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state.db.delete_pending_pairing(&code)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(format!("Pairing approved for Discord user {}", pending.discord_user_id))
+}
+
+async fn delete_pending_pairing(
+    State(state): State<Arc<DashboardState>>,
+    Path(code): Path<String>,
+) -> Result<String, StatusCode> {
+    state.db.delete_pending_pairing(&code)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok("Pending pairing deleted".to_string())
+}
+
 // ── CL Files ─────────────────────────────────────────────────────────────────
 
-async fn list_cl_files() -> Result<Json<serde_json::Value>, StatusCode> {
+async fn list_cl_files(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
     let cl_dir = std::path::Path::new("contexts");
+    let data_cl_dir = std::path::PathBuf::from(&state.db.data_dir).join("contexts");
     let mut files = Vec::new();
-    if cl_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(cl_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("cl") {
-                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                    files.push(serde_json::json!({
-                        "name": name,
-                        "path": path.to_string_lossy(),
-                    }));
+
+    for dir in [&cl_dir, &data_cl_dir.as_path()] {
+        if dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("cl") {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        if !files.iter().any(|f: &serde_json::Value| f["name"].as_str() == Some(&name)) {
+                            files.push(serde_json::json!({
+                                "name": name,
+                                "path": path.to_string_lossy(),
+                            }));
+                        }
+                    }
                 }
             }
         }
@@ -528,21 +649,26 @@ async fn list_cl_files() -> Result<Json<serde_json::Value>, StatusCode> {
 }
 
 async fn get_cl_file(
+    State(state): State<Arc<DashboardState>>,
     Path(name): Path<String>,
 ) -> Result<String, StatusCode> {
     let path = std::path::Path::new("contexts").join(&name);
-    std::fs::read_to_string(&path).map_err(|_| StatusCode::NOT_FOUND)
+    if path.exists() {
+        return std::fs::read_to_string(&path).map_err(|_| StatusCode::NOT_FOUND);
+    }
+    let data_path = std::path::PathBuf::from(&state.db.data_dir).join("contexts").join(&name);
+    std::fs::read_to_string(&data_path).map_err(|_| StatusCode::NOT_FOUND)
 }
 
 async fn save_cl_file(
+    State(state): State<Arc<DashboardState>>,
     Path(name): Path<String>,
     Json(update): Json<ClFileUpdate>,
 ) -> Result<String, StatusCode> {
-    let cl_dir = std::path::Path::new("contexts");
-    std::fs::create_dir_all(cl_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let cl_dir = std::path::PathBuf::from(&state.db.data_dir).join("contexts");
+    std::fs::create_dir_all(&cl_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let path = cl_dir.join(&name);
 
-    // Validate CL syntax before saving
     if let Err(e) = crate::cl::parse(&update.content) {
         return Ok(format!("CL Error: {}", e));
     }

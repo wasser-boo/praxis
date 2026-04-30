@@ -49,6 +49,22 @@ async function apiFetch(path, options = {}) {
 
 // ── Screen Management ─────────────────────────────────────────────────────────
 
+async function validateTokenAndLoad() {
+    try {
+        const res = await fetch(`${API_BASE}/api/status`, {
+            headers: { 'Authorization': `Bearer ${authToken}` }
+        });
+        if (res.ok) {
+            showScreen('dashboard-screen');
+            loadOverview();
+        } else {
+            logout();
+        }
+    } catch (err) {
+        logout();
+    }
+}
+
 function showScreen(screenId) {
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
     document.getElementById(screenId).classList.add('active');
@@ -101,77 +117,172 @@ async function loadTabData(tab) {
 
 async function loadOverview() {
     try {
-        const [statusRes, contextsRes, pairingsRes] = await Promise.all([
+        const [statusRes, contextsRes, pairingsRes, pendingRes] = await Promise.all([
             apiFetch('/api/status'),
             apiFetch('/api/contexts'),
-            apiFetch('/api/pairings')
+            apiFetch('/api/pairings'),
+            apiFetch('/api/pairings/pending')
         ]);
 
         const status = await statusRes.json();
         const contexts = await contextsRes.json();
         const pairings = await pairingsRes.json();
+        const pending = await pendingRes.json();
 
         document.getElementById('version').textContent = status.version || '-';
         document.getElementById('context-count').textContent = contexts.contexts?.length || 0;
         document.getElementById('pairing-count').textContent = pairings.pairings?.length || 0;
+        document.getElementById('pending-count').textContent = pending.pending_pairings?.length || 0;
     } catch (err) {
         console.error('Failed to load overview:', err);
     }
 }
 
 async function loadContexts() {
-    const res = await apiFetch('/api/contexts');
-    const data = await res.json();
-    const list = document.getElementById('contexts-list');
+    try {
+        const res = await apiFetch('/api/contexts');
+        const data = await res.json();
+        const list = document.getElementById('contexts-list');
 
-    if (!data.contexts || data.contexts.length === 0) {
-        list.innerHTML = '<div class="data-item"><span class="name">No contexts found</span></div>';
-        return;
+        if (!data.contexts || data.contexts.length === 0) {
+            list.innerHTML = '<div class="data-item"><span class="name">No contexts found</span></div>';
+            return;
+        }
+
+        list.innerHTML = data.contexts.map(ctx => `
+            <div class="data-item">
+                <div>
+                    <span class="name">${escapeHtml(ctx.user_id)}</span>
+                    <span class="meta">Updated: ${new Date(ctx.updated_at).toLocaleString()}</span>
+                </div>
+                <div class="actions">
+                    <button class="btn btn-sm btn-primary" data-user-id="${escapeHtml(ctx.user_id)}" onclick="viewContext(this.dataset.userId)">View</button>
+                </div>
+            </div>
+        `).join('');
+    } catch (err) {
+        console.error('Failed to load contexts:', err);
     }
-
-    list.innerHTML = data.contexts.map(ctx => `
-        <div class="data-item">
-            <div>
-                <span class="name">${ctx.user_id}</span>
-                <span class="meta">Updated: ${new Date(ctx.updated_at).toLocaleString()}</span>
-            </div>
-            <div class="actions">
-                <button class="btn btn-sm btn-primary" onclick="viewContext('${ctx.user_id}')">View</button>
-            </div>
-        </div>
-    `).join('');
 }
 
 async function viewContext(userId) {
-    const res = await apiFetch(`/api/contexts/${userId}`);
-    const ctx = await res.json();
+    try {
+        const res = await apiFetch(`/api/contexts/${encodeURIComponent(userId)}`);
+        const ctx = await res.json();
 
-    showModal('Context: ' + userId, `
-        <pre class="code-editor" readonly>${JSON.stringify(ctx, null, 2)}</pre>
-    `);
+        const settingsHtml = ctx.settings ? Object.entries(ctx.settings).map(([k, v]) => `
+            <div class="data-item">
+                <span class="name">${escapeHtml(k)}</span>
+                <span class="meta">${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v ?? ''))}</span>
+            </div>
+        `).join('') : '<div class="data-item"><span class="name">No settings</span></div>';
+
+        const customDataHtml = ctx.custom_data && Object.keys(ctx.custom_data).length > 0
+            ? Object.entries(ctx.custom_data).map(([k, v]) => `
+                <div class="data-item">
+                    <span class="name">${escapeHtml(k)}</span>
+                    <span class="meta">${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</span>
+                </div>
+            `).join('')
+            : '<div class="data-item"><span class="name">None</span></div>';
+
+        const ctxJson = JSON.stringify(ctx, null, 2);
+        const uid = escapeHtml(userId);
+
+        showModal('Context: ' + uid, `
+            <div id="context-view-mode">
+                <div class="data-list" style="margin-bottom:1rem">
+                    <div class="data-item"><span class="name">User ID</span><span class="meta">${escapeHtml(ctx.user_id || '')}</span></div>
+                    <div class="data-item"><span class="name">Turn</span><span class="meta">${ctx.turn ?? 0}</span></div>
+                    <div class="data-item"><span class="name">Mode</span><span class="meta">${escapeHtml(ctx.mode || '')}</span></div>
+                    <div class="data-item"><span class="name">User Name</span><span class="meta">${escapeHtml(ctx.user_name || '-')}</span></div>
+                    <div class="data-item"><span class="name">CL File</span><span class="meta">${escapeHtml(ctx.cl_file || '-')}</span></div>
+                    <div class="data-item"><span class="name">Active State</span><span class="meta">${escapeHtml(ctx.active_state || '-')}</span></div>
+                    <div class="data-item"><span class="name">Active Templates</span><span class="meta">${(ctx.active_templates || []).join(', ') || '-'}</span></div>
+                </div>
+                <h3>Settings</h3>
+                <div class="data-list" style="margin-bottom:1rem;max-height:200px;overflow-y:auto">${settingsHtml}</div>
+                <h3>Custom Data</h3>
+                <div class="data-list" style="margin-bottom:1rem">${customDataHtml}</div>
+                <button class="btn btn-primary" style="width:auto" id="ctx-edit-btn">Edit</button>
+            </div>
+            <div id="context-edit-mode" style="display:none">
+                <textarea id="context-edit-json" class="code-editor" style="min-height:400px">${escapeHtml(ctxJson)}</textarea>
+                <div style="display:flex;gap:0.5rem;margin-top:1rem">
+                    <button class="btn btn-primary" style="width:auto" id="ctx-save-btn">Save</button>
+                    <button class="btn btn-secondary" style="width:auto" id="ctx-cancel-btn">Cancel</button>
+                </div>
+            </div>
+        `);
+
+        document.getElementById('ctx-edit-btn').addEventListener('click', () => toggleContextEdit());
+        document.getElementById('ctx-save-btn').addEventListener('click', () => saveContextEdit(userId));
+        document.getElementById('ctx-cancel-btn').addEventListener('click', () => toggleContextEdit());
+    } catch (err) {
+        console.error('Failed to load context:', err);
+    }
 }
 
-async function loadTemplates() {
-    const res = await apiFetch('/api/templates');
-    const data = await res.json();
-    const list = document.getElementById('templates-list');
+function toggleContextEdit() {
+    const view = document.getElementById('context-view-mode');
+    const edit = document.getElementById('context-edit-mode');
+    if (!view || !edit) return;
+    view.style.display = view.style.display === 'none' ? 'block' : 'none';
+    edit.style.display = edit.style.display === 'none' ? 'block' : 'none';
+}
 
-    if (!data.templates || data.templates.length === 0) {
-        list.innerHTML = '<div class="data-item"><span class="name">No templates found</span></div>';
+async function saveContextEdit(userId) {
+    const jsonStr = document.getElementById('context-edit-json').value;
+    let updates;
+    try {
+        updates = JSON.parse(jsonStr);
+    } catch (e) {
+        alert('Invalid JSON: ' + e.message);
         return;
     }
 
-    list.innerHTML = data.templates.map(t => `
-        <div class="data-item">
-            <div>
-                <span class="name">${t.name}</span>
-                <span class="meta">${t.is_system ? 'System' : 'User'}</span>
+    try {
+        const res = await apiFetch(`/api/contexts/${encodeURIComponent(userId)}`, {
+            method: 'PUT',
+            body: JSON.stringify(updates)
+        });
+
+        if (res.ok) {
+            viewContext(userId);
+        } else {
+            const text = await res.text();
+            alert('Failed to save context: ' + text);
+        }
+    } catch (err) {
+        alert('Failed to save context: ' + err.message);
+    }
+}
+
+async function loadTemplates() {
+    try {
+        const res = await apiFetch('/api/templates');
+        const data = await res.json();
+        const list = document.getElementById('templates-list');
+
+        if (!data.templates || data.templates.length === 0) {
+            list.innerHTML = '<div class="data-item"><span class="name">No templates found</span></div>';
+            return;
+        }
+
+        list.innerHTML = data.templates.map(t => `
+            <div class="data-item">
+                <div>
+                    <span class="name">${escapeHtml(t.name)}</span>
+                    <span class="meta">${t.is_system ? 'System' : 'User'}</span>
+                </div>
+                <div class="actions">
+                    <button class="btn btn-sm btn-primary" onclick="editTemplate('${escapeHtml(t.name)}')">Edit</button>
+                </div>
             </div>
-            <div class="actions">
-                <button class="btn btn-sm btn-primary" onclick="editTemplate('${t.name}')">Edit</button>
-            </div>
-        </div>
-    `).join('');
+        `).join('');
+    } catch (err) {
+        console.error('Failed to load templates:', err);
+    }
 }
 
 async function editTemplate(name) {
@@ -195,24 +306,28 @@ async function saveTemplate(name) {
 }
 
 async function loadTools() {
-    const res = await apiFetch('/api/tools');
-    const data = await res.json();
-    const list = document.getElementById('tools-list');
+    try {
+        const res = await apiFetch('/api/tools');
+        const data = await res.json();
+        const list = document.getElementById('tools-list');
 
-    if (!data.tools || data.tools.length === 0) {
-        list.innerHTML = '<div class="data-item"><span class="name">No tools found</span></div>';
-        return;
-    }
+        if (!data.tools || data.tools.length === 0) {
+            list.innerHTML = '<div class="data-item"><span class="name">No tools found</span></div>';
+            return;
+        }
 
-    list.innerHTML = data.tools.map(t => `
-        <div class="data-item">
-            <div>
-                <span class="name">${t.name}</span>
-                <span class="meta">${t.description || ''}</span>
+        list.innerHTML = data.tools.map(t => `
+            <div class="data-item">
+                <div>
+                    <span class="name">${escapeHtml(t.name)}</span>
+                    <span class="meta">${escapeHtml(t.description || '')}</span>
+                </div>
+                <div class="toggle ${t.is_enabled ? 'active' : ''}" onclick="toggleTool('${escapeHtml(t.name)}', ${!t.is_enabled})"></div>
             </div>
-            <div class="toggle ${t.is_enabled ? 'active' : ''}" onclick="toggleTool('${t.name}', ${!t.is_enabled})"></div>
-        </div>
-    `).join('');
+        `).join('');
+    } catch (err) {
+        console.error('Failed to load tools:', err);
+    }
 }
 
 async function toggleTool(name, enabled) {
@@ -224,39 +339,43 @@ async function toggleTool(name, enabled) {
 }
 
 async function loadSecrets() {
-    const res = await apiFetch('/api/secrets');
-    const data = await res.json();
-    const container = document.getElementById('secrets-content');
+    try {
+        const res = await apiFetch('/api/secrets');
+        const data = await res.json();
+        const container = document.getElementById('secrets-content');
 
-    container.innerHTML = `
-        <div class="data-list">
-            ${Object.entries(data).map(([key, value]) => `
-                <div class="data-item">
-                    <span class="name">${key}</span>
-                    <span class="meta">${value || 'Not set'}</span>
+        container.innerHTML = `
+            <div class="data-list">
+                ${Object.entries(data).map(([key, value]) => `
+                    <div class="data-item">
+                        <span class="name">${escapeHtml(key)}</span>
+                        <span class="meta">${escapeHtml(value || 'Not set')}</span>
+                    </div>
+                `).join('')}
+            </div>
+            <div style="margin-top:1.5rem">
+                <h3>Update Secrets</h3>
+                <div class="form-group">
+                    <label for="secret-field">Field</label>
+                    <select id="secret-field" style="width:100%;padding:0.75rem 1rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:1rem">
+                        ${Object.keys(data).map(k => `<option value="${k}">${escapeHtml(k)}</option>`).join('')}
+                    </select>
                 </div>
-            `).join('')}
-        </div>
-        <div style="margin-top:1.5rem">
-            <h3>Update Secrets</h3>
-            <div class="form-group">
-                <label for="secret-field">Field</label>
-                <select id="secret-field" style="width:100%;padding:0.75rem 1rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:1rem">
-                    ${Object.keys(data).map(k => `<option value="${k}">${k}</option>`).join('')}
-                </select>
+                <div class="form-group">
+                    <label for="secret-value">New Value</label>
+                    <input type="password" id="secret-value" placeholder="Enter new value">
+                </div>
+                <div class="form-group">
+                    <label for="secret-master">Master Password (required to save to disk)</label>
+                    <input type="password" id="secret-master" placeholder="Enter MASTER_KEY">
+                </div>
+                <button class="btn btn-primary" onclick="saveSecret()">Save Secret</button>
+                <p id="secret-msg" class="hidden" style="margin-top:0.5rem"></p>
             </div>
-            <div class="form-group">
-                <label for="secret-value">New Value</label>
-                <input type="password" id="secret-value" placeholder="Enter new value">
-            </div>
-            <div class="form-group">
-                <label for="secret-master">Master Password (required to save to disk)</label>
-                <input type="password" id="secret-master" placeholder="Enter MASTER_KEY">
-            </div>
-            <button class="btn btn-primary" onclick="saveSecret()">Save Secret</button>
-            <p id="secret-msg" class="hidden" style="margin-top:0.5rem"></p>
-        </div>
-    `;
+        `;
+    } catch (err) {
+        console.error('Failed to load secrets:', err);
+    }
 }
 
 async function saveSecret() {
@@ -295,26 +414,51 @@ async function saveSecret() {
 }
 
 async function loadPairings() {
-    const res = await apiFetch('/api/pairings');
-    const data = await res.json();
-    const list = document.getElementById('pairings-list');
+    try {
+        const [pairingsRes, pendingRes] = await Promise.all([
+            apiFetch('/api/pairings'),
+            apiFetch('/api/pairings/pending')
+        ]);
+        const data = await pairingsRes.json();
+        const pendingData = await pendingRes.json();
+        const list = document.getElementById('pairings-list');
+        const pendingList = document.getElementById('pending-pairings-list');
 
-    if (!data.pairings || data.pairings.length === 0) {
-        list.innerHTML = '<div class="data-item"><span class="name">No pairings found</span></div>';
-        return;
+        if (!data.pairings || data.pairings.length === 0) {
+            list.innerHTML = '<div class="data-item"><span class="name">No pairings found</span></div>';
+        } else {
+            list.innerHTML = data.pairings.map(p => `
+                <div class="data-item">
+                    <div>
+                        <span class="name">${escapeHtml(p.user_id)}</span>
+                        <span class="meta">Discord: ${escapeHtml(p.discord_user_id)} | Paired: ${escapeHtml(p.paired_at || '-')}</span>
+                    </div>
+                    <div class="actions">
+                        <button class="btn btn-sm btn-danger" onclick="deletePairing('${escapeHtml(p.user_id)}')">Delete</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        if (!pendingData.pending_pairings || pendingData.pending_pairings.length === 0) {
+            pendingList.innerHTML = '<div class="data-item"><span class="name">No pending pairings</span></div>';
+        } else {
+            pendingList.innerHTML = pendingData.pending_pairings.map(p => `
+                <div class="data-item">
+                    <div>
+                        <span class="name">${escapeHtml(p.code)}</span>
+                        <span class="meta">Discord: ${escapeHtml(p.discord_user_id)} | Expires: ${escapeHtml(p.expires_at)}</span>
+                    </div>
+                    <div class="actions">
+                        <button class="btn btn-sm btn-primary" onclick="approvePendingPairing('${escapeHtml(p.code)}')">Approve</button>
+                        <button class="btn btn-sm btn-danger" onclick="deletePendingPairing('${escapeHtml(p.code)}')">Delete</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+    } catch (err) {
+        console.error('Failed to load pairings:', err);
     }
-
-    list.innerHTML = data.pairings.map(p => `
-        <div class="data-item">
-            <div>
-                <span class="name">${p.user_id}</span>
-                <span class="meta">Discord: ${p.discord_user_id}</span>
-            </div>
-            <div class="actions">
-                <button class="btn btn-sm btn-danger" onclick="deletePairing('${p.user_id}')">Delete</button>
-            </div>
-        </div>
-    `).join('');
 }
 
 async function deletePairing(userId) {
@@ -323,24 +467,42 @@ async function deletePairing(userId) {
     loadPairings();
 }
 
+async function approvePendingPairing(code) {
+    if (!confirm('Approve this pending pairing?')) return;
+    const res = await apiFetch(`/api/pairings/pending/${code}/approve`, { method: 'POST' });
+    const text = await res.text();
+    alert(text);
+    loadPairings();
+}
+
+async function deletePendingPairing(code) {
+    if (!confirm('Delete this pending pairing?')) return;
+    await apiFetch(`/api/pairings/pending/${code}`, { method: 'DELETE' });
+    loadPairings();
+}
+
 async function loadClFiles() {
-    const res = await apiFetch('/api/cl-files');
-    const data = await res.json();
-    const list = document.getElementById('cl-files-list');
+    try {
+        const res = await apiFetch('/api/cl-files');
+        const data = await res.json();
+        const list = document.getElementById('cl-files-list');
 
-    if (!data.cl_files || data.cl_files.length === 0) {
-        list.innerHTML = '<div class="data-item"><span class="name">No CL files found</span></div>';
-        return;
-    }
+        if (!data.cl_files || data.cl_files.length === 0) {
+            list.innerHTML = '<div class="data-item"><span class="name">No CL files found</span></div>';
+            return;
+        }
 
-    list.innerHTML = data.cl_files.map(f => `
-        <div class="data-item">
-            <span class="name">${f.name}</span>
-            <div class="actions">
-                <button class="btn btn-sm btn-primary" onclick="editClFile('${f.name}')">Edit</button>
+        list.innerHTML = data.cl_files.map(f => `
+            <div class="data-item">
+                <span class="name">${escapeHtml(f.name)}</span>
+                <div class="actions">
+                    <button class="btn btn-sm btn-primary" onclick="editClFile('${escapeHtml(f.name)}')">Edit</button>
+                </div>
             </div>
-        </div>
-    `).join('');
+        `).join('');
+    } catch (err) {
+        console.error('Failed to load CL files:', err);
+    }
 }
 
 async function editClFile(name) {
@@ -348,9 +510,45 @@ async function editClFile(name) {
     const content = await res.text();
 
     showModal('Edit CL File: ' + name, `
-        <textarea id="cl-content" class="code-editor">${content}</textarea>
+        <textarea id="cl-content" class="code-editor">${escapeHtml(content)}</textarea>
         <button class="btn btn-primary" style="margin-top:1rem" onclick="saveClFile('${name}')">Save</button>
     `);
+}
+
+async function createClFile() {
+    showModal('New CL File', `
+        <div class="form-group">
+            <label for="new-cl-name">File Name</label>
+            <input type="text" id="new-cl-name" placeholder="e.g. my_workflow.cl">
+        </div>
+        <textarea id="cl-content" class="code-editor" placeholder="[state start]\nmode = chat\n\n[transitions]\n-> done</textarea>
+        <button class="btn btn-primary" style="margin-top:1rem" onclick="saveNewClFile()">Create</button>
+    `);
+}
+
+async function saveNewClFile() {
+    let name = document.getElementById('new-cl-name').value.trim();
+    const content = document.getElementById('cl-content').value;
+
+    if (!name) {
+        alert('File name is required');
+        return;
+    }
+    if (!name.endsWith('.cl')) {
+        name += '.cl';
+    }
+
+    const res = await apiFetch(`/api/cl-files/${name}`, {
+        method: 'PUT',
+        body: JSON.stringify({ content })
+    });
+    const result = await res.text();
+    if (result.includes('Error')) {
+        alert(result);
+    } else {
+        closeModal();
+        loadClFiles();
+    }
 }
 
 async function saveClFile(name) {
@@ -369,67 +567,89 @@ async function saveClFile(name) {
 }
 
 async function loadCronJobs() {
-    const res = await apiFetch('/api/cron-jobs');
-    const data = await res.json();
-    const list = document.getElementById('cron-jobs-list');
+    try {
+        const res = await apiFetch('/api/cron-jobs');
+        const data = await res.json();
+        const list = document.getElementById('cron-jobs-list');
 
-    if (!data.cron_jobs || data.cron_jobs.length === 0) {
-        list.innerHTML = '<div class="data-item"><span class="name">No cron jobs found</span></div>';
-        return;
-    }
+        if (!data.cron_jobs || data.cron_jobs.length === 0) {
+            list.innerHTML = '<div class="data-item"><span class="name">No cron jobs found</span></div>';
+            return;
+        }
 
-    list.innerHTML = data.cron_jobs.map(j => `
-        <div class="data-item">
-            <div>
-                <span class="name">${j.name}</span>
-                <span class="meta">${j.schedule} | Runs: ${j.run_count}</span>
+        list.innerHTML = data.cron_jobs.map(j => `
+            <div class="data-item">
+                <div>
+                    <span class="name">${escapeHtml(j.name)}</span>
+                    <span class="meta">${escapeHtml(j.schedule)} | Runs: ${j.run_count}</span>
+                </div>
+                <div class="toggle ${j.enabled ? 'active' : ''}"></div>
             </div>
-            <div class="toggle ${j.enabled ? 'active' : ''}"></div>
-        </div>
-    `).join('');
+        `).join('');
+    } catch (err) {
+        console.error('Failed to load cron jobs:', err);
+    }
 }
 
 async function loadMessages() {
     const userId = document.getElementById('message-user-id').value;
-    if (!userId) return;
-
-    const res = await apiFetch(`/api/messages/${userId}`);
-    const data = await res.json();
-    const list = document.getElementById('messages-list');
-
-    if (!data.messages || data.messages.length === 0) {
-        list.innerHTML = '<div class="data-item"><span class="name">No messages found</span></div>';
+    if (!userId) {
+        alert('Please enter a User ID');
         return;
     }
 
-    list.innerHTML = data.messages.map(m => `
-        <div class="message ${m.role}">
-            <div class="role">${m.role}</div>
-            <div class="content">${escapeHtml(m.content || '')}</div>
-        </div>
-    `).join('');
+    const list = document.getElementById('messages-list');
+    list.innerHTML = '<div class="data-item"><span class="name">Loading...</span></div>';
+
+    try {
+        const res = await apiFetch(`/api/messages/${userId}`);
+        const data = await res.json();
+
+        if (!data.messages || data.messages.length === 0) {
+            list.innerHTML = '<div class="data-item"><span class="name">No messages found</span></div>';
+            return;
+        }
+
+        list.innerHTML = data.messages.map(m => `
+            <div class="message ${m.role}">
+                <div class="role">${m.role}${m.tool_call_id ? ' (tool: ' + escapeHtml(m.tool_call_id) + ')' : ''}</div>
+                <div class="content">${escapeHtml(m.content || '')}</div>
+            </div>
+        `).join('');
+    } catch (err) {
+        list.innerHTML = `<div class="data-item"><span class="name" style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`;
+    }
 }
 
 async function loadMemory() {
     const userId = document.getElementById('memory-user-id').value;
-    if (!userId) return;
+    if (!userId) {
+        alert('Please enter a User ID');
+        return;
+    }
 
-    const res = await apiFetch(`/api/memory/${userId}`);
-    const data = await res.json();
     const container = document.getElementById('memory-content');
+    container.innerHTML = '<div class="data-item"><span class="name">Loading...</span></div>';
 
-    container.innerHTML = `
-        <h3>Learned Facts</h3>
-        <div class="data-list">
-            ${(data.learned_facts || []).map(f => `<div class="data-item"><span class="name">${escapeHtml(f)}</span></div>`).join('') || '<div class="data-item"><span class="name">None</span></div>'}
-        </div>
-        <h3 style="margin-top:1rem">Last Topics</h3>
-        <div class="data-list">
-            ${(data.last_topics || []).map(t => `<div class="data-item"><span class="name">${escapeHtml(t)}</span></div>`).join('') || '<div class="data-item"><span class="name">None</span></div>'}
-        </div>
-        <h3 style="margin-top:1rem">Custom Variables</h3>
-        <pre class="code-editor">${JSON.stringify(data.custom_variables || {}, null, 2)}</pre>
-    `;
+    try {
+        const res = await apiFetch(`/api/memory/${userId}`);
+        const data = await res.json();
+
+        container.innerHTML = `
+            <h3>Learned Facts</h3>
+            <div class="data-list">
+                ${(data.learned_facts || []).map(f => `<div class="data-item"><span class="name">${escapeHtml(f)}</span></div>`).join('') || '<div class="data-item"><span class="name">None</span></div>'}
+            </div>
+            <h3 style="margin-top:1rem">Last Topics</h3>
+            <div class="data-list">
+                ${(data.last_topics || []).map(t => `<div class="data-item"><span class="name">${escapeHtml(t)}</span></div>`).join('') || '<div class="data-item"><span class="name">None</span></div>'}
+            </div>
+            <h3 style="margin-top:1rem">Custom Variables</h3>
+            <pre class="code-editor">${JSON.stringify(data.custom_variables || {}, null, 2)}</pre>
+        `;
+    } catch (err) {
+        container.innerHTML = `<div class="data-item"><span class="name" style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`;
+    }
 }
 
 // ── Modal ─────────────────────────────────────────────────────────────────────
@@ -466,8 +686,7 @@ function escapeHtml(str) {
 document.addEventListener('DOMContentLoaded', () => {
     // Check if already logged in
     if (authToken) {
-        showScreen('dashboard-screen');
-        loadOverview();
+        validateTokenAndLoad();
     }
 
     // Login form

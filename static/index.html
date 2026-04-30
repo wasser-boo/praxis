@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Praxis Dashboard</title>
-    <link rel="icon" type="image/svg+xml" href="/favicon.ico">
+    <link rel="icon" type="image/svg+xml" href="/logo.svg">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -71,6 +71,10 @@
                             <h3>Pairings</h3>
                             <p id="pairing-count">0</p>
                         </div>
+                        <div class="stat-card">
+                            <h3>Pending Pairings</h3>
+                            <p id="pending-count">0</p>
+                        </div>
                     </div>
                 </div>
 
@@ -124,11 +128,16 @@
                 <div id="tab-pairings" class="tab">
                     <h2>Pairings</h2>
                     <div id="pairings-list" class="data-list"></div>
+                    <h3 style="margin-top:2rem;margin-bottom:1rem">Pending Pairings</h3>
+                    <div id="pending-pairings-list" class="data-list"></div>
                 </div>
 
                 <!-- CL Files Tab -->
                 <div id="tab-cl-files" class="tab">
                     <h2>CL Files</h2>
+                    <div style="margin-bottom:1rem">
+                        <button class="btn btn-primary" style="width:auto;padding:0.5rem 1.5rem" onclick="createClFile()">+ New CL File</button>
+                    </div>
                     <div id="cl-files-list" class="data-list"></div>
                 </div>
 

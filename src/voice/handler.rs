@@ -145,7 +145,7 @@ impl VoiceHandler {
 
 // ── Songbird Integration ─────────────────────────────────────────────────────
 
-#[cfg(feature = "voice_songbird")]
+#[cfg(feature = "songbird")]
 pub mod songbird_integration {
     use super::*;
     use songbird::events::{Event, EventContext, EventHandler as SongbirdEventHandler};
@@ -220,7 +220,7 @@ pub mod songbird_integration {
     }
 }
 
-#[cfg(not(feature = "voice_songbird"))]
+#[cfg(not(feature = "songbird"))]
 pub mod songbird_integration {
     use super::*;
 

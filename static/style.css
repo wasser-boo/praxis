@@ -385,7 +385,7 @@ body {
     border-radius: var(--radius);
     border: 1px solid var(--border);
     padding: 2rem;
-    max-width: 600px;
+    max-width: 800px;
     width: 90%;
     max-height: 80vh;
     overflow-y: auto;

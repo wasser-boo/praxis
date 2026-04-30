@@ -66,6 +66,14 @@ impl EventHandler for DiscordHandler {
         tracing::info!("Discord bot connected as {}", ready.user.name);
         use serenity::model::user::OnlineStatus;
         ctx.set_presence(None, OnlineStatus::Online);
+
+        #[cfg(feature = "songbird")]
+        {
+            if let Some(manager) = songbird::serenity::get(&ctx).await {
+                crate::discord::set_songbird_manager(manager);
+                tracing::info!("Songbird manager stored");
+            }
+        }
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
@@ -368,6 +376,166 @@ impl EventHandler for DiscordHandler {
                             ),
                         )
                         .await;
+                }
+                "join" => {
+                    let guild_id = match command.guild_id {
+                        Some(g) => g,
+                        None => {
+                            let _ = command
+                                .create_response(
+                                    &ctx.http,
+                                    serenity::builder::CreateInteractionResponse::Message(
+                                        serenity::builder::CreateInteractionResponseMessage::new()
+                                            .content("This command can only be used in a server."),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let voice_channel_id = ctx.cache.guild(guild_id)
+                        .and_then(|g| g.voice_states.get(&command.user.id).and_then(|vs| vs.channel_id));
+
+                    let voice_channel_id = match voice_channel_id {
+                        Some(id) => id,
+                        None => {
+                            let _ = command
+                                .create_response(
+                                    &ctx.http,
+                                    serenity::builder::CreateInteractionResponse::Message(
+                                        serenity::builder::CreateInteractionResponseMessage::new()
+                                            .content("You need to be in a voice channel first."),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+
+                    #[cfg(feature = "songbird")]
+                    {
+                        let manager = songbird::serenity::get(&ctx).await;
+                        if let Some(manager) = manager {
+                            match manager.join(guild_id, voice_channel_id).await {
+                                Ok(_handler) => {
+                                    crate::discord::set_discord_voice_state(
+                                        Some(guild_id.get()),
+                                        Some(command.user.id.get()),
+                                    )
+                                    .await;
+                                    tracing::info!("Joined voice channel {} in guild {}", voice_channel_id, guild_id);
+                                    let _ = command
+                                        .create_response(
+                                            &ctx.http,
+                                            serenity::builder::CreateInteractionResponse::Message(
+                                                serenity::builder::CreateInteractionResponseMessage::new()
+                                                    .content(format!("Joined <#{}>", voice_channel_id)),
+                                            ),
+                                        )
+                                        .await;
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to join voice channel: {}", e);
+                                    let _ = command
+                                        .create_response(
+                                            &ctx.http,
+                                            serenity::builder::CreateInteractionResponse::Message(
+                                                serenity::builder::CreateInteractionResponseMessage::new()
+                                                    .content(format!("Failed to join voice channel: {}", e)),
+                                            ),
+                                        )
+                                        .await;
+                                }
+                            }
+                        } else {
+                            let _ = command
+                                .create_response(
+                                    &ctx.http,
+                                    serenity::builder::CreateInteractionResponse::Message(
+                                        serenity::builder::CreateInteractionResponseMessage::new()
+                                            .content("Voice manager not available."),
+                                    ),
+                                )
+                                .await;
+                        }
+                    }
+
+                    #[cfg(not(feature = "songbird"))]
+                    {
+                        let _ = command
+                            .create_response(
+                                &ctx.http,
+                                serenity::builder::CreateInteractionResponse::Message(
+                                    serenity::builder::CreateInteractionResponseMessage::new()
+                                        .content("Voice support not compiled. Build with --features songbird"),
+                                ),
+                            )
+                            .await;
+                    }
+                }
+                "disconnect" => {
+                    let guild_id = match command.guild_id {
+                        Some(g) => g,
+                        None => {
+                            let _ = command
+                                .create_response(
+                                    &ctx.http,
+                                    serenity::builder::CreateInteractionResponse::Message(
+                                        serenity::builder::CreateInteractionResponseMessage::new()
+                                            .content("This command can only be used in a server."),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+
+                    #[cfg(feature = "songbird")]
+                    {
+                        let manager = songbird::serenity::get(&ctx).await;
+                        if let Some(manager) = manager {
+                            if manager.get(guild_id).is_some() {
+                                if let Err(e) = manager.remove(guild_id).await {
+                                    tracing::error!("Failed to disconnect: {}", e);
+                                }
+                                crate::discord::set_discord_voice_state(None, None).await;
+                                tracing::info!("Disconnected from voice in guild {}", guild_id);
+                                let _ = command
+                                    .create_response(
+                                        &ctx.http,
+                                        serenity::builder::CreateInteractionResponse::Message(
+                                            serenity::builder::CreateInteractionResponseMessage::new()
+                                                .content("Disconnected from voice channel."),
+                                        ),
+                                    )
+                                    .await;
+                            } else {
+                                let _ = command
+                                    .create_response(
+                                        &ctx.http,
+                                        serenity::builder::CreateInteractionResponse::Message(
+                                            serenity::builder::CreateInteractionResponseMessage::new()
+                                                .content("Not in a voice channel."),
+                                        ),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+
+                    #[cfg(not(feature = "songbird"))]
+                    {
+                        let _ = command
+                            .create_response(
+                                &ctx.http,
+                                serenity::builder::CreateInteractionResponse::Message(
+                                    serenity::builder::CreateInteractionResponseMessage::new()
+                                        .content("Voice support not compiled."),
+                                ),
+                            )
+                            .await;
+                    }
                 }
                 _ => {}
             }

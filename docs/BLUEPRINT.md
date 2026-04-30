@@ -320,7 +320,7 @@ description = "AI Agent Platform — Praxis"
 default = []
 voice_vosk = ["vosk"]
 voice_whisper = ["whisper-rs"]
-voice_songbird = ["songbird"]
+songbird = ["dep:songbird"]
 vosk = ["dep:vosk"]
 
 [dependencies]
