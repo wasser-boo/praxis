@@ -427,23 +427,51 @@ impl EventHandler for DiscordHandler {
                                     )
                                     .await;
 
+                                    // Check context for deafened setting
+                                    let discord_user_id = command.user.id.to_string();
+                                    let should_deafen = match self.db.get_pairing_by_discord(&discord_user_id) {
+                                        Ok(Some(pairing)) => {
+                                            match self.db.load_context(&pairing.user_id) {
+                                                Ok(ctx) => ctx.settings.voice_deafened,
+                                                Err(_) => true,
+                                            }
+                                        }
+                                        _ => true,
+                                    };
+
+                                    {
+                                        let mut call_lock = call.lock().await;
+                                        let _ = call_lock.deafen(should_deafen).await;
+                                    }
+                                    *self.voice_deafened.lock().await = should_deafen;
+                                    tracing::info!("Voice: Bot deafened={} (from context)", should_deafen);
+
                                     // Set up voice handler and transcription pipeline
                                     let voice_handler = Arc::new(crate::voice::handler::VoiceHandler::new());
+
+                                    // Set fallback user from the Discord user who invoked /join
+                                    let fallback_discord_id = command.user.id.get();
+                                    if let Ok(Some(pairing)) = self.db.get_pairing_by_discord(&fallback_discord_id.to_string()) {
+                                        if let Ok(uid) = pairing.user_id.parse::<u64>() {
+                                            voice_handler.set_fallback_user(uid).await;
+                                        }
+                                    }
+
                                     let voice_receiver = crate::voice::handler::songbird_integration::VoiceReceiver::new(voice_handler.clone());
 
                                     // Register event handler on the call
                                     {
                                         let mut call_lock = call.lock().await;
                                         call_lock.add_global_event(
-                                            songbird::events::Event::SpeakingStateUpdate,
+                                            songbird::events::Event::Core(songbird::events::CoreEvent::SpeakingStateUpdate),
                                             voice_receiver.clone(),
                                         );
                                         call_lock.add_global_event(
-                                            songbird::events::Event::VoiceTick,
+                                            songbird::events::Event::Core(songbird::events::CoreEvent::VoiceTick),
                                             voice_receiver.clone(),
                                         );
                                         call_lock.add_global_event(
-                                            songbird::events::Event::ClientDisconnect,
+                                            songbird::events::Event::Core(songbird::events::CoreEvent::ClientDisconnect),
                                             voice_receiver.clone(),
                                         );
                                     }
@@ -482,7 +510,7 @@ impl EventHandler for DiscordHandler {
                                                 user_id: user_id.clone(),
                                                 ..Default::default()
                                             });
-                                            let stt_type = ctx.settings.voice_stt_type.clone().unwrap_or_else(|| "vosk".to_string());
+                                            let stt_type = ctx.settings.voice_stt_type.clone();
                                             let api_key = ctx.settings.voice_elevenlabs_api_key.clone()
                                                 .or_else(|| secrets.elevenlabs_api_key.clone());
                                             let model_path = match stt_type.as_str() {
@@ -518,7 +546,7 @@ impl EventHandler for DiscordHandler {
                                             tracing::info!("VOICE_PIPELINE: Transcribed for user {}: '{}'", user_id, text);
 
                                             // Check wake words
-                                            let wake_words = ctx.settings.voice_wake_words.clone().unwrap_or_default();
+                                            let wake_words = ctx.settings.voice_wake_words.clone();
                                             let wake_match = crate::voice::wake_word::matches_wake_word(&text, &wake_words);
 
                                             if !wake_match.matched {

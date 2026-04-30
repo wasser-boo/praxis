@@ -20,6 +20,7 @@ pub struct VoiceHandler {
     pub transcription_tx: Arc<Mutex<Option<mpsc::Sender<(u64, Vec<i16>)>>>>,
     pub user_buffers: Arc<DashMap<u32, Vec<i16>>>,
     pub user_last_speech: Arc<DashMap<u32, std::time::Instant>>,
+    pub fallback_user_id: Arc<Mutex<Option<u64>>>,
 }
 
 impl VoiceHandler {
@@ -35,7 +36,13 @@ impl VoiceHandler {
             transcription_tx: Arc::new(Mutex::new(None)),
             user_buffers: Arc::new(DashMap::new()),
             user_last_speech: Arc::new(DashMap::new()),
+            fallback_user_id: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub async fn set_fallback_user(&self, user_id: u64) {
+        *self.fallback_user_id.lock().await = Some(user_id);
+        tracing::info!("Voice: fallback user set to {}", user_id);
     }
 
     pub async fn set_transcription_channel(&self, tx: mpsc::Sender<(u64, Vec<i16>)>) {
@@ -45,7 +52,8 @@ impl VoiceHandler {
 
     pub fn set_ssrc_user(&self, ssrc: u32, user_id: u64) {
         self.ssrc_to_user.insert(ssrc, user_id);
-        tracing::debug!("SSRC {} -> user {}", ssrc, user_id);
+        let buffered = self.user_buffers.get(&ssrc).map(|b| b.len()).unwrap_or(0);
+        tracing::info!("SSRC {} -> user {} ({} buffered samples pending)", ssrc, user_id, buffered);
     }
 
     pub fn get_user_from_ssrc(&self, ssrc: u32) -> Option<u64> {
@@ -71,23 +79,29 @@ impl VoiceHandler {
             drop(last_time);
             let mut last_ssrc = self.last_active_ssrc.lock().await;
             *last_ssrc = Some(ssrc);
-            tracing::debug!("VOICE: Speech detected (ssrc={}, buffer={} samples)", ssrc,
+            let user_mapped = self.get_user_from_ssrc(ssrc).is_some();
+            tracing::debug!("VOICE: Speech detected (ssrc={}, mapped={}, buffer={} samples)",
+                ssrc, user_mapped,
                 self.user_buffers.get(&ssrc).map(|b| b.len()).unwrap_or(0));
         }
     }
 
     pub async fn process_audio(&self, current_ssrc: u32) {
+        // Get user: either from SSRC mapping or fallback
+        let user_id = match self.get_user_from_ssrc(current_ssrc) {
+            Some(uid) => uid,
+            None => {
+                match *self.fallback_user_id.lock().await {
+                    Some(uid) => uid,
+                    None => return,
+                }
+            }
+        };
+
         let time_since_speech = self.time_since_last_speech().await;
         let pause_threshold = std::time::Duration::from_secs_f32(0.8);
 
         if time_since_speech < pause_threshold {
-            tracing::trace!("VOICE_HANDLER: Still speaking ({}ms since last audio), waiting for pause...",
-                time_since_speech.as_millis());
-            return;
-        }
-
-        if self.get_user_from_ssrc(current_ssrc).is_none() {
-            tracing::trace!("VOICE_HANDLER: SSRC {} not mapped yet, keeping buffer", current_ssrc);
             return;
         }
 
@@ -97,33 +111,22 @@ impl VoiceHandler {
             entry.clear();
             (len, data)
         } else {
-            let mut buffer = self.audio_buffer.lock().await;
-            let len = buffer.len();
-            let data = buffer.clone();
-            buffer.clear();
-            (len, data)
+            return;
         };
 
         let min_duration_secs = 0.3;
         let min_samples = (self.sample_rate as f32 * min_duration_secs) as usize;
 
         if buffer_len < min_samples {
-            tracing::trace!("VOICE_HANDLER: Buffer only {} samples (min {}), ignoring", buffer_len, min_samples);
             return;
         }
 
-        tracing::info!("VOICE_HANDLER: Pause detected ({}ms), sending {} samples for transcription (ssrc={})",
-            time_since_speech.as_millis(), buffer_len, current_ssrc);
-        if let Some(user_id) = self.get_user_from_ssrc(current_ssrc) {
-            let tx_guard = self.transcription_tx.lock().await;
-            if let Some(tx) = tx_guard.as_ref() {
-                tracing::info!("VOICE_HANDLER: SSRC {} -> user {}, sending to transcription channel", current_ssrc, user_id);
-                let _ = tx.send((user_id, audio_data)).await;
-            } else {
-                tracing::warn!("VOICE_HANDLER: transcription_tx is None!");
-            }
-        } else {
-            tracing::warn!("VOICE_HANDLER: No user_id for SSRC {} - audio discarded ({} samples). Waiting for SpeakingStateUpdate.", current_ssrc, buffer_len);
+        tracing::info!("VOICE_HANDLER: Pause detected ({}ms), sending {} samples for transcription (ssrc={}, user={})",
+            time_since_speech.as_millis(), buffer_len, current_ssrc, user_id);
+
+        let tx_guard = self.transcription_tx.lock().await;
+        if let Some(tx) = tx_guard.as_ref() {
+            let _ = tx.send((user_id, audio_data)).await;
         }
     }
 
@@ -172,22 +175,31 @@ pub mod songbird_integration {
         async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
             match ctx {
                 EventContext::SpeakingStateUpdate(speaking) => {
-                    tracing::trace!("VOICETICK: SpeakingStateUpdate: ssrc={}, user_id={:?}, speaking={:?}", speaking.ssrc, speaking.user_id, speaking.speaking);
+                    tracing::info!("VOICE_EVENT: SpeakingStateUpdate ssrc={}, user_id={:?}, speaking={:?}", speaking.ssrc, speaking.user_id, speaking.speaking);
                     if let Some(user_id) = speaking.user_id {
                         self.handler.set_ssrc_user(speaking.ssrc, user_id.0);
                     }
                 },
                 EventContext::VoiceTick(tick) => {
                     let speaking_count = tick.speaking.len();
-                    let silent_count = tick.silent.len();
                     if speaking_count > 0 {
-                        tracing::debug!("VOICETICK: {} user(s) speaking", speaking_count);
+                        let mapped: Vec<String> = tick.speaking.keys()
+                            .filter_map(|ssrc| self.handler.get_user_from_ssrc(*ssrc).map(|u| format!("{}->{}", ssrc, u)))
+                            .collect();
+                        let unmapped: Vec<u32> = tick.speaking.keys()
+                            .filter(|ssrc| self.handler.get_user_from_ssrc(**ssrc).is_none())
+                            .copied()
+                            .collect();
+                        if !unmapped.is_empty() {
+                            tracing::info!("VOICETICK: {} speaking, mapped=[{}], unmapped={:?}",
+                                speaking_count, mapped.join(", "), unmapped);
+                        }
                     }
                     for (ssrc, data) in &tick.speaking {
                         let user_id_str = self.handler.get_user_from_ssrc(*ssrc).map(|u| u.to_string()).unwrap_or_else(|| "?".into());
                         tracing::trace!("VOICETICK: Processing SSRC {}/{}", ssrc, user_id_str);
                         if self.handler.get_user_from_ssrc(*ssrc).is_none() {
-                            tracing::warn!("VOICETICK: Unknown SSRC {} - no user mapping yet, buffering audio anyway", ssrc);
+                            tracing::debug!("VOICETICK: Unknown SSRC {} - buffering audio, waiting for SpeakingStateUpdate", ssrc);
                         }
                         if let Some(decoded_voice) = &data.decoded_voice {
                             let non_zero = decoded_voice.iter().filter(|&&s| s != 0).count();
@@ -199,21 +211,29 @@ pub mod songbird_integration {
                             tracing::trace!("VOICETICK: SSRC {} ({}) - no decoded voice", ssrc, user_id_str);
                         }
                     }
-                    let ssrc_to_use = tick.speaking.iter().next().map(|(s, _)| *s)
-                        .or_else(|| {
-                            self.handler.last_active_ssrc.try_lock().ok().and_then(|g| g.as_ref().copied())
-                        });
-                    if let Some(ssrc) = ssrc_to_use {
+                    // Process audio for all speaking users and any SSRC with pending buffered audio
+                    let mut ssrcs_to_process: Vec<u32> = tick.speaking.keys().copied().collect();
+                    // Also check SSRCs that have buffers (might have been buffered before mapping)
+                    for entry in self.handler.user_buffers.iter() {
+                        let ssrc = *entry.key();
+                        if !ssrcs_to_process.contains(&ssrc) && !entry.value().is_empty() {
+                            ssrcs_to_process.push(ssrc);
+                        }
+                    }
+                    for ssrc in ssrcs_to_process {
                         let _ = self.handler.process_audio(ssrc).await;
                     }
                 },
                 EventContext::ClientDisconnect(disc) => {
-                    tracing::debug!("Client disconnect: user_id={}", disc.user_id);
+                    tracing::debug!("VOICE_EVENT: ClientDisconnect user_id={}", disc.user_id);
                     if disc.user_id.0 != 0 {
                         self.handler.remove_user(disc.user_id.0);
                     }
                 },
-                _ => {}
+                other => {
+                    tracing::debug!("VOICE_EVENT: Other event type received");
+                    let _ = other;
+                }
             }
             None
         }
