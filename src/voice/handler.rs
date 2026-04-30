@@ -63,8 +63,22 @@ impl VoiceHandler {
         *lock = Some(tx);
     }
 
-    pub fn set_ssrc_user(&self, ssrc: u32, user_id: u64) {
+    pub async fn set_ssrc_user(&self, ssrc: u32, user_id: u64) {
         self.ssrc_to_user.insert(ssrc, user_id);
+
+        // If this user is not allowed, discard any buffered audio immediately
+        if !self.is_user_allowed(user_id).await {
+            if let Some(mut buf) = self.user_buffers.get_mut(&ssrc) {
+                let dropped = buf.len();
+                buf.clear();
+                if dropped > 0 {
+                    tracing::info!("SSRC {} -> user {} (NOT allowed, dropped {} buffered samples)", ssrc, user_id, dropped);
+                }
+            }
+            tracing::info!("SSRC {} -> user {} (not in allowed list, audio discarded)", ssrc, user_id);
+            return;
+        }
+
         let buffered = self.user_buffers.get(&ssrc).map(|b| b.len()).unwrap_or(0);
         tracing::info!("SSRC {} -> user {} ({} buffered samples pending)", ssrc, user_id, buffered);
     }
@@ -79,9 +93,17 @@ impl VoiceHandler {
     }
 
     pub async fn add_audio_raw(&self, audio: &[i16], ssrc: u32) {
-        // If SSRC is mapped to a user, check if they're allowed
-        if let Some(discord_id) = self.get_user_from_ssrc(ssrc) {
-            if !self.is_user_allowed(discord_id).await {
+        // Only buffer audio from users whose SSRC is already mapped and allowed.
+        // Unmapped SSRCs are rejected to prevent non-paired users' audio from
+        // being buffered before we learn their identity.
+        match self.get_user_from_ssrc(ssrc) {
+            Some(discord_id) => {
+                if !self.is_user_allowed(discord_id).await {
+                    return;
+                }
+            }
+            None => {
+                tracing::trace!("VOICETICK: Dropping audio from unmapped SSRC {}", ssrc);
                 return;
             }
         }
@@ -204,7 +226,7 @@ pub mod songbird_integration {
                 EventContext::SpeakingStateUpdate(speaking) => {
                     tracing::info!("VOICE_EVENT: SpeakingStateUpdate ssrc={}, user_id={:?}, speaking={:?}", speaking.ssrc, speaking.user_id, speaking.speaking);
                     if let Some(user_id) = speaking.user_id {
-                        self.handler.set_ssrc_user(speaking.ssrc, user_id.0);
+                        self.handler.set_ssrc_user(speaking.ssrc, user_id.0).await;
                     }
                 },
                 EventContext::VoiceTick(tick) => {
@@ -219,11 +241,13 @@ pub mod songbird_integration {
                         }
                     }
                     for (ssrc, data) in &tick.speaking {
+                        // Skip unmapped SSRCs entirely - audio won't be buffered
+                        if self.handler.get_user_from_ssrc(*ssrc).is_none() {
+                            tracing::trace!("VOICETICK: Skipping unmapped SSRC {}", ssrc);
+                            continue;
+                        }
                         let user_id_str = self.handler.get_user_from_ssrc(*ssrc).map(|u| u.to_string()).unwrap_or_else(|| "?".into());
                         tracing::trace!("VOICETICK: Processing SSRC {}/{}", ssrc, user_id_str);
-                        if self.handler.get_user_from_ssrc(*ssrc).is_none() {
-                            tracing::debug!("VOICETICK: Unknown SSRC {} - buffering audio, waiting for SpeakingStateUpdate", ssrc);
-                        }
                         if let Some(decoded_voice) = &data.decoded_voice {
                             let non_zero = decoded_voice.iter().filter(|&&s| s != 0).count();
                             tracing::trace!("VOICETICK: SSRC {} ({}) - {} samples, {} non-zero", ssrc, user_id_str, decoded_voice.len(), non_zero);
@@ -236,7 +260,7 @@ pub mod songbird_integration {
                     }
                     // Process audio for all speaking users and any SSRC with pending buffered audio
                     let mut ssrcs_to_process: Vec<u32> = tick.speaking.keys().copied().collect();
-                    // Also check SSRCs that have buffers (might have been buffered before mapping)
+                    // Also check SSRCs that have buffers
                     for entry in self.handler.user_buffers.iter() {
                         let ssrc = *entry.key();
                         if !ssrcs_to_process.contains(&ssrc) && !entry.value().is_empty() {
@@ -300,7 +324,7 @@ mod handler_tests {
     #[tokio::test]
     async fn test_ssrc_user_mapping() {
         let handler = VoiceHandler::new();
-        handler.set_ssrc_user(100, 42);
+        handler.set_ssrc_user(100, 42).await;
         assert_eq!(handler.get_user_from_ssrc(100), Some(42));
         assert_eq!(handler.get_user_from_ssrc(999), None);
     }
@@ -308,8 +332,8 @@ mod handler_tests {
     #[tokio::test]
     async fn test_remove_user() {
         let handler = VoiceHandler::new();
-        handler.set_ssrc_user(100, 42);
-        handler.set_ssrc_user(200, 42);
+        handler.set_ssrc_user(100, 42).await;
+        handler.set_ssrc_user(200, 42).await;
         handler.remove_user(42);
         assert!(handler.get_user_from_ssrc(100).is_none());
         assert!(handler.get_user_from_ssrc(200).is_none());
@@ -328,7 +352,7 @@ mod handler_tests {
     #[tokio::test]
     async fn test_add_audio_raw_updates_buffer() {
         let handler = VoiceHandler::new();
-        handler.set_ssrc_user(100, 42);
+        handler.set_ssrc_user(100, 42).await;
         let audio = vec![1000i16; 1600]; // 0.1s at 16kHz
         handler.add_audio_raw(&audio, 100).await;
 
@@ -339,8 +363,8 @@ mod handler_tests {
     #[tokio::test]
     async fn test_add_audio_raw_per_user_buffer() {
         let handler = VoiceHandler::new();
-        handler.set_ssrc_user(100, 42);
-        handler.set_ssrc_user(200, 99);
+        handler.set_ssrc_user(100, 42).await;
+        handler.set_ssrc_user(200, 99).await;
 
         handler.add_audio_raw(&vec![1000i16; 100], 100).await;
         handler.add_audio_raw(&vec![2000i16; 200], 200).await;
@@ -356,7 +380,7 @@ mod handler_tests {
         let handler = VoiceHandler::new();
         let (tx, mut rx) = mpsc::channel::<(String, Vec<i16>)>(10);
         handler.set_transcription_channel(tx).await;
-        handler.set_ssrc_user(100, 42);
+        handler.set_ssrc_user(100, 42).await;
 
         let audio = vec![1000i16; 16000]; // 1s at 16kHz
         handler.add_audio_raw(&audio, 100).await;
@@ -380,9 +404,12 @@ mod handler_tests {
         let (tx, _rx) = mpsc::channel::<(String, Vec<i16>)>(10);
         handler.set_transcription_channel(tx).await;
 
-        // Add audio without SSRC mapping
+        // Add audio without SSRC mapping - should be dropped (unmapped SSRC)
         let audio = vec![1000i16; 16000];
         handler.add_audio_raw(&audio, 999).await;
+
+        // Verify no audio was buffered for the unmapped SSRC
+        assert!(handler.user_buffers.get(&999).is_none());
 
         // Reset speech time
         {
@@ -390,14 +417,14 @@ mod handler_tests {
             *last = std::time::Instant::now() - std::time::Duration::from_secs(1);
         }
 
-        // Should not panic, just log warning
+        // Should not panic, just return early
         handler.process_audio(999).await;
     }
 
     #[tokio::test]
     async fn test_process_audio_too_short() {
         let handler = VoiceHandler::new();
-        handler.set_ssrc_user(100, 42);
+        handler.set_ssrc_user(100, 42).await;
         let (tx, mut rx) = mpsc::channel::<(String, Vec<i16>)>(10);
         handler.set_transcription_channel(tx).await;
 

@@ -1,3 +1,4 @@
+pub mod agent_loop;
 pub mod auth;
 pub mod cron_scheduler;
 pub mod http_handler;

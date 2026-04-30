@@ -6,8 +6,17 @@ pub async fn handle_message(
     state: &GatewayState,
     user_id: &str,
     content: &str,
+    channel_id: Option<&str>,
 ) -> anyhow::Result<String> {
     let ctx = state.db.load_context(user_id)?;
+    let max_turns = ctx.settings.max_llm_turns.unwrap_or(1);
+
+    // Use agent loop when max_turns > 1
+    if max_turns > 1 {
+        return handle_message_agent_loop(state, user_id, content, channel_id, &ctx, max_turns).await;
+    }
+
+    // Legacy single-pass path (max_turns == 1)
     let _ = state.db.save_context(&ctx);
 
     state.db.add_message(
@@ -106,7 +115,6 @@ pub async fn handle_message(
         state.db.increment_turn(&mut updated_ctx);
         state.db.save_context(&updated_ctx)?;
 
-        // TTS: spawn if enabled
         if updated_ctx.settings.use_tts {
             spawn_tts(reply.clone(), &updated_ctx.settings, &state.secrets, user_id);
         }
@@ -129,8 +137,92 @@ pub async fn handle_message(
     state.db.increment_turn(&mut updated_ctx);
     state.db.save_context(&updated_ctx)?;
 
-    // TTS: spawn if enabled
     if updated_ctx.settings.use_tts {
+        spawn_tts(reply.clone(), &updated_ctx.settings, &state.secrets, user_id);
+    }
+
+    Ok(reply)
+}
+
+async fn handle_message_agent_loop(
+    state: &GatewayState,
+    user_id: &str,
+    content: &str,
+    channel_id: Option<&str>,
+    ctx: &crate::db::contexts::Context,
+    max_turns: i32,
+) -> anyhow::Result<String> {
+    let feedback_modes = &ctx.settings.feedback_mode;
+    let feedback_channel = ctx.settings.feedback_channel_id.clone().or_else(|| channel_id.map(|s| s.to_string()));
+    let user_id_owned = user_id.to_string();
+    let secrets = state.secrets.clone();
+    let settings = ctx.settings.clone();
+
+    let config = crate::gateway::agent_loop::AgentLoopConfig {
+        max_turns,
+        max_tool_calls: ctx.settings.max_tool_calls.unwrap_or(5),
+        tags_enabled: ctx.settings.tags_enabled,
+        cl_file: ctx.settings.cl_file.clone().or(ctx.cl_file.clone()),
+        feedback_enabled: !feedback_modes.is_empty(),
+    };
+
+    let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    // Spawn feedback routing task
+    if !feedback_modes.is_empty() {
+        let feedback_modes = feedback_modes.clone();
+        let uid = user_id_owned.clone();
+        let ch = feedback_channel.clone();
+        let tts_settings = settings.clone();
+        let tts_secrets = secrets.clone();
+
+        tokio::spawn(async move {
+            while let Some(msg) = feedback_rx.recv().await {
+                for mode in &feedback_modes {
+                    match mode.as_str() {
+                        "tts" => {
+                            spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid);
+                        }
+                        "dm" => {
+                            crate::event_channel::broadcast_agent_feedback(&uid, &msg);
+                        }
+                        "text" => {
+                            let sent_to_channel = ch.as_ref().map_or(false, |ch_id| {
+                                if ch_id.parse::<u64>().ok().filter(|&id| id > 0).is_some() {
+                                    crate::event_channel::broadcast_channel_message(&uid, ch_id, &msg);
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+                            if !sent_to_channel {
+                                crate::event_channel::broadcast_agent_feedback(&uid, &msg);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+    }
+
+    let result = crate::gateway::agent_loop::run_agent_loop(
+        state,
+        user_id,
+        content,
+        config,
+        Some(feedback_tx),
+    ).await?;
+
+    let reply = result.response.clone();
+
+    let mut updated_ctx = state.db.load_context(user_id)?;
+    state.db.increment_turn(&mut updated_ctx);
+    state.db.save_context(&updated_ctx)?;
+
+    // Final response TTS: always speak if use_tts is on, or if input came from voice
+    let is_voice_input = channel_id.map_or(false, |ch| ch.starts_with("voice:"));
+    if updated_ctx.settings.use_tts || is_voice_input {
         spawn_tts(reply.clone(), &updated_ctx.settings, &state.secrets, user_id);
     }
 

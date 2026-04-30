@@ -71,14 +71,14 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                 };
 
                 match incoming {
-                    WsIncoming::Message { user_id, content, channel_id: _ } => {
+                    WsIncoming::Message { user_id, content, channel_id } => {
                         let feedback = WsOutgoing::Feedback {
                             user_id: user_id.clone(),
                             content: "Thinking...".to_string(),
                         };
                         let _ = sender.send(Message::Text(serde_json::to_string(&feedback).unwrap())).await;
 
-                        match crate::gateway::message_handler::handle_message(&state, &user_id, &content).await {
+                        match crate::gateway::message_handler::handle_message(&state, &user_id, &content, channel_id.as_deref()).await {
                             Ok(reply) => {
                                 let response = WsOutgoing::Response {
                                     user_id,
