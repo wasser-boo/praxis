@@ -100,10 +100,12 @@ impl VoiceHandler {
                 }
             }
             None => {
+                // No SSRC mapping yet - still buffer audio, we'll use fallback user later
                 let current_len = self.user_buffers.get(&ssrc).map(|b| b.len()).unwrap_or(0);
                 if current_len >= MAX_UNMAPPED_SAMPLES {
                     return;
                 }
+                tracing::debug!("VOICE_HANDLER: No SSRC mapping for {}, buffering anyway ({} samples)", ssrc, current_len);
             }
         }
 
@@ -140,8 +142,18 @@ impl VoiceHandler {
                 discord_id.to_string()
             }
             None => {
-                tracing::debug!("VOICE_HANDLER: No SSRC mapping for {}, waiting for SpeakingStateUpdate", current_ssrc);
-                return;
+                // No SSRC mapping - use fallback user if available
+                let fallback = self.fallback_user_id.lock().await.clone();
+                match fallback {
+                    Some(user_id) => {
+                        tracing::debug!("VOICE_HANDLER: No SSRC mapping for {}, using fallback user {}", current_ssrc, user_id);
+                        user_id
+                    }
+                    None => {
+                        tracing::debug!("VOICE_HANDLER: No SSRC mapping for {} and no fallback user, waiting for SpeakingStateUpdate", current_ssrc);
+                        return;
+                    }
+                }
             }
         };
 
@@ -255,6 +267,14 @@ pub mod songbird_integration {
                         if let Some(decoded_voice) = &data.decoded_voice {
                             let non_zero = decoded_voice.iter().filter(|&&s| s != 0).count();
                             if non_zero > 0 {
+                                // If we don't have SSRC mapping yet, try to use fallback user
+                                if self.handler.get_user_from_ssrc(*ssrc).is_none() {
+                                    if let Some(fallback) = self.handler.fallback_user_id.lock().await.as_ref() {
+                                        tracing::debug!("VOICE_EVENT: No SSRC mapping for {}, using fallback user {}", ssrc, fallback);
+                                        // We can't set_ssrc_user here because we don't know the real Discord ID
+                                        // Just add audio with unknown SSRC - it will be buffered
+                                    }
+                                }
                                 self.handler.add_audio_raw(decoded_voice, *ssrc).await;
                             }
                         }
@@ -275,12 +295,6 @@ pub mod songbird_integration {
                     if disc.user_id.0 != 0 {
                         self.handler.remove_user(disc.user_id.0);
                     }
-                },
-                EventContext::DriverConnect(info) => {
-                    tracing::info!("VOICE_EVENT: DriverConnect ssrc={}", info.ssrc);
-                },
-                EventContext::DriverDisconnect(info) => {
-                    tracing::warn!("VOICE_EVENT: DriverDisconnect reason={:?}", info.reason);
                 },
                 _ => {},
             }

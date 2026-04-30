@@ -269,7 +269,7 @@ impl Default for ContextSettings {
             compaction_enabled: false,
             compaction_summary: String::new(),
             agent_name: "assistant".to_string(),
-            voice_wake_words: Vec::new(),
+            voice_wake_words: vec!["*".to_string()],
             feedback_mode: Vec::new(),
             feedback_channel_id: None,
         }
