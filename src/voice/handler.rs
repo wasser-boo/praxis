@@ -159,11 +159,8 @@ impl VoiceHandler {
             }
         };
 
-        if !*self.auto_pause_enabled.lock().await {
-            return;
-        }
-
-        let pause_threshold = std::time::Duration::from_secs_f32(0.5);
+        let max_buffer_samples = self.sample_rate as usize * 3; // 3 seconds
+        let pause_threshold = std::time::Duration::from_secs_f32(1.5);
 
         let time_since_speech = if let Some(last) = self.user_last_speech.get(&current_ssrc) {
             last.elapsed()
@@ -171,7 +168,10 @@ impl VoiceHandler {
             return;
         };
 
-        if time_since_speech < pause_threshold {
+        let is_pause = time_since_speech >= pause_threshold;
+        let buffer_full = self.user_buffers.get(&current_ssrc).map(|b| b.len() >= max_buffer_samples).unwrap_or(false);
+
+        if !is_pause && !buffer_full {
             return;
         }
 
@@ -184,16 +184,13 @@ impl VoiceHandler {
             return;
         };
 
-        let min_duration_secs = 0.2;
-        let min_samples = (self.sample_rate as f32 * min_duration_secs) as usize;
-
-        if buffer_len < min_samples {
-            tracing::debug!("VOICE_HANDLER: Pause detected but buffer too short ({} samples < {} min), discarding ssrc={}", buffer_len, min_samples, current_ssrc);
+        if buffer_len == 0 {
             return;
         }
 
-        tracing::info!("VOICE_HANDLER: Pause detected ({}ms), sending {} samples for transcription (ssrc={}, user={})",
-            time_since_speech.as_millis(), buffer_len, current_ssrc, user_id);
+        let reason = if is_pause { "pause" } else { "buffer full" };
+        tracing::info!("VOICE_HANDLER: {} ({}ms since speech), sending {} samples for transcription (ssrc={}, user={})",
+            reason, time_since_speech.as_millis(), buffer_len, current_ssrc, user_id);
 
         let tx_guard = self.transcription_tx.lock().await;
         if let Some(tx) = tx_guard.as_ref() {
