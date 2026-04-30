@@ -278,14 +278,6 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
 async fn handle_voice_tts(user_id: String, audio_data: Vec<u8>) {
     tracing::info!("Voice TTS for user {}: {} bytes", user_id, audio_data.len());
 
-    let is_mp3 = audio_data.len() >= 3 &&
-        audio_data[0] == 0x49 && audio_data[1] == 0x44 && audio_data[2] == 0x33;
-    let original_sample_rate = if is_mp3 {
-        44100
-    } else {
-        crate::voice::tts::get_wav_sample_rate(&audio_data).unwrap_or(48000)
-    };
-
     if let Some(voice_state) = get_discord_voice_state() {
         let guard = voice_state.lock().await;
         if let Some(guild_id) = guard.guild_id {
@@ -293,7 +285,8 @@ async fn handle_voice_tts(user_id: String, audio_data: Vec<u8>) {
             if let Some(manager) = get_songbird_manager() {
                 if let Some(handler) = manager.get(songbird::id::GuildId::from(std::num::NonZeroU64::new(guild_id).unwrap())) {
                     match crate::voice::tts::audio_bytes_to_pcm(&audio_data) {
-                        Ok(samples) if !samples.is_empty() => {
+                        Ok((samples, original_sample_rate)) if !samples.is_empty() => {
+                            tracing::info!("TTS decoded: {} samples at {} Hz", samples.len(), original_sample_rate);
                             let wav_data = crate::voice::pcm_to_wav(&samples, original_sample_rate, 1);
                             let mut call = handler.lock().await;
                             let source = songbird::input::Input::from(wav_data);

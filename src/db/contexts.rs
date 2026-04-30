@@ -206,6 +206,9 @@ fn default_elevenlabs_stability() -> f32 {
 fn default_elevenlabs_similarity_boost() -> f32 {
     0.75
 }
+fn default_elevenlabs_speed() -> Option<f32> {
+    Some(0.8)
+}
 
 impl Default for ContextSettings {
     fn default() -> Self {
@@ -228,7 +231,7 @@ impl Default for ContextSettings {
             elevenlabs_stability: default_elevenlabs_stability(),
             elevenlabs_similarity_boost: default_elevenlabs_similarity_boost(),
             elevenlabs_style: None,
-            elevenlabs_speed: None,
+            elevenlabs_speed: default_elevenlabs_speed(),
             elevenlabs_tts_language: None,
             use_tts: false,
             voice_muted: false,

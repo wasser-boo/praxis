@@ -1060,16 +1060,18 @@ pub mod tts {
         }
     }
 
-    pub fn mp3_bytes_to_pcm(audio_bytes: &[u8]) -> Result<Vec<i16>, TTSError> {
+    pub fn mp3_bytes_to_pcm(audio_bytes: &[u8]) -> Result<(Vec<i16>, u32), TTSError> {
         use minimp3::{Decoder, Frame};
 
         let cursor = std::io::Cursor::new(audio_bytes);
         let mut decoder = Decoder::new(cursor);
         let mut all_samples = Vec::new();
+        let mut detected_sample_rate = 44100u32;
 
         loop {
             match decoder.next_frame() {
-                Ok(Frame { data, channels, .. }) => {
+                Ok(Frame { data, channels, sample_rate, .. }) => {
+                    detected_sample_rate = sample_rate as u32;
                     if channels == 2 {
                         for chunk in data.chunks(2) {
                             if chunk.len() == 2 {
@@ -1086,10 +1088,10 @@ pub mod tts {
             }
         }
 
-        Ok(all_samples)
+        Ok((all_samples, detected_sample_rate))
     }
 
-    pub fn audio_bytes_to_pcm(audio_bytes: &[u8]) -> Result<Vec<i16>, TTSError> {
+    pub fn audio_bytes_to_pcm(audio_bytes: &[u8]) -> Result<(Vec<i16>, u32), TTSError> {
         if audio_bytes.len() < 4 {
             return Err(TTSError::SynthesisFailed("Audio data too short".to_string()));
         }
@@ -1105,12 +1107,13 @@ pub mod tts {
         tracing::info!("audio_bytes_to_pcm: size={}, header_hex=[{}], is_wav={}, is_mp3={}", audio_bytes.len(), header_hex, is_wav, is_mp3);
 
         if is_wav {
+            let sample_rate = get_wav_sample_rate(audio_bytes).unwrap_or(48000);
             let result = wav_bytes_to_pcm(audio_bytes);
-            tracing::info!("wav_bytes_to_pcm result: {} samples", result.as_ref().map(|v| v.len()).unwrap_or(0));
-            result
+            tracing::info!("wav_bytes_to_pcm result: {} samples, sample_rate={}", result.as_ref().map(|v| v.len()).unwrap_or(0), sample_rate);
+            result.map(|samples| (samples, sample_rate))
         } else {
             let result = mp3_bytes_to_pcm(audio_bytes);
-            tracing::info!("mp3_bytes_to_pcm result: {} samples", result.as_ref().map(|v| v.len()).unwrap_or(0));
+            tracing::info!("mp3_bytes_to_pcm result: {} samples, sample_rate={}", result.as_ref().map(|v| v.0.len()).unwrap_or(0), result.as_ref().map(|v| v.1).unwrap_or(0));
             result
         }
     }
