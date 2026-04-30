@@ -106,19 +106,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         admin_password: secrets.dashboard_admin_password.unwrap_or(config.dashboard_admin_password),
     });
 
-    // Public routes (no auth required)
-    let public = Router::new()
-        .route("/", axum::routing::get(index))
-        .route("/api/status", axum::routing::get(status))
-        .route("/api/auth/login", axum::routing::post(login_handler))
-        .route("/static/{file}", axum::routing::get(static_file))
-        .route("/style.css", axum::routing::get(style_css))
-        .route("/app.js", axum::routing::get(app_js))
-        .route("/favicon.ico", axum::routing::get(favicon))
-        .route("/logo.svg", axum::routing::get(logo_svg))
-        .with_state(state.clone());
-
-    // Protected routes (auth required)
+    // Protected API routes (auth required)
     let protected = Router::new()
         .route("/api/contexts", axum::routing::get(list_contexts))
         .route("/api/contexts/{user_id}", axum::routing::get(get_context))
@@ -139,10 +127,20 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/api/cl-files/{name}", axum::routing::get(get_cl_file))
         .route("/api/cl-files/{name}", axum::routing::put(save_cl_file))
         .route("/api/cron-jobs", axum::routing::get(list_cron_jobs))
-        .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state.clone(), dashboard_auth_middleware));
 
-    public.merge(protected)
+    // Public routes + protected routes merged
+    Router::new()
+        .route("/", axum::routing::get(index))
+        .route("/api/status", axum::routing::get(status))
+        .route("/api/auth/login", axum::routing::post(login_handler))
+        .route("/static/{file}", axum::routing::get(static_file))
+        .route("/style.css", axum::routing::get(style_css))
+        .route("/app.js", axum::routing::get(app_js))
+        .route("/favicon.ico", axum::routing::get(favicon))
+        .route("/logo.svg", axum::routing::get(logo_svg))
+        .merge(protected)
+        .with_state(state.clone())
 }
 
 async fn dashboard_auth_middleware(
