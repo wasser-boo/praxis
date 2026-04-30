@@ -20,6 +20,8 @@ pub struct Secrets {
     #[serde(default)]
     pub gateway_api_key: Option<String>,
     #[serde(default)]
+    pub dashboard_admin_password: Option<String>,
+    #[serde(default)]
     pub voice_elevenlabs_api_key: Option<String>,
     #[serde(default)]
     pub voice_elevenlabs_stt_api_key: Option<String>,

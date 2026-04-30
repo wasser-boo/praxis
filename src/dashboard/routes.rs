@@ -59,6 +59,8 @@ pub struct SecretsInfo {
     pub minimax_api_key: String,
     pub mimo_api_key: String,
     pub elevenlabs_api_key: String,
+    pub gateway_api_key: String,
+    pub dashboard_admin_password: String,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +71,9 @@ pub struct SecretsUpdate {
     pub minimax_api_key: Option<String>,
     pub mimo_api_key: Option<String>,
     pub elevenlabs_api_key: Option<String>,
+    pub gateway_api_key: Option<String>,
+    pub dashboard_admin_password: Option<String>,
+    pub master_password: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -195,24 +200,25 @@ async fn login_handler(
     Ok(Json(DashboardLoginResponse { token }))
 }
 
-async fn index() -> axum::response::Html<String> {
-    let html = std::fs::read_to_string("static/index.html")
-        .unwrap_or_else(|_| "<h1>Dashboard UI not found</h1>".to_string());
-    axum::response::Html(html)
+async fn index() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../../static/index.html"))
 }
 
 async fn static_file(Path(file): Path<String>) -> Result<axum::response::Response, StatusCode> {
-    let path = format!("static/{}", file);
-    let content = std::fs::read(&path).map_err(|_| StatusCode::NOT_FOUND)?;
-
-    let content_type = if file.ends_with(".css") {
-        "text/css"
-    } else if file.ends_with(".js") {
-        "application/javascript"
-    } else if file.ends_with(".html") {
-        "text/html"
-    } else {
-        "application/octet-stream"
+    let (content, content_type) = match file.as_str() {
+        "style.css" => (
+            include_bytes!("../../static/style.css").as_slice(),
+            "text/css",
+        ),
+        "app.js" => (
+            include_bytes!("../../static/app.js").as_slice(),
+            "application/javascript",
+        ),
+        "index.html" => (
+            include_bytes!("../../static/index.html").as_slice(),
+            "text/html",
+        ),
+        _ => return Err(StatusCode::NOT_FOUND),
     };
 
     Ok(axum::response::Response::builder()
@@ -452,6 +458,8 @@ async fn get_secrets() -> Result<Json<SecretsInfo>, StatusCode> {
         minimax_api_key: crate::db::secrets::mask_secret(&secrets.minimax_api_key),
         mimo_api_key: crate::db::secrets::mask_secret(&secrets.mimo_api_key),
         elevenlabs_api_key: crate::db::secrets::mask_secret(&secrets.elevenlabs_api_key),
+        gateway_api_key: crate::db::secrets::mask_secret(&secrets.gateway_api_key),
+        dashboard_admin_password: crate::db::secrets::mask_secret(&secrets.dashboard_admin_password),
     }))
 }
 
@@ -466,9 +474,20 @@ async fn update_secrets(
     if let Some(v) = update.minimax_api_key { secrets.minimax_api_key = Some(v); }
     if let Some(v) = update.mimo_api_key { secrets.mimo_api_key = Some(v); }
     if let Some(v) = update.elevenlabs_api_key { secrets.elevenlabs_api_key = Some(v); }
+    if let Some(v) = update.gateway_api_key { secrets.gateway_api_key = Some(v); }
+    if let Some(v) = update.dashboard_admin_password { secrets.dashboard_admin_password = Some(v); }
 
-    crate::db::secrets::init_secrets(secrets);
-    Ok("Secrets updated in memory. Restart with master key to persist.".to_string())
+    // Persist to enc2 if master password provided
+    if let Some(ref password) = update.master_password {
+        if let Err(_e) = crate::db::secrets::save_secrets(&secrets, password) {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        crate::db::secrets::init_secrets(secrets);
+        Ok("Secrets saved and encrypted.".to_string())
+    } else {
+        crate::db::secrets::init_secrets(secrets);
+        Ok("Secrets updated in memory. Provide master_password to persist to disk.".to_string())
+    }
 }
 
 // ── Pairings ─────────────────────────────────────────────────────────────────

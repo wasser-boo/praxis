@@ -1,1 +1,7 @@
 /target
+.env
+secrets.enc2
+.secrets_salt
+secrets.json
+secrets.json.migrated
+/data

@@ -117,6 +117,12 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     env_lines.push(format!("DASHBOARD_ADMIN_PASSWORD={}", admin_password));
     println!();
 
+    // Master password for encrypted secrets
+    println!("--- Encryption ---");
+    println!("All secrets will be encrypted with a master password (enc2).");
+    let master_password = prompt_password("Set MASTER_KEY password")?;
+    println!();
+
     // Data directory
     println!("--- Data Storage ---");
     let data_dir = prompt_with_default("Data Directory", "./data");
@@ -301,6 +307,52 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     let _db = crate::db::Database::new(std::path::Path::new(data_dir))?;
     println!("Database initialized");
 
+    // Save all secrets to encrypted storage (enc2)
+    let secrets = crate::db::secrets::Secrets {
+        discord_bot_token: env_lines.iter()
+            .find(|l| l.starts_with("DISCORD_BOT_TOKEN="))
+            .map(|l| l.strip_prefix("DISCORD_BOT_TOKEN=").unwrap_or("").to_string()),
+        openai_api_key: env_lines.iter()
+            .find(|l| l.starts_with("OPENAI_API_KEY="))
+            .map(|l| l.strip_prefix("OPENAI_API_KEY=").unwrap_or("").to_string()),
+        anthropic_api_key: env_lines.iter()
+            .find(|l| l.starts_with("ANTHROPIC_API_KEY="))
+            .map(|l| l.strip_prefix("ANTHROPIC_API_KEY=").unwrap_or("").to_string()),
+        minimax_api_key: env_lines.iter()
+            .find(|l| l.starts_with("MINIMAX_API_KEY="))
+            .map(|l| l.strip_prefix("MINIMAX_API_KEY=").unwrap_or("").to_string()),
+        mimo_api_key: env_lines.iter()
+            .find(|l| l.starts_with("MIMO_API_KEY="))
+            .map(|l| l.strip_prefix("MIMO_API_KEY=").unwrap_or("").to_string()),
+        elevenlabs_api_key: env_lines.iter()
+            .find(|l| l.starts_with("ELEVENLABS_API_KEY="))
+            .map(|l| l.strip_prefix("ELEVENLABS_API_KEY=").unwrap_or("").to_string()),
+        gateway_api_key: Some(gateway_api_key.clone()),
+        dashboard_admin_password: Some(admin_password.clone()),
+        ..Default::default()
+    };
+    crate::db::secrets::save_secrets(&secrets, &master_password)?;
+    println!("Secrets encrypted and saved to secrets.enc2");
+
+    // Remove sensitive values from .env since they are now in enc2
+    let env_path = ".env";
+    let env_content = std::fs::read_to_string(env_path)?;
+    let filtered: String = env_content.lines()
+        .filter(|line| {
+            !line.starts_with("OPENAI_API_KEY=")
+                && !line.starts_with("ANTHROPIC_API_KEY=")
+                && !line.starts_with("MINIMAX_API_KEY=")
+                && !line.starts_with("MIMO_API_KEY=")
+                && !line.starts_with("ELEVENLABS_API_KEY=")
+                && !line.starts_with("DISCORD_BOT_TOKEN=")
+                && !line.starts_with("GATEWAY_API_KEY=")
+                && !line.starts_with("DASHBOARD_ADMIN_PASSWORD=")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(env_path, filtered)?;
+    println!("Sensitive values removed from .env (stored in secrets.enc2 instead)");
+
     println!();
     println!("========================================");
     println!("   Setup Complete!");
@@ -309,6 +361,7 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     println!("Next steps:");
     println!("  1. Review your .env file");
     println!("  2. Run: praxis run");
+    println!("  3. Enter your MASTER_KEY when prompted to unlock secrets");
     println!();
 
     Ok(())

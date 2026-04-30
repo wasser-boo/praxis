@@ -99,6 +99,7 @@ async fn run_services(cli_password: Option<String>, enable_discord: bool, enable
             mimo_api_key: std::env::var("MIMO_API_KEY").ok(),
             elevenlabs_api_key: std::env::var("ELEVENLABS_API_KEY").ok(),
             gateway_api_key: std::env::var("GATEWAY_API_KEY").ok(),
+            dashboard_admin_password: std::env::var("DASHBOARD_ADMIN_PASSWORD").ok(),
             ..Default::default()
         }
     };
@@ -106,7 +107,18 @@ async fn run_services(cli_password: Option<String>, enable_discord: bool, enable
     // Initialize global secrets
     praxis::db::secrets::init_secrets(secrets.clone());
 
-    let config = praxis::config::Config::from_env();
+    // Build config, overriding sensitive fields from secrets if available
+    let mut config = praxis::config::Config::from_env();
+    if let Some(ref key) = secrets.gateway_api_key {
+        if !key.is_empty() {
+            config.gateway_api_key = key.clone();
+        }
+    }
+    if let Some(ref pass) = secrets.dashboard_admin_password {
+        if !pass.is_empty() {
+            config.dashboard_admin_password = pass.clone();
+        }
+    }
     config.validate()?;
 
     // Gateway

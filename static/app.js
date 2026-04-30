@@ -237,7 +237,61 @@ async function loadSecrets() {
                 </div>
             `).join('')}
         </div>
+        <div style="margin-top:1.5rem">
+            <h3>Update Secrets</h3>
+            <div class="form-group">
+                <label for="secret-field">Field</label>
+                <select id="secret-field" style="width:100%;padding:0.75rem 1rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:1rem">
+                    ${Object.keys(data).map(k => `<option value="${k}">${k}</option>`).join('')}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="secret-value">New Value</label>
+                <input type="password" id="secret-value" placeholder="Enter new value">
+            </div>
+            <div class="form-group">
+                <label for="secret-master">Master Password (required to save to disk)</label>
+                <input type="password" id="secret-master" placeholder="Enter MASTER_KEY">
+            </div>
+            <button class="btn btn-primary" onclick="saveSecret()">Save Secret</button>
+            <p id="secret-msg" class="hidden" style="margin-top:0.5rem"></p>
+        </div>
     `;
+}
+
+async function saveSecret() {
+    const field = document.getElementById('secret-field').value;
+    const value = document.getElementById('secret-value').value;
+    const master = document.getElementById('secret-master').value;
+    const msgEl = document.getElementById('secret-msg');
+
+    if (!value) {
+        msgEl.textContent = 'Value is required';
+        msgEl.style.color = 'var(--error)';
+        msgEl.classList.remove('hidden');
+        return;
+    }
+
+    const body = { [field]: value };
+    if (master) body.master_password = master;
+
+    try {
+        const res = await apiFetch('/api/secrets', {
+            method: 'PUT',
+            body: JSON.stringify(body)
+        });
+        const text = await res.text();
+        msgEl.textContent = text;
+        msgEl.style.color = 'var(--success)';
+        msgEl.classList.remove('hidden');
+        document.getElementById('secret-value').value = '';
+        document.getElementById('secret-master').value = '';
+        setTimeout(() => loadSecrets(), 1500);
+    } catch (err) {
+        msgEl.textContent = 'Failed: ' + err.message;
+        msgEl.style.color = 'var(--error)';
+        msgEl.classList.remove('hidden');
+    }
 }
 
 async function loadPairings() {

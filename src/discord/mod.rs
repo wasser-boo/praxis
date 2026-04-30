@@ -82,6 +82,7 @@ impl DiscordBot {
     }
 
     pub async fn start(self) -> anyhow::Result<()> {
+        // Read from env (.env file)
         let token = std::env::var("DISCORD_BOT_TOKEN")
             .context("DISCORD_BOT_TOKEN not set. Run 'praxis onboard --interactive' to configure.")?;
         let application_id = std::env::var("DISCORD_APPLICATION_ID")
@@ -89,6 +90,7 @@ impl DiscordBot {
             .parse::<u64>()
             .context("DISCORD_APPLICATION_ID must be a number")?;
 
+        tracing::info!("Discord bot starting with token: {}...", &token[..std::cmp::min(10, token.len())]);
         self.start_with_token(&token, application_id).await
     }
 
