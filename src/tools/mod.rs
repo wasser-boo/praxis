@@ -6,6 +6,7 @@ pub mod context_tools;
 pub mod get_context;
 pub mod discord_upload;
 pub mod discord_send_message;
+pub mod discord_send_embed;
 pub mod web_search;
 pub mod rag_query;
 pub mod rag_ingest;

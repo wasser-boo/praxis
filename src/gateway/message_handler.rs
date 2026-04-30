@@ -414,6 +414,22 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &crate::
                 Err(e) => format!("Error: {}", e),
             }
         }
+        "discord_send_embed" => {
+            let channel_id = args["channel_id"].as_str().unwrap_or("");
+            let title = args.get("title").and_then(|v| v.as_str());
+            let description = args.get("description").and_then(|v| v.as_str());
+            let url = args.get("url").and_then(|v| v.as_str());
+            let color = args.get("color").and_then(|v| crate::tools::discord_send_embed::parse_color(v));
+            let footer = args.get("footer").and_then(|v| v.as_str());
+            let author = args.get("author").and_then(|v| v.as_str());
+            let thumbnail = args.get("thumbnail").and_then(|v| v.as_str());
+            let image = args.get("image").and_then(|v| v.as_str());
+            let fields = args.get("fields").map(|v| crate::tools::discord_send_embed::parse_fields(v)).unwrap_or_default();
+            match crate::tools::discord_send_embed::send_embed(user_id, channel_id, title, description, url, color, footer, author, thumbnail, image, fields).await {
+                Ok(_) => "Embed sent".to_string(),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
         "learn_fact" => {
             let fact = args["fact"].as_str().unwrap_or("");
             match db.add_memory(user_id, fact, Some("fact")) {
