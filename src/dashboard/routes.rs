@@ -2,12 +2,15 @@ use axum::Router;
 use axum::Json;
 use axum::extract::{State, Path};
 use axum::http::StatusCode;
+use axum::middleware;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct DashboardState {
     pub db: crate::db::Database,
+    pub gateway_api_key: String,
+    pub admin_password: String,
 }
 
 #[derive(Serialize)]
@@ -79,45 +82,143 @@ pub struct ClFileUpdate {
     pub content: String,
 }
 
-pub fn routes(db: crate::db::Database) -> Router {
-    let state = Arc::new(DashboardState { db });
+#[derive(Deserialize)]
+pub struct DashboardLoginRequest {
+    pub password: String,
+}
 
-    Router::new()
+#[derive(Serialize)]
+pub struct DashboardLoginResponse {
+    pub token: String,
+}
+
+pub fn routes(db: crate::db::Database) -> Router {
+    let config = crate::config::Config::from_env();
+    let state = Arc::new(DashboardState {
+        db,
+        gateway_api_key: config.gateway_api_key.clone(),
+        admin_password: config.dashboard_admin_password.clone(),
+    });
+
+    // Public routes (no auth required)
+    let public = Router::new()
         .route("/", axum::routing::get(index))
         .route("/api/status", axum::routing::get(status))
-        // Contexts
+        .route("/api/auth/login", axum::routing::post(login_handler))
+        .route("/static/{file}", axum::routing::get(static_file))
+        .with_state(state.clone());
+
+    // Protected routes (auth required)
+    let protected = Router::new()
         .route("/api/contexts", axum::routing::get(list_contexts))
         .route("/api/contexts/{user_id}", axum::routing::get(get_context))
         .route("/api/contexts/{user_id}", axum::routing::put(update_context))
-        // Messages
         .route("/api/messages/{user_id}", axum::routing::get(get_messages))
-        // Templates
         .route("/api/templates", axum::routing::get(list_templates))
         .route("/api/templates/{name}", axum::routing::get(get_template))
         .route("/api/templates/{name}", axum::routing::put(update_template))
-        // Tools
         .route("/api/tools", axum::routing::get(list_tools))
         .route("/api/tools/{name}", axum::routing::put(update_tool))
-        // Memory
         .route("/api/memory/{user_id}", axum::routing::get(get_memory))
         .route("/api/memory/{user_id}", axum::routing::put(update_memory))
-        // Secrets
         .route("/api/secrets", axum::routing::get(get_secrets))
         .route("/api/secrets", axum::routing::put(update_secrets))
-        // Pairings
         .route("/api/pairings", axum::routing::get(list_pairings))
         .route("/api/pairings/{user_id}", axum::routing::delete(delete_pairing))
-        // CL Files
         .route("/api/cl-files", axum::routing::get(list_cl_files))
         .route("/api/cl-files/{name}", axum::routing::get(get_cl_file))
         .route("/api/cl-files/{name}", axum::routing::put(save_cl_file))
-        // Cron Jobs
         .route("/api/cron-jobs", axum::routing::get(list_cron_jobs))
-        .with_state(state)
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(state.clone(), dashboard_auth_middleware));
+
+    public.merge(protected)
 }
 
-async fn index() -> &'static str {
-    "Praxis Dashboard API"
+async fn dashboard_auth_middleware(
+    State(state): State<Arc<DashboardState>>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let auth_header = req.headers().get("Authorization").and_then(|v| v.to_str().ok());
+
+    let token = match auth_header {
+        Some(header) => match header.strip_prefix("Bearer ") {
+            Some(t) => t,
+            None => return Err(StatusCode::UNAUTHORIZED),
+        },
+        None => return Err(StatusCode::UNAUTHORIZED),
+    };
+
+    // Try JWT first
+    use jsonwebtoken::{decode, DecodingKey, Validation};
+    let jwt_result = decode::<crate::gateway::auth::Claims>(
+        token,
+        &DecodingKey::from_secret(state.gateway_api_key.as_bytes()),
+        &Validation::default(),
+    );
+
+    if jwt_result.is_ok() {
+        return Ok(next.run(req).await);
+    }
+
+    // Fall back to raw API key
+    if token == state.gateway_api_key {
+        return Ok(next.run(req).await);
+    }
+
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+async fn login_handler(
+    State(state): State<Arc<DashboardState>>,
+    Json(payload): Json<DashboardLoginRequest>,
+) -> Result<Json<DashboardLoginResponse>, StatusCode> {
+    if payload.password != state.admin_password {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let claims = crate::gateway::auth::Claims {
+        sub: "admin".to_string(),
+        exp: (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as usize,
+        iat: chrono::Utc::now().timestamp() as usize,
+    };
+
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    let token = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(state.gateway_api_key.as_bytes()),
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(DashboardLoginResponse { token }))
+}
+
+async fn index() -> axum::response::Html<String> {
+    let html = std::fs::read_to_string("static/index.html")
+        .unwrap_or_else(|_| "<h1>Dashboard UI not found</h1>".to_string());
+    axum::response::Html(html)
+}
+
+async fn static_file(Path(file): Path<String>) -> Result<axum::response::Response, StatusCode> {
+    let path = format!("static/{}", file);
+    let content = std::fs::read(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let content_type = if file.ends_with(".css") {
+        "text/css"
+    } else if file.ends_with(".js") {
+        "application/javascript"
+    } else if file.ends_with(".html") {
+        "text/html"
+    } else {
+        "application/octet-stream"
+    };
+
+    Ok(axum::response::Response::builder()
+        .header("Content-Type", content_type)
+        .body(axum::body::Body::from(content))
+        .unwrap())
 }
 
 async fn status(State(_state): State<Arc<DashboardState>>) -> Json<serde_json::Value> {
@@ -500,7 +601,11 @@ mod dashboard_tests {
     #[test]
     fn test_dashboard_state_clone() {
         let (db, _dir) = test_setup();
-        let state = DashboardState { db };
+        let state = DashboardState {
+            db,
+            gateway_api_key: "test-api-key-12345678".to_string(),
+            admin_password: "testpassword".to_string(),
+        };
         let _cloned = state.clone();
     }
 

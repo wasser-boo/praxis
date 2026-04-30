@@ -136,17 +136,19 @@ pub async fn handle_message(
 }
 
 async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Context) -> String {
-    let template_path = match ctx.mode.as_str() {
-        "agent" => "templates/system.poml",
-        "chat" => "templates/system.poml",
-        _ => "templates/system.poml",
-    };
+    let template_path = "templates/system.poml";
+
+    // Load skills for context
+    let mut skills_registry = crate::skills::SkillRegistry::new();
+    let _ = skills_registry.load_from_dir(std::path::Path::new("skills"));
+    let skills = skills_registry.to_context_array();
 
     let context = serde_json::json!({
         "user_name": ctx.user_name.as_deref().unwrap_or("User"),
         "mode": ctx.mode,
         "turn": ctx.turn,
         "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
+        "skills": skills,
     });
 
     match crate::gateway::poml::render(template_path, &context).await {

@@ -14,6 +14,13 @@
     </section>
   </task>
 
+  <cp caption="Available Skills">
+    <p>When a user request matches a skill, call <code inline="true">use_skill</code> with the skill name and relevant parameters.</p>
+    <list>
+      <item for="skill in skills"><b>{{ skill.name }}</b>: {{ skill.description }}</item>
+    </list>
+  </cp>
+
   <cp caption="Rules">
     <list>
       <item>Be concise and direct in your responses.</item>

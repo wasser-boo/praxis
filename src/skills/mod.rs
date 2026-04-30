@@ -1,5 +1,3 @@
-pub mod executor;
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -8,9 +6,8 @@ use std::path::Path;
 pub struct Skill {
     pub name: String,
     pub description: String,
-    pub template: String,
-    pub triggers: Vec<String>,
-    pub parameters: serde_json::Value,
+    #[serde(skip)]
+    pub folder: String,
 }
 
 pub struct SkillRegistry {
@@ -24,8 +21,29 @@ impl SkillRegistry {
         }
     }
 
-    pub fn register(&mut self, skill: Skill) {
-        self.skills.insert(skill.name.clone(), skill);
+    pub fn load_from_dir(&mut self, dir: &Path) -> anyhow::Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.is_dir() {
+                let skill_json = path.join("skill.json");
+                let skill_poml = path.join("skill.poml");
+
+                if skill_json.exists() && skill_poml.exists() {
+                    let content = std::fs::read_to_string(&skill_json)?;
+                    let mut skill: Skill = serde_json::from_str(&content)?;
+                    skill.folder = path.to_string_lossy().to_string();
+                    self.skills.insert(skill.name.clone(), skill);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn get(&self, name: &str) -> Option<&Skill> {
@@ -36,70 +54,93 @@ impl SkillRegistry {
         self.skills.values().collect()
     }
 
-    pub fn find_by_trigger(&self, input: &str) -> Option<&Skill> {
-        let input_lower = input.to_lowercase();
-        self.skills.values().find(|s| {
-            s.triggers
-                .iter()
-                .any(|t| input_lower.contains(&t.to_lowercase()))
-        })
-    }
-
-    pub fn load_from_dir(&mut self, dir: &Path) -> anyhow::Result<()> {
-        if !dir.exists() {
-            return Ok(());
-        }
-
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                let content = std::fs::read_to_string(&path)?;
-                let skill: Skill = serde_json::from_str(&content)?;
-                self.register(skill);
-            }
-        }
-
-        Ok(())
+    /// Return skills as JSON array for POML context
+    pub fn to_context_array(&self) -> serde_json::Value {
+        let skills: Vec<serde_json::Value> = self.skills.values().map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "description": s.description
+            })
+        }).collect();
+        serde_json::json!(skills)
     }
 }
 
-#[cfg(test)]
-mod plugin_tests {
-    use super::*;
+pub async fn execute_skill(
+    skill: &Skill,
+    context: &serde_json::Value,
+) -> anyhow::Result<String> {
+    let poml_path = format!("{}/skill.poml", skill.folder);
+    tracing::info!("Executing skill: {} from {}", skill.name, poml_path);
+    crate::gateway::poml::render(&poml_path, context).await
+}
 
-    #[test]
-    fn test_skill_registry() {
-        let mut registry = SkillRegistry::new();
-        registry.register(Skill {
-            name: "code_review".to_string(),
-            description: "Review code".to_string(),
-            template: "review.poml".to_string(),
-            triggers: vec!["review".to_string(), "check code".to_string()],
-            parameters: serde_json::json!({}),
-        });
-        assert!(registry.get("code_review").is_some());
-        assert!(registry.find_by_trigger("please review this").is_some());
-        assert!(registry.find_by_trigger("hello").is_none());
+pub async fn execute_skill_by_name(
+    registry: &SkillRegistry,
+    name: &str,
+    context: &serde_json::Value,
+) -> anyhow::Result<String> {
+    let skill = registry
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("Skill not found: {}", name))?;
+    execute_skill(skill, context).await
+}
+
+#[cfg(test)]
+mod skill_tests {
+    use super::*;
+    use tempfile::TempDir;
+    use std::fs;
+
+    fn create_test_skill(dir: &Path, name: &str) {
+        let skill_dir = dir.join(name);
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("skill.json"),
+            format!(r#"{{"name": "{}", "description": "Test skill"}}"#, name),
+        ).unwrap();
+        fs::write(
+            skill_dir.join("skill.poml"),
+            "<poml><p>Hello {{name}}</p></poml>",
+        ).unwrap();
     }
 
     #[test]
-    fn test_skill_list() {
+    fn test_load_skills() {
+        let dir = TempDir::new().unwrap();
+        create_test_skill(dir.path(), "test");
         let mut registry = SkillRegistry::new();
-        registry.register(Skill {
-            name: "a".to_string(),
-            description: "A".to_string(),
-            template: "a.poml".to_string(),
-            triggers: vec![],
-            parameters: serde_json::json!({}),
-        });
-        registry.register(Skill {
-            name: "b".to_string(),
-            description: "B".to_string(),
-            template: "b.poml".to_string(),
-            triggers: vec![],
-            parameters: serde_json::json!({}),
-        });
-        assert_eq!(registry.list().len(), 2);
+        registry.load_from_dir(dir.path()).unwrap();
+        assert!(registry.get("test").is_some());
+    }
+
+    #[test]
+    fn test_skill_missing_poml() {
+        let dir = TempDir::new().unwrap();
+        let skill_dir = dir.path().join("bad");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("skill.json"), r#"{"name":"bad","description":"x"}"#).unwrap();
+        let mut registry = SkillRegistry::new();
+        registry.load_from_dir(dir.path()).unwrap();
+        assert!(registry.get("bad").is_none());
+    }
+
+    #[test]
+    fn test_to_context_array() {
+        let dir = TempDir::new().unwrap();
+        create_test_skill(dir.path(), "a");
+        create_test_skill(dir.path(), "b");
+        let mut registry = SkillRegistry::new();
+        registry.load_from_dir(dir.path()).unwrap();
+        let arr = registry.to_context_array();
+        assert!(arr.is_array());
+        assert_eq!(arr.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_empty_registry() {
+        let registry = SkillRegistry::new();
+        assert!(registry.list().is_empty());
+        assert!(registry.to_context_array().as_array().unwrap().is_empty());
     }
 }

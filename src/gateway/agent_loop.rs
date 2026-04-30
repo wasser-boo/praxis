@@ -367,6 +367,11 @@ async fn build_system_prompt(
         context_json["tag_instructions"] = serde_json::json!(crate::tags::get_tag_instructions());
     }
 
+    // Load skills for context
+    let mut skills_registry = crate::skills::SkillRegistry::new();
+    let _ = skills_registry.load_from_dir(std::path::Path::new("skills"));
+    context_json["skills"] = skills_registry.to_context_array();
+
     let template_path = "templates/system.poml";
     match crate::gateway::poml::render(template_path, &context_json).await {
         Ok(rendered) => rendered,

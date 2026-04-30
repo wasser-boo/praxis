@@ -26,18 +26,46 @@ impl LLMProvider for OllamaProvider {
             .messages
             .iter()
             .map(|m| {
-                serde_json::json!({
+                let mut msg = serde_json::json!({
                     "role": m.role,
                     "content": m.content.as_deref().unwrap_or("")
-                })
+                });
+                // Include tool calls in assistant messages
+                if let Some(ref tool_calls) = m.tool_calls {
+                    let ollama_calls: Vec<serde_json::Value> = tool_calls.iter().map(|tc| {
+                        serde_json::json!({
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": serde_json::from_str::<serde_json::Value>(&tc.function.arguments).unwrap_or_default()
+                            }
+                        })
+                    }).collect();
+                    msg["tool_calls"] = serde_json::json!(ollama_calls);
+                }
+                msg
             })
             .collect();
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "messages": messages,
             "stream": false,
         });
+
+        // Add tools if provided
+        if let Some(ref tools) = request.tools {
+            let ollama_tools: Vec<serde_json::Value> = tools.iter().map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.function.name,
+                        "description": t.function.description,
+                        "parameters": t.function.parameters
+                    }
+                })
+            }).collect();
+            body["tools"] = serde_json::json!(ollama_tools);
+        }
 
         let resp = self.client.post(&url).json(&body).send().await?;
 
@@ -48,13 +76,29 @@ impl LLMProvider for OllamaProvider {
         }
 
         let data: serde_json::Value = resp.json().await?;
-        let content = data["message"]["content"]
-            .as_str()
-            .map(|s| s.to_string());
+        let message = &data["message"];
+
+        let content = message["content"].as_str().map(|s| s.to_string());
+
+        // Parse tool calls from Ollama response
+        let tool_calls = message["tool_calls"].as_array().map(|calls| {
+            calls.iter().filter_map(|tc| {
+                let func = tc.get("function")?;
+                let name = func.get("name")?.as_str()?.to_string();
+                let args = func.get("arguments")?.clone();
+                Some(ToolCall {
+                    id: format!("call_{}", uuid::Uuid::new_v4()),
+                    function: FunctionCall {
+                        name,
+                        arguments: args.to_string(),
+                    },
+                })
+            }).collect()
+        });
 
         Ok(ChatResponse {
             content,
-            tool_calls: None,
+            tool_calls,
             finish_reason: Some("stop".to_string()),
             usage: None,
         })

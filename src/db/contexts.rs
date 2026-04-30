@@ -151,7 +151,7 @@ pub struct ContextSettings {
     #[serde(default)]
     pub agent_name: String,
     #[serde(default)]
-    pub voice_wake_word: Option<String>,
+    pub voice_wake_words: Vec<String>,
 }
 
 fn default_stt() -> String {
@@ -232,7 +232,7 @@ impl Default for ContextSettings {
             compaction_enabled: false,
             compaction_summary: String::new(),
             agent_name: "assistant".to_string(),
-            voice_wake_word: None,
+            voice_wake_words: Vec::new(),
         }
     }
 }

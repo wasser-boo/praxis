@@ -1,4 +1,5 @@
 pub mod handler;
+pub mod wake_word;
 
 use thiserror::Error;
 

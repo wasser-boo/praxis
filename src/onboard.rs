@@ -9,6 +9,12 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
 
     let mut env_lines: Vec<String> = Vec::new();
 
+    // POML CLI
+    println!("--- POML CLI ---");
+    let poml_cli = prompt_with_default("POML CLI Path", "./poml/js/cli.cjs");
+    env_lines.push(format!("POML_CLI={}", poml_cli));
+    println!();
+
     // LLM Provider
     println!("--- LLM Provider ---");
     println!("Which LLM provider do you want to use?");
@@ -50,18 +56,30 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
             let api_key = prompt_required("MiniMax API Key")?;
             let model = prompt_with_default("MiniMax Model", "MiniMax-Text-01");
             let base_url = prompt_with_default("MiniMax API Base URL", "https://api.minimax.chat/v1");
+            println!("  API compatibility mode:");
+            println!("    1) OpenAI-compatible (default)");
+            println!("    2) Anthropic-compatible");
+            let api_mode = prompt_choice("Select API mode", &["1", "2"], "1")?;
+            let mode_str = if api_mode == "2" { "anthropic" } else { "openai" };
             env_lines.push(format!("MINIMAX_API_KEY={}", api_key));
             env_lines.push(format!("MINIMAX_MODEL={}", model));
             env_lines.push(format!("MINIMAX_API_BASE={}", base_url));
+            env_lines.push(format!("MINIMAX_API_MODE={}", mode_str));
             "minimax"
         }
         "5" => {
             let api_key = prompt_required("MiMo API Key")?;
-            let model = prompt_with_default("MiMo Model", "mimo");
-            let base_url = prompt_with_default("MiMo API Base URL", "https://api.mimo.com/v1");
+            let model = prompt_with_default("MiMo Model", "mimo-v2.5-pro");
+            let base_url = prompt_with_default("MiMo API Base URL", "https://api.xiaomimimo.com/v1");
+            println!("  API compatibility mode:");
+            println!("    1) OpenAI-compatible (default)");
+            println!("    2) Anthropic-compatible");
+            let api_mode = prompt_choice("Select API mode", &["1", "2"], "1")?;
+            let mode_str = if api_mode == "2" { "anthropic" } else { "openai" };
             env_lines.push(format!("MIMO_API_KEY={}", api_key));
             env_lines.push(format!("MIMO_MODEL={}", model));
             env_lines.push(format!("MIMO_API_BASE={}", base_url));
+            env_lines.push(format!("MIMO_API_MODE={}", mode_str));
             "mimo"
         }
         _ => unreachable!(),
@@ -241,10 +259,48 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
             content.push('\n');
         }
     }
+    content.push('\n');
+
+    content.push_str("# Plugins\n");
+    for line in &env_lines {
+        if line.starts_with("PLUGIN_") {
+            content.push_str(line);
+            content.push('\n');
+        }
+    }
 
     std::fs::write(env_path, content)?;
 
     println!("Configuration saved to {}", env_path);
+
+    // Create directories
+    std::fs::create_dir_all("templates")?;
+    std::fs::create_dir_all("contextlanguage")?;
+    std::fs::create_dir_all("data")?;
+    std::fs::create_dir_all("skills")?;
+    std::fs::create_dir_all("plugins")?;
+    println!("Created directories: templates/, contextlanguage/, data/, skills/, plugins/");
+
+    // Ask about MiniMax image plugin
+    if provider_name == "minimax" || provider_name == "mimo" {
+        println!();
+        println!("--- Plugins ---");
+        println!("The MiniMax Image plugin provides image generation and analysis tools.");
+        let install_plugin = prompt_yes_no("Install MiniMax Image plugin?", true)?;
+        if install_plugin {
+            env_lines.push("PLUGIN_MINIMAX_IMAGE=true".to_string());
+            println!("MiniMax Image plugin will be enabled.");
+        }
+    }
+
+    // Create database
+    let data_dir = env_lines.iter()
+        .find(|l| l.starts_with("DATA_DIR="))
+        .map(|l| l.strip_prefix("DATA_DIR=").unwrap_or("./data"))
+        .unwrap_or("./data");
+    let _db = crate::db::Database::new(std::path::Path::new(data_dir))?;
+    println!("Database initialized");
+
     println!();
     println!("========================================");
     println!("   Setup Complete!");

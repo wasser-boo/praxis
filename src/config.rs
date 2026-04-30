@@ -1,5 +1,20 @@
 use std::env;
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApiMode {
+    OpenAI,
+    Anthropic,
+}
+
+impl ApiMode {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "anthropic" => ApiMode::Anthropic,
+            _ => ApiMode::OpenAI,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub poml_cli: String,
@@ -15,9 +30,11 @@ pub struct Config {
     pub minimax_api_key: Option<String>,
     pub minimax_model: String,
     pub minimax_api_base: String,
+    pub minimax_api_mode: ApiMode,
     pub mimo_api_key: Option<String>,
     pub mimo_model: String,
     pub mimo_api_base: String,
+    pub mimo_api_mode: ApiMode,
     pub gateway_port: u16,
     pub gateway_api_key: String,
     pub dashboard_port: u16,
@@ -48,10 +65,16 @@ impl Config {
                 .unwrap_or_else(|_| "MiniMax-Text-01".to_string()),
             minimax_api_base: env::var("MINIMAX_API_BASE")
                 .unwrap_or_else(|_| "https://api.minimax.chat/v1".to_string()),
+            minimax_api_mode: ApiMode::from_str(
+                &env::var("MINIMAX_API_MODE").unwrap_or_else(|_| "openai".to_string())
+            ),
             mimo_api_key: env::var("MIMO_API_KEY").ok(),
             mimo_model: env::var("MIMO_MODEL").unwrap_or_else(|_| "mimo".to_string()),
             mimo_api_base: env::var("MIMO_API_BASE")
                 .unwrap_or_else(|_| "https://api.mimo.com/v1".to_string()),
+            mimo_api_mode: ApiMode::from_str(
+                &env::var("MIMO_API_MODE").unwrap_or_else(|_| "openai".to_string())
+            ),
             gateway_port: env::var("GATEWAY_PORT")
                 .unwrap_or_else(|_| "3537".to_string())
                 .parse()
@@ -66,8 +89,9 @@ impl Config {
                 .parse()
                 .unwrap_or(1337),
             dashboard_admin_password: env::var("DASHBOARD_ADMIN_PASSWORD").unwrap_or_else(|_| {
-                tracing::warn!("DASHBOARD_ADMIN_PASSWORD not set, using default 'admin'");
-                "admin".to_string()
+                let pass = uuid::Uuid::new_v4().to_string()[..12].to_string();
+                tracing::warn!("DASHBOARD_ADMIN_PASSWORD not set, generated: {}", pass);
+                pass
             }),
             data_dir: env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),

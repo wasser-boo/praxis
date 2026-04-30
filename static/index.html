@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Praxis Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Login Screen -->
+        <div id="login-screen" class="screen active">
+            <div class="login-container">
+                <div class="logo">
+                    <h1>Praxis</h1>
+                    <p>AI Agent Platform</p>
+                </div>
+                <form id="login-form">
+                    <div class="form-group">
+                        <label for="password">Admin Password</label>
+                        <input type="password" id="password" placeholder="Enter password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Login</button>
+                    <p id="login-error" class="error hidden"></p>
+                </form>
+            </div>
+        </div>
+
+        <!-- Main Dashboard -->
+        <div id="dashboard-screen" class="screen">
+            <nav class="sidebar">
+                <div class="sidebar-header">
+                    <h2>Praxis</h2>
+                </div>
+                <ul class="nav-links">
+                    <li class="active" data-tab="overview">Overview</li>
+                    <li data-tab="contexts">Contexts</li>
+                    <li data-tab="messages">Messages</li>
+                    <li data-tab="templates">Templates</li>
+                    <li data-tab="tools">Tools</li>
+                    <li data-tab="memory">Memory</li>
+                    <li data-tab="secrets">Secrets</li>
+                    <li data-tab="pairings">Pairings</li>
+                    <li data-tab="cl-files">CL Files</li>
+                    <li data-tab="cron-jobs">Cron Jobs</li>
+                </ul>
+                <div class="sidebar-footer">
+                    <button id="logout-btn" class="btn btn-secondary">Logout</button>
+                </div>
+            </nav>
+
+            <main class="content">
+                <!-- Overview Tab -->
+                <div id="tab-overview" class="tab active">
+                    <h2>Overview</h2>
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <h3>Status</h3>
+                            <p id="status-indicator" class="status ok">Running</p>
+                        </div>
+                        <div class="stat-card">
+                            <h3>Version</h3>
+                            <p id="version">-</p>
+                        </div>
+                        <div class="stat-card">
+                            <h3>Contexts</h3>
+                            <p id="context-count">0</p>
+                        </div>
+                        <div class="stat-card">
+                            <h3>Pairings</h3>
+                            <p id="pairing-count">0</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Contexts Tab -->
+                <div id="tab-contexts" class="tab">
+                    <h2>Contexts</h2>
+                    <div id="contexts-list" class="data-list"></div>
+                </div>
+
+                <!-- Messages Tab -->
+                <div id="tab-messages" class="tab">
+                    <h2>Messages</h2>
+                    <div class="form-group">
+                        <label for="message-user-id">User ID</label>
+                        <input type="text" id="message-user-id" placeholder="Enter user ID">
+                        <button id="load-messages-btn" class="btn btn-primary">Load</button>
+                    </div>
+                    <div id="messages-list" class="data-list"></div>
+                </div>
+
+                <!-- Templates Tab -->
+                <div id="tab-templates" class="tab">
+                    <h2>Templates</h2>
+                    <div id="templates-list" class="data-list"></div>
+                </div>
+
+                <!-- Tools Tab -->
+                <div id="tab-tools" class="tab">
+                    <h2>Tools</h2>
+                    <div id="tools-list" class="data-list"></div>
+                </div>
+
+                <!-- Memory Tab -->
+                <div id="tab-memory" class="tab">
+                    <h2>Memory</h2>
+                    <div class="form-group">
+                        <label for="memory-user-id">User ID</label>
+                        <input type="text" id="memory-user-id" placeholder="Enter user ID">
+                        <button id="load-memory-btn" class="btn btn-primary">Load</button>
+                    </div>
+                    <div id="memory-content"></div>
+                </div>
+
+                <!-- Secrets Tab -->
+                <div id="tab-secrets" class="tab">
+                    <h2>Secrets</h2>
+                    <div id="secrets-content"></div>
+                </div>
+
+                <!-- Pairings Tab -->
+                <div id="tab-pairings" class="tab">
+                    <h2>Pairings</h2>
+                    <div id="pairings-list" class="data-list"></div>
+                </div>
+
+                <!-- CL Files Tab -->
+                <div id="tab-cl-files" class="tab">
+                    <h2>CL Files</h2>
+                    <div id="cl-files-list" class="data-list"></div>
+                </div>
+
+                <!-- Cron Jobs Tab -->
+                <div id="tab-cron-jobs" class="tab">
+                    <h2>Cron Jobs</h2>
+                    <div id="cron-jobs-list" class="data-list"></div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

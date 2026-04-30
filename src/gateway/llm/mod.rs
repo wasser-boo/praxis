@@ -4,6 +4,7 @@ pub mod mimo;
 pub mod ollama;
 pub mod openai;
 pub mod provider;
+mod tests;
 
 use provider::{ChatRequest, ChatResponse, LLMProvider};
 
@@ -42,6 +43,7 @@ impl LLMRouter {
                 key.clone(),
                 config.minimax_model.clone(),
                 config.minimax_api_base.clone(),
+                config.minimax_api_mode.clone(),
             )));
         }
 
@@ -50,6 +52,7 @@ impl LLMRouter {
                 key.clone(),
                 config.mimo_model.clone(),
                 config.mimo_api_base.clone(),
+                config.mimo_api_mode.clone(),
             )));
         }
 
