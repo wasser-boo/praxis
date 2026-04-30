@@ -106,40 +106,38 @@ pub fn routes(db: crate::db::Database) -> Router {
         admin_password: secrets.dashboard_admin_password.unwrap_or(config.dashboard_admin_password),
     });
 
-    // Protected API routes (auth required)
+    // Protected API routes with auth middleware
     let protected = Router::new()
-        .route("/api/contexts", axum::routing::get(list_contexts))
-        .route("/api/contexts/{user_id}", axum::routing::get(get_context))
-        .route("/api/contexts/{user_id}", axum::routing::put(update_context))
-        .route("/api/messages/{user_id}", axum::routing::get(get_messages))
-        .route("/api/templates", axum::routing::get(list_templates))
-        .route("/api/templates/{name}", axum::routing::get(get_template))
-        .route("/api/templates/{name}", axum::routing::put(update_template))
-        .route("/api/tools", axum::routing::get(list_tools))
-        .route("/api/tools/{name}", axum::routing::put(update_tool))
-        .route("/api/memory/{user_id}", axum::routing::get(get_memory))
-        .route("/api/memory/{user_id}", axum::routing::put(update_memory))
-        .route("/api/secrets", axum::routing::get(get_secrets))
-        .route("/api/secrets", axum::routing::put(update_secrets))
-        .route("/api/pairings", axum::routing::get(list_pairings))
-        .route("/api/pairings/{user_id}", axum::routing::delete(delete_pairing))
-        .route("/api/cl-files", axum::routing::get(list_cl_files))
-        .route("/api/cl-files/{name}", axum::routing::get(get_cl_file))
-        .route("/api/cl-files/{name}", axum::routing::put(save_cl_file))
-        .route("/api/cron-jobs", axum::routing::get(list_cron_jobs))
+        .route("/contexts", axum::routing::get(list_contexts))
+        .route("/contexts/{user_id}", axum::routing::get(get_context))
+        .route("/contexts/{user_id}", axum::routing::put(update_context))
+        .route("/messages/{user_id}", axum::routing::get(get_messages))
+        .route("/templates", axum::routing::get(list_templates))
+        .route("/templates/{name}", axum::routing::get(get_template))
+        .route("/templates/{name}", axum::routing::put(update_template))
+        .route("/tools", axum::routing::get(list_tools))
+        .route("/tools/{name}", axum::routing::put(update_tool))
+        .route("/memory/{user_id}", axum::routing::get(get_memory))
+        .route("/memory/{user_id}", axum::routing::put(update_memory))
+        .route("/secrets", axum::routing::get(get_secrets))
+        .route("/secrets", axum::routing::put(update_secrets))
+        .route("/pairings", axum::routing::get(list_pairings))
+        .route("/pairings/{user_id}", axum::routing::delete(delete_pairing))
+        .route("/cl-files", axum::routing::get(list_cl_files))
+        .route("/cl-files/{name}", axum::routing::get(get_cl_file))
+        .route("/cl-files/{name}", axum::routing::put(save_cl_file))
+        .route("/cron-jobs", axum::routing::get(list_cron_jobs))
         .layer(middleware::from_fn_with_state(state.clone(), dashboard_auth_middleware));
 
-    // Public routes + protected routes merged
+    // Static file service
+    let static_service = tower_http::services::ServeDir::new("static");
+
     Router::new()
         .route("/", axum::routing::get(index))
         .route("/api/status", axum::routing::get(status))
         .route("/api/auth/login", axum::routing::post(login_handler))
-        .route("/static/{file}", axum::routing::get(static_file))
-        .route("/style.css", axum::routing::get(style_css))
-        .route("/app.js", axum::routing::get(app_js))
-        .route("/favicon.ico", axum::routing::get(favicon))
-        .route("/logo.svg", axum::routing::get(logo_svg))
-        .merge(protected)
+        .nest_service("/static", static_service)
+        .nest("/api", protected)
         .with_state(state.clone())
 }
 
@@ -205,57 +203,6 @@ async fn login_handler(
 
 async fn index() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../static/index.html"))
-}
-
-async fn static_file(Path(file): Path<String>) -> Result<axum::response::Response, StatusCode> {
-    let (content, content_type) = match file.as_str() {
-        "style.css" => (
-            include_bytes!("../../static/style.css").as_slice(),
-            "text/css",
-        ),
-        "app.js" => (
-            include_bytes!("../../static/app.js").as_slice(),
-            "application/javascript",
-        ),
-        "index.html" => (
-            include_bytes!("../../static/index.html").as_slice(),
-            "text/html",
-        ),
-        _ => return Err(StatusCode::NOT_FOUND),
-    };
-
-    Ok(axum::response::Response::builder()
-        .header("Content-Type", content_type)
-        .body(axum::body::Body::from(content))
-        .unwrap())
-}
-
-async fn style_css() -> axum::response::Response {
-    axum::response::Response::builder()
-        .header("Content-Type", "text/css")
-        .body(axum::body::Body::from(include_bytes!("../../static/style.css").as_slice()))
-        .unwrap()
-}
-
-async fn app_js() -> axum::response::Response {
-    axum::response::Response::builder()
-        .header("Content-Type", "application/javascript")
-        .body(axum::body::Body::from(include_bytes!("../../static/app.js").as_slice()))
-        .unwrap()
-}
-
-async fn favicon() -> axum::response::Response {
-    axum::response::Response::builder()
-        .header("Content-Type", "image/svg+xml")
-        .body(axum::body::Body::from(include_bytes!("../../static/logo.svg").as_slice()))
-        .unwrap()
-}
-
-async fn logo_svg() -> axum::response::Response {
-    axum::response::Response::builder()
-        .header("Content-Type", "image/svg+xml")
-        .body(axum::body::Body::from(include_bytes!("../../static/logo.svg").as_slice()))
-        .unwrap()
 }
 
 async fn status(State(_state): State<Arc<DashboardState>>) -> Json<serde_json::Value> {

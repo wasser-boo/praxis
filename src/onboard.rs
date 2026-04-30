@@ -285,7 +285,15 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     std::fs::create_dir_all("data")?;
     std::fs::create_dir_all("skills")?;
     std::fs::create_dir_all("plugins")?;
-    println!("Created directories: templates/, contextlanguage/, data/, skills/, plugins/");
+    std::fs::create_dir_all("static")?;
+    println!("Created directories: templates/, contextlanguage/, data/, skills/, plugins/, static/");
+
+    // Create static dashboard files
+    std::fs::write("static/index.html", include_str!("../static/index.html"))?;
+    std::fs::write("static/style.css", include_str!("../static/style.css"))?;
+    std::fs::write("static/app.js", include_str!("../static/app.js"))?;
+    std::fs::write("static/logo.svg", include_str!("../static/logo.svg"))?;
+    println!("Created dashboard files: static/index.html, static/style.css, static/app.js, static/logo.svg");
 
     // Ask about MiniMax image plugin
     if provider_name == "minimax" || provider_name == "mimo" {
