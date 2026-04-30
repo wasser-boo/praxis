@@ -12,6 +12,7 @@ pub fn get_context(db: &crate::db::Database, user_id: &str, key: &str) -> anyhow
         "use_tts" => Some(ctx.settings.use_tts.to_string()),
         "voice_muted" => Some(ctx.settings.voice_muted.to_string()),
         "voice_deafened" => Some(ctx.settings.voice_deafened.to_string()),
+        "voice_auto_pause_enabled" => Some(ctx.settings.voice_auto_pause_enabled.to_string()),
         "max_llm_turns" => ctx.settings.max_llm_turns.map(|v| v.to_string()),
         "max_tool_calls" => ctx.settings.max_tool_calls.map(|v| v.to_string()),
         _ => {

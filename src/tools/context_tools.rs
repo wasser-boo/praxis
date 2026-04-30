@@ -11,6 +11,7 @@ pub fn set_context_value(db: &crate::db::Database, user_id: &str, key: &str, val
         "use_tts" => ctx.settings.use_tts = value.parse().unwrap_or(false),
         "voice_muted" => ctx.settings.voice_muted = value.parse().unwrap_or(false),
         "voice_deafened" => ctx.settings.voice_deafened = value.parse().unwrap_or(true),
+        "voice_auto_pause_enabled" => ctx.settings.voice_auto_pause_enabled = value.parse().unwrap_or(false),
         "max_llm_turns" => ctx.settings.max_llm_turns = value.parse().ok(),
         "max_tool_calls" => ctx.settings.max_tool_calls = value.parse().ok(),
         _ => {

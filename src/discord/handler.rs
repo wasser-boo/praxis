@@ -488,6 +488,13 @@ impl EventHandler for DiscordHandler {
                                     }
                                     voice_handler.set_allowed_discord_ids(allowed_ids).await;
 
+                                    // Load context for voice settings
+                                    if let Ok(Some(pairing)) = self.db.get_pairing_by_discord(&fallback_discord_id.to_string()) {
+                                        if let Ok(ctx) = self.db.load_context(&pairing.user_id) {
+                                            voice_handler.set_auto_pause(ctx.settings.voice_auto_pause_enabled).await;
+                                        }
+                                    }
+
                                     let voice_receiver = crate::voice::handler::songbird_integration::VoiceReceiver::new(voice_handler.clone());
 
                                     // Register event handler on the call

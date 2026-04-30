@@ -22,6 +22,7 @@ pub struct VoiceHandler {
     pub user_last_speech: Arc<DashMap<u32, std::time::Instant>>,
     pub fallback_user_id: Arc<Mutex<Option<String>>>,
     pub allowed_discord_ids: Arc<Mutex<std::collections::HashSet<u64>>>,
+    pub auto_pause_enabled: Arc<Mutex<bool>>,
 }
 
 impl VoiceHandler {
@@ -39,6 +40,7 @@ impl VoiceHandler {
             user_last_speech: Arc::new(DashMap::new()),
             fallback_user_id: Arc::new(Mutex::new(None)),
             allowed_discord_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            auto_pause_enabled: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -157,6 +159,10 @@ impl VoiceHandler {
             }
         };
 
+        if !*self.auto_pause_enabled.lock().await {
+            return;
+        }
+
         let pause_threshold = std::time::Duration::from_secs_f32(0.5);
 
         let time_since_speech = if let Some(last) = self.user_last_speech.get(&current_ssrc) {
@@ -213,6 +219,16 @@ impl VoiceHandler {
 
     pub async fn is_muted(&self) -> bool {
         *self.muted.lock().await
+    }
+
+    pub async fn set_auto_pause(&self, enabled: bool) {
+        let mut ap = self.auto_pause_enabled.lock().await;
+        *ap = enabled;
+        tracing::info!("Voice handler auto_pause set to: {}", enabled);
+    }
+
+    pub async fn is_auto_pause_enabled(&self) -> bool {
+        *self.auto_pause_enabled.lock().await
     }
 
     pub async fn time_since_last_speech(&self) -> std::time::Duration {
