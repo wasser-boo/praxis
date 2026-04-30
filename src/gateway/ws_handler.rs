@@ -12,6 +12,7 @@ enum WsIncoming {
     Message {
         user_id: String,
         content: String,
+        #[allow(dead_code)]
         channel_id: Option<String>,
     },
     #[serde(rename = "ping")]
@@ -30,6 +31,7 @@ enum WsOutgoing {
     #[serde(rename = "pong")]
     Pong,
     #[serde(rename = "voice_input_started")]
+    #[allow(dead_code)]
     VoiceInputStarted { user_id: String },
 }
 

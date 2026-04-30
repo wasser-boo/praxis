@@ -132,6 +132,24 @@ impl Database {
         )?;
         Ok(())
     }
+
+    pub fn list_all_pairings(&self) -> anyhow::Result<Vec<Pairing>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT user_id, discord_user_id, discord_guild_id, paired_at, last_seen_at FROM pairings ORDER BY paired_at DESC"
+        )?;
+        let pairings = stmt.query_map([], |row| {
+            Ok(Pairing {
+                user_id: row.get(0)?,
+                discord_user_id: row.get(1)?,
+                discord_guild_id: row.get(2)?,
+                paired_at: row.get(3)?,
+                last_seen_at: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(pairings)
+    }
 }
 
 #[cfg(test)]

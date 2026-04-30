@@ -95,10 +95,10 @@ impl DiscordBot {
     }
 
     pub async fn start_with_token(self, token: &str, application_id: u64) -> anyhow::Result<()> {
-        let voice_state = init_discord_voice_state();
+        let _voice_state = init_discord_voice_state();
         let handler = DiscordHandler::new(self.db.clone(), self.ws_client.clone(), self.secrets.clone());
 
-        let mut client_builder = Client::builder(
+        let client_builder = Client::builder(
             token,
             GatewayIntents::MESSAGE_CONTENT
                 | GatewayIntents::DIRECT_MESSAGES
@@ -230,6 +230,42 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
                 if channel_idparsed > 0 {
                     let channel = serenity::model::id::ChannelId::new(channel_idparsed);
                     let _ = channel.say(&http, &message).await;
+                }
+            }
+            Ok(crate::event_channel::GatewayEvent::ChannelEmbed { user_id: _, channel_id, embed }) => {
+                let channel_idparsed = channel_id.parse::<u64>().unwrap_or(0);
+                if channel_idparsed > 0 {
+                    let channel = serenity::model::id::ChannelId::new(channel_idparsed);
+                    let mut e = serenity::builder::CreateEmbed::new();
+                    if let Some(ref title) = embed.title {
+                        e = e.title(title);
+                    }
+                    if let Some(ref description) = embed.description {
+                        e = e.description(description);
+                    }
+                    if let Some(ref url) = embed.url {
+                        e = e.url(url);
+                    }
+                    if let Some(color) = embed.color {
+                        e = e.color(color);
+                    }
+                    if let Some(ref footer) = embed.footer {
+                        e = e.footer(serenity::builder::CreateEmbedFooter::new(footer));
+                    }
+                    if let Some(ref author) = embed.author {
+                        e = e.author(serenity::builder::CreateEmbedAuthor::new(author));
+                    }
+                    if let Some(ref thumbnail) = embed.thumbnail {
+                        e = e.thumbnail(thumbnail);
+                    }
+                    if let Some(ref image) = embed.image {
+                        e = e.image(image);
+                    }
+                    for field in &embed.fields {
+                        e = e.field(&field.name, &field.value, field.inline);
+                    }
+                    let msg = serenity::builder::CreateMessage::new().embed(e);
+                    let _ = channel.send_message(&http, msg).await;
                 }
             }
             Ok(crate::event_channel::GatewayEvent::VoiceTts { user_id, audio_data }) => {

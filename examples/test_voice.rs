@@ -1,5 +1,5 @@
 use praxis::voice::tts;
-use praxis::voice::{self, stt};
+use praxis::voice;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

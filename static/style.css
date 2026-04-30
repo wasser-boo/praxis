@@ -71,6 +71,12 @@ body {
     background-clip: text;
 }
 
+.logo-img {
+    width: 96px;
+    height: 96px;
+    margin-bottom: 0.5rem;
+}
+
 .logo p {
     color: var(--text-secondary);
     margin-top: 0.5rem;

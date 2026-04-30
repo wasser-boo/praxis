@@ -98,11 +98,12 @@ pub struct DashboardLoginResponse {
 }
 
 pub fn routes(db: crate::db::Database) -> Router {
+    let secrets = crate::db::secrets::get_secrets();
     let config = crate::config::Config::from_env();
     let state = Arc::new(DashboardState {
         db,
-        gateway_api_key: config.gateway_api_key.clone(),
-        admin_password: config.dashboard_admin_password.clone(),
+        gateway_api_key: secrets.gateway_api_key.unwrap_or(config.gateway_api_key),
+        admin_password: secrets.dashboard_admin_password.unwrap_or(config.dashboard_admin_password),
     });
 
     // Public routes (no auth required)
@@ -111,6 +112,10 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/api/status", axum::routing::get(status))
         .route("/api/auth/login", axum::routing::post(login_handler))
         .route("/static/{file}", axum::routing::get(static_file))
+        .route("/style.css", axum::routing::get(style_css))
+        .route("/app.js", axum::routing::get(app_js))
+        .route("/favicon.ico", axum::routing::get(favicon))
+        .route("/logo.svg", axum::routing::get(logo_svg))
         .with_state(state.clone());
 
     // Protected routes (auth required)
@@ -225,6 +230,34 @@ async fn static_file(Path(file): Path<String>) -> Result<axum::response::Respons
         .header("Content-Type", content_type)
         .body(axum::body::Body::from(content))
         .unwrap())
+}
+
+async fn style_css() -> axum::response::Response {
+    axum::response::Response::builder()
+        .header("Content-Type", "text/css")
+        .body(axum::body::Body::from(include_bytes!("../../static/style.css").as_slice()))
+        .unwrap()
+}
+
+async fn app_js() -> axum::response::Response {
+    axum::response::Response::builder()
+        .header("Content-Type", "application/javascript")
+        .body(axum::body::Body::from(include_bytes!("../../static/app.js").as_slice()))
+        .unwrap()
+}
+
+async fn favicon() -> axum::response::Response {
+    axum::response::Response::builder()
+        .header("Content-Type", "image/svg+xml")
+        .body(axum::body::Body::from(include_bytes!("../../static/logo.svg").as_slice()))
+        .unwrap()
+}
+
+async fn logo_svg() -> axum::response::Response {
+    axum::response::Response::builder()
+        .header("Content-Type", "image/svg+xml")
+        .body(axum::body::Body::from(include_bytes!("../../static/logo.svg").as_slice()))
+        .unwrap()
 }
 
 async fn status(State(_state): State<Arc<DashboardState>>) -> Json<serde_json::Value> {

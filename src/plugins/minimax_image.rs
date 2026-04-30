@@ -58,6 +58,7 @@ pub fn create_plugin() -> Plugin {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct ImageGenRequest {
     model: String,
     prompt: String,
@@ -66,23 +67,27 @@ struct ImageGenRequest {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct ImageGenResponse {
     data: Option<Vec<ImageData>>,
     error: Option<ApiError>,
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct ImageData {
     url: Option<String>,
     b64_json: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct ApiError {
     message: Option<String>,
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct VisionMessage {
     role: String,
     content: Vec<ContentPart>,
@@ -90,6 +95,7 @@ struct VisionMessage {
 
 #[derive(Serialize)]
 #[serde(tag = "type")]
+#[allow(dead_code)]
 enum ContentPart {
     #[serde(rename = "text")]
     Text { text: String },
@@ -98,11 +104,13 @@ enum ContentPart {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct ImageUrlContent {
     url: String,
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct VisionRequest {
     model: String,
     messages: Vec<VisionMessage>,

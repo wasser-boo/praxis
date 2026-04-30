@@ -143,12 +143,31 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
     let _ = skills_registry.load_from_dir(std::path::Path::new("skills"));
     let skills = skills_registry.to_context_array();
 
+    // Calculate uptime
+    let uptime_secs = state.start_time.elapsed().as_secs();
+    let uptime = format_uptime(uptime_secs);
+
+    // Get paired users
+    let paired_users = state.db.list_all_pairings().unwrap_or_default();
+    let paired_count = paired_users.len();
+    let paired_list: Vec<serde_json::Value> = paired_users.iter().map(|p| {
+        serde_json::json!({
+            "user_id": p.user_id,
+            "discord_user_id": p.discord_user_id,
+            "paired_at": p.paired_at,
+        })
+    }).collect();
+
     let context = serde_json::json!({
         "user_name": ctx.user_name.as_deref().unwrap_or("User"),
         "mode": ctx.mode,
         "turn": ctx.turn,
         "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
         "skills": skills,
+        "uptime": uptime,
+        "uptime_secs": uptime_secs,
+        "paired_users_count": paired_count,
+        "paired_users": paired_list,
     });
 
     match crate::gateway::poml::render(template_path, &context).await {
@@ -156,12 +175,26 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
         Err(e) => {
             tracing::warn!("Failed to render POML template: {}, using fallback", e);
             format!(
-                "You are Praxis, an AI agent assistant. Current mode: {}. User: {}. Turn: {}.",
+                "You are Praxis, an AI agent assistant. Current mode: {}. User: {}. Turn: {}. Uptime: {}. Paired users: {}.",
                 ctx.mode,
                 ctx.user_name.as_deref().unwrap_or("unknown"),
-                ctx.turn
+                ctx.turn,
+                uptime,
+                paired_count,
             )
         }
+    }
+}
+
+fn format_uptime(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d {}h {}m", secs / 86400, (secs % 86400) / 3600, (secs % 3600) / 60)
     }
 }
 

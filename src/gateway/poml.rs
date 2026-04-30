@@ -19,6 +19,7 @@ static THINK_TAG_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"<think>[\s\S]*?</think>").unwrap()
 });
 
+#[allow(dead_code)]
 static AGENT_SIGNAL_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"\[\[AGENT:(\w+)(?::"([^"]*)")?\]\]"#).unwrap()
 });

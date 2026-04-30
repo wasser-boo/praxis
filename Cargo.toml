@@ -22,6 +22,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 tracing = "0.1"
 tracing-attributes = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 anyhow = "1"
 serenity = { version = "0.12", features = ["voice"] }
 axum = { version = "0.7", features = ["ws", "json"] }

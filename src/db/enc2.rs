@@ -117,6 +117,24 @@ pub fn verify_password(password: &str) -> bool {
     load_encrypted_secrets(password).is_ok()
 }
 
+pub fn hash_master_key(password: &str) -> String {
+    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let hash = argon2.hash_password(password.as_bytes(), &salt)
+        .expect("Argon2 hashing failed");
+    hash.to_string()
+}
+
+pub fn verify_master_key_hash(password: &str, hash_str: &str) -> bool {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    let hash = match PasswordHash::new(hash_str) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    Argon2::default().verify_password(password.as_bytes(), &hash).is_ok()
+}
+
 pub fn migrate_plaintext_to_encrypted(password: &str) -> anyhow::Result<()> {
     let plaintext_path = Path::new("secrets.json");
     if !plaintext_path.exists() {
@@ -215,7 +233,7 @@ mod security_tests {
     fn test_encrypt_decrypt_direct() {
         let temp = tempfile::tempdir().unwrap();
         let salt_path = temp.path().join(".secrets_salt");
-        let secrets_path = temp.path().join("secrets.enc2");
+        let _secrets_path = temp.path().join("secrets.enc2");
 
         // Generate salt
         let salt = generate_salt();

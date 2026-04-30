@@ -22,9 +22,12 @@ pub struct LoginResponse {
 pub async fn login_handler(
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
+    let secrets = crate::db::secrets::get_secrets();
     let config = crate::config::Config::from_env();
+    let admin_password = secrets.dashboard_admin_password.unwrap_or(config.dashboard_admin_password);
+    let gateway_api_key = secrets.gateway_api_key.unwrap_or(config.gateway_api_key);
 
-    if payload.password != config.dashboard_admin_password {
+    if payload.password != admin_password {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -37,7 +40,7 @@ pub async fn login_handler(
     let token = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(config.gateway_api_key.as_bytes()),
+        &EncodingKey::from_secret(gateway_api_key.as_bytes()),
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

@@ -79,22 +79,40 @@ impl Config {
                 .unwrap_or_else(|_| "3537".to_string())
                 .parse()
                 .unwrap_or(3537),
-            gateway_api_key: env::var("GATEWAY_API_KEY").unwrap_or_else(|_| {
-                let key = uuid::Uuid::new_v4().to_string();
-                tracing::warn!("GATEWAY_API_KEY not set, generated: {}", key);
-                key
-            }),
+            gateway_api_key: env::var("GATEWAY_API_KEY").unwrap_or_default(),
             dashboard_port: env::var("DASHBOARD_PORT")
                 .unwrap_or_else(|_| "1337".to_string())
                 .parse()
                 .unwrap_or(1337),
-            dashboard_admin_password: env::var("DASHBOARD_ADMIN_PASSWORD").unwrap_or_else(|_| {
-                let pass = uuid::Uuid::new_v4().to_string()[..12].to_string();
-                tracing::warn!("DASHBOARD_ADMIN_PASSWORD not set, generated: {}", pass);
-                pass
-            }),
+            dashboard_admin_password: env::var("DASHBOARD_ADMIN_PASSWORD").unwrap_or_default(),
             data_dir: env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+        }
+    }
+
+    pub fn apply_secrets(&mut self, secrets: &crate::db::secrets::Secrets) {
+        if let Some(ref key) = secrets.gateway_api_key {
+            if !key.is_empty() && self.gateway_api_key.is_empty() {
+                self.gateway_api_key = key.clone();
+            }
+        }
+        if let Some(ref pass) = secrets.dashboard_admin_password {
+            if !pass.is_empty() && self.dashboard_admin_password.is_empty() {
+                self.dashboard_admin_password = pass.clone();
+            }
+        }
+    }
+
+    pub fn ensure_generated(&mut self) {
+        if self.gateway_api_key.is_empty() {
+            let key = uuid::Uuid::new_v4().to_string();
+            tracing::info!("GATEWAY_API_KEY not set, generated: {}", key);
+            self.gateway_api_key = key;
+        }
+        if self.dashboard_admin_password.is_empty() {
+            let pass = uuid::Uuid::new_v4().to_string()[..12].to_string();
+            tracing::info!("DASHBOARD_ADMIN_PASSWORD not set, generated: {}", pass);
+            self.dashboard_admin_password = pass;
         }
     }
 

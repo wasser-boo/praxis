@@ -187,7 +187,7 @@ pub fn parse(content: &str) -> Result<ContextLang, ClError> {
     Ok(cl)
 }
 
-fn parse_metadata(line: &str, line_num: usize) -> Result<(String, String), ClError> {
+fn parse_metadata(line: &str, _line_num: usize) -> Result<(String, String), ClError> {
     let rest = line.strip_prefix('@').unwrap();
     let parts: Vec<&str> = rest.splitn(2, ' ').collect();
     let key = parts[0].to_string();
@@ -842,7 +842,7 @@ mode = "code"
 calm -> focused : when step > 1
 "#;
         let cl = parse(input).unwrap();
-        let mut ctx = serde_json::json!({"active_state": "calm", "step": 2});
+        let ctx = serde_json::json!({"active_state": "calm", "step": 2});
 
         let new_state = advance_state(&cl, &ctx);
         assert_eq!(new_state, Some("focused".to_string()));

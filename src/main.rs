@@ -28,6 +28,30 @@ enum Cli {
         #[arg(long)]
         interactive: bool,
     },
+    /// Manage the Praxis system service
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum ServiceAction {
+    /// Install Praxis as a system service (systemd)
+    Install,
+    /// Stop the Praxis service
+    Stop,
+    /// Start the Praxis service
+    Start,
+    /// Show Praxis service logs
+    Logs {
+        /// Follow logs in real-time
+        #[arg(long, short)]
+        follow: bool,
+        /// Number of lines to show
+        #[arg(long, short = 'n', default_value = "100")]
+        lines: usize,
+    },
 }
 
 #[tokio::main]
@@ -41,14 +65,37 @@ async fn main() {
 async fn run() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
+    let cli = Cli::parse();
+
+    // Service commands don't need logging setup
+    if let Cli::Service { action } = &cli {
+        return handle_service_action(action).await;
+    }
+
+    // Set up logging with file rotation
+    let log_dir = std::env::var("LOG_DIR").unwrap_or_else(|_| "./logs".to_string());
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "praxis.log");
+    let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
+
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .init();
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout);
 
-    let cli = Cli::parse();
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(file_writer)
+        .with_ansi(false);
+
+    use tracing_subscriber::prelude::*;
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stdout_layer)
+        .with(file_layer)
+        .init();
 
     match cli {
         Cli::Run { password, no_discord, no_dashboard } => run_services(password, !no_discord, !no_dashboard).await,
@@ -57,26 +104,35 @@ async fn run() -> anyhow::Result<()> {
         Cli::Onboard { interactive: false } => {
             anyhow::bail!("Onboard requires --interactive flag");
         }
+        Cli::Service { .. } => unreachable!(),
     }
 }
 
 async fn run_services(cli_password: Option<String>, enable_discord: bool, enable_dashboard: bool) -> anyhow::Result<()> {
     // Check if we need master key for encrypted secrets
     let master_password = if praxis::db::secrets::has_secrets() {
-        let resolved = cli_password.or_else(|| std::env::var("MASTER_KEY").ok());
-        if let Some(password) = resolved {
-            if !praxis::db::enc2::verify_password(&password) {
-                anyhow::bail!("Invalid MASTER_KEY");
-            }
-            Some(password)
+        let stored_hash = std::env::var("PRAXIS_MASTER_KEY_HASH").ok();
+
+        let password = if let Some(pass) = cli_password.or_else(|| std::env::var("MASTER_KEY").ok()) {
+            pass
         } else {
-            let password = rpassword::prompt_password("Enter MASTER_KEY to unlock secrets: ")
-                .map_err(|e| anyhow::anyhow!("Failed to read password: {}", e))?;
+            rpassword::prompt_password("Enter MASTER_KEY to unlock secrets: ")
+                .map_err(|e| anyhow::anyhow!("Failed to read password: {}", e))?
+        };
+
+        // If running as service with stored Argon2 hash, verify against hash first
+        if let Some(ref hash) = stored_hash {
+            if !praxis::db::enc2::verify_master_key_hash(&password, hash) {
+                anyhow::bail!("Invalid MASTER_KEY (hash mismatch)");
+            }
+        } else {
+            // Interactive mode: verify by attempting decryption
             if !praxis::db::enc2::verify_password(&password) {
                 anyhow::bail!("Invalid MASTER_KEY");
             }
-            Some(password)
         }
+
+        Some(password)
     } else {
         None
     };
@@ -109,16 +165,8 @@ async fn run_services(cli_password: Option<String>, enable_discord: bool, enable
 
     // Build config, overriding sensitive fields from secrets if available
     let mut config = praxis::config::Config::from_env();
-    if let Some(ref key) = secrets.gateway_api_key {
-        if !key.is_empty() {
-            config.gateway_api_key = key.clone();
-        }
-    }
-    if let Some(ref pass) = secrets.dashboard_admin_password {
-        if !pass.is_empty() {
-            config.dashboard_admin_password = pass.clone();
-        }
-    }
+    config.apply_secrets(&secrets);
+    config.ensure_generated();
     config.validate()?;
 
     // Gateway
@@ -186,6 +234,104 @@ async fn pair_command(code: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn handle_service_action(action: &ServiceAction) -> anyhow::Result<()> {
+    let binary_path = std::env::current_exe()
+        .map_err(|_| anyhow::anyhow!("Could not determine binary path"))?
+        .to_string_lossy()
+        .to_string();
+
+    let working_dir = std::env::current_dir()
+        .map_err(|_| anyhow::anyhow!("Could not determine working directory"))?
+        .to_string_lossy()
+        .to_string();
+
+    match action {
+        ServiceAction::Install => {
+            println!("Enter the MASTER_KEY password for the service:");
+            let password = rpassword::prompt_password("MASTER_KEY: ")
+                .map_err(|e| anyhow::anyhow!("Failed to read password: {}", e))?;
+
+            if password.is_empty() {
+                anyhow::bail!("MASTER_KEY cannot be empty");
+            }
+
+            let hash = praxis::db::enc2::hash_master_key(&password);
+
+            let service_content = format!(
+                r#"[Unit]
+Description=Praxis AI Agent Platform
+After=network.target
+
+[Service]
+Type=simple
+User={user}
+WorkingDirectory={working_dir}
+ExecStart={binary_path} run
+Restart=on-failure
+RestartSec=5
+Environment=PRAXIS_MASTER_KEY_HASH={hash}
+
+[Install]
+WantedBy=multi-user.target
+"#,
+                user = std::env::var("USER").unwrap_or_else(|_| "root".to_string()),
+                working_dir = working_dir,
+                binary_path = binary_path,
+                hash = hash,
+            );
+
+            let service_path = "/etc/systemd/system/praxis.service";
+            std::fs::write(service_path, service_content)?;
+
+            std::process::Command::new("systemctl")
+                .args(["daemon-reload"])
+                .status()?;
+
+            println!("Service installed at {}", service_path);
+            println!("MASTER_KEY stored as Argon2 hash (not plaintext).");
+            println!("To start: sudo systemctl enable praxis && sudo systemctl start praxis");
+        }
+        ServiceAction::Stop => {
+            let status = std::process::Command::new("systemctl")
+                .args(["stop", "praxis"])
+                .status()?;
+            if status.success() {
+                println!("Praxis service stopped");
+            } else {
+                anyhow::bail!("Failed to stop service. Is it installed?");
+            }
+        }
+        ServiceAction::Start => {
+            let status = std::process::Command::new("systemctl")
+                .args(["start", "praxis"])
+                .status()?;
+            if status.success() {
+                println!("Praxis service started");
+            } else {
+                anyhow::bail!("Failed to start service. Is it installed?");
+            }
+        }
+        ServiceAction::Logs { follow, lines } => {
+            let mut args = vec!["-u", "praxis", "--no-pager"];
+            if *follow {
+                args.push("-f");
+            }
+            args.push("-n");
+            let lines_str = lines.to_string();
+            args.push(&lines_str);
+
+            let status = std::process::Command::new("journalctl")
+                .args(&args)
+                .status()?;
+            if !status.success() {
+                anyhow::bail!("Failed to retrieve logs. Is the service installed?");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,7 +384,70 @@ mod tests {
         let cli = Cli::try_parse_from(args).unwrap();
         match cli {
             Cli::Onboard { interactive } => assert!(interactive),
-            _ => panic!("Expected Onboard variant"),
+            _ => panic!("Expected Run variant"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_service_install() {
+        let args = vec!["praxis", "service", "install"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli {
+            Cli::Service { action } => assert!(matches!(action, ServiceAction::Install)),
+            _ => panic!("Expected Service variant"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_service_stop() {
+        let args = vec!["praxis", "service", "stop"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli {
+            Cli::Service { action } => assert!(matches!(action, ServiceAction::Stop)),
+            _ => panic!("Expected Service variant"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_service_start() {
+        let args = vec!["praxis", "service", "start"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli {
+            Cli::Service { action } => assert!(matches!(action, ServiceAction::Start)),
+            _ => panic!("Expected Service variant"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_service_logs_default() {
+        let args = vec!["praxis", "service", "logs"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli {
+            Cli::Service { action } => match action {
+                ServiceAction::Logs { follow, lines } => {
+                    assert!(!follow);
+                    assert_eq!(lines, 100);
+                }
+                _ => panic!("Expected Logs variant"),
+            },
+            _ => panic!("Expected Service variant"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_service_logs_follow() {
+        let args = vec!["praxis", "service", "logs", "-f", "-n", "50"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli {
+            Cli::Service { action } => match action {
+                ServiceAction::Logs { follow, lines } => {
+                    assert!(follow);
+                    assert_eq!(lines, 50);
+                }
+                _ => panic!("Expected Logs variant"),
+            },
+            _ => panic!("Expected Service variant"),
         }
     }
 }
+

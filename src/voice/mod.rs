@@ -1,8 +1,6 @@
 pub mod handler;
 pub mod wake_word;
 
-use thiserror::Error;
-
 // ── STT ──────────────────────────────────────────────────────────────────────
 
 pub mod stt {
@@ -597,6 +595,7 @@ pub mod tts {
         }
 
         #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct TTSResponse {
             audio: Option<String>,
             sample_rate: Option<u32>,

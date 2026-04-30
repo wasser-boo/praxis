@@ -1,5 +1,4 @@
 use crate::db::Database;
-use crate::db::contexts::Context;
 
 #[derive(Debug, Clone)]
 pub enum AgentControlSignal {
