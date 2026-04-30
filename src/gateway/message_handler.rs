@@ -108,7 +108,7 @@ pub async fn handle_message(
 
         // TTS: spawn if enabled
         if updated_ctx.settings.use_tts {
-            spawn_tts(reply.clone(), &updated_ctx.settings, user_id);
+            spawn_tts(reply.clone(), &updated_ctx.settings, &state.secrets, user_id);
         }
 
         return Ok(reply);
@@ -131,7 +131,7 @@ pub async fn handle_message(
 
     // TTS: spawn if enabled
     if updated_ctx.settings.use_tts {
-        spawn_tts(reply.clone(), &updated_ctx.settings, user_id);
+        spawn_tts(reply.clone(), &updated_ctx.settings, &state.secrets, user_id);
     }
 
     Ok(reply)
@@ -348,13 +348,13 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &crate::
     }
 }
 
-fn spawn_tts(text: String, settings: &crate::db::contexts::ContextSettings, user_id: &str) {
+fn spawn_tts(text: String, settings: &crate::db::contexts::ContextSettings, secrets: &crate::db::secrets::Secrets, user_id: &str) {
     let tts_type = settings.voice_tts_type.clone();
     let rvc_on = settings.rvc_on;
     let rvc_server = settings.rvc_server.clone();
     let rvc_model_path = settings.rvc_model_path.clone();
     let rvc_index_path = settings.rvc_index_path.clone();
-    let elevenlabs_api_key = settings.voice_elevenlabs_api_key.clone();
+    let elevenlabs_api_key = secrets.elevenlabs_api_key.clone();
     let elevenlabs_voice_id = settings.voice_elevenlabs_voice_id.clone();
     let elevenlabs_tts_model = settings.elevenlabs_tts_model.clone();
     let elevenlabs_stability = settings.elevenlabs_stability;
@@ -362,10 +362,10 @@ fn spawn_tts(text: String, settings: &crate::db::contexts::ContextSettings, user
     let elevenlabs_style = settings.elevenlabs_style;
     let elevenlabs_speed = settings.elevenlabs_speed;
     let elevenlabs_tts_language = settings.elevenlabs_tts_language.clone();
-    let minimax_api_key = settings.minimax_api_key.clone();
+    let minimax_api_key = secrets.minimax_api_key.clone();
     let minimax_voice_id = settings.minimax_voice_id.clone();
     let minimax_model = settings.minimax_tts_model.clone().unwrap_or_else(|| "speech-02-hd".to_string());
-    let mimo_api_key = settings.mimo_api_key.clone();
+    let mimo_api_key = secrets.mimo_api_key.clone();
     let mimo_tts_type = settings.mimo_tts_type.clone().unwrap_or_else(|| "builtin".to_string());
     let mimo_voice = settings.mimo_voice_id.clone();
     let audio_output_path = settings.voice_audio_output_path.clone();
@@ -458,9 +458,7 @@ fn spawn_tts(text: String, settings: &crate::db::contexts::ContextSettings, user
             let _ = tts::save_audio_file(&final_audio, folder.to_str().unwrap_or(path), "03_final");
         }
 
-        if let Err(e) = tts::play_audio_locally(&final_audio) {
-            tracing::warn!("TTS local playback failed: {}", e);
-        }
+        crate::event_channel::broadcast_voice_tts(&user_id, final_audio);
     });
 }
 

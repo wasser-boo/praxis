@@ -53,8 +53,6 @@ pub struct ContextSettings {
     #[serde(default)]
     pub voice_whisper_model_path: Option<String>,
     #[serde(default)]
-    pub voice_elevenlabs_stt_api_key: Option<String>,
-    #[serde(default)]
     pub voice_last_input: Option<String>,
     #[serde(default = "default_listen_timeout")]
     pub voice_listen_timeout_secs: i32,
@@ -64,8 +62,6 @@ pub struct ContextSettings {
     pub voice_tts_enabled: bool,
     #[serde(default = "default_tts")]
     pub voice_tts_type: String,
-    #[serde(default)]
-    pub voice_elevenlabs_api_key: Option<String>,
     #[serde(default)]
     pub voice_elevenlabs_voice_id: Option<String>,
     #[serde(default = "default_elevenlabs_stt_model")]
@@ -115,13 +111,9 @@ pub struct ContextSettings {
     #[serde(default)]
     pub qwen_tts_language: Option<String>,
     #[serde(default)]
-    pub minimax_api_key: Option<String>,
-    #[serde(default)]
     pub minimax_voice_id: Option<String>,
     #[serde(default)]
     pub minimax_tts_model: Option<String>,
-    #[serde(default)]
-    pub mimo_api_key: Option<String>,
     #[serde(default)]
     pub mimo_voice_id: Option<String>,
     #[serde(default)]
@@ -218,13 +210,11 @@ impl Default for ContextSettings {
             voice_stt_type: default_stt(),
             voice_vosk_model_path: None,
             voice_whisper_model_path: None,
-            voice_elevenlabs_stt_api_key: None,
             voice_last_input: None,
             voice_listen_timeout_secs: default_listen_timeout(),
             voice_owner_id: None,
             voice_tts_enabled: false,
             voice_tts_type: default_tts(),
-            voice_elevenlabs_api_key: None,
             voice_elevenlabs_voice_id: None,
             elevenlabs_stt_model: default_elevenlabs_stt_model(),
             elevenlabs_stt_language: None,
@@ -249,10 +239,8 @@ impl Default for ContextSettings {
             qwen_tts_model: None,
             qwen_tts_speaker: None,
             qwen_tts_language: None,
-            minimax_api_key: None,
             minimax_voice_id: None,
             minimax_tts_model: None,
-            mimo_api_key: None,
             mimo_voice_id: None,
             mimo_tts_type: None,
             history_with_toolcalls: false,
@@ -335,18 +323,6 @@ impl Database {
     }
 }
 
-/// Merge secrets into context settings at runtime (not stored)
-pub fn merge_secrets_into_settings(settings: &mut ContextSettings, secrets: &crate::db::secrets::Secrets) {
-    if let Some(ref key) = secrets.minimax_api_key {
-        settings.minimax_api_key = Some(key.clone());
-    }
-    if let Some(ref key) = secrets.mimo_api_key {
-        settings.mimo_api_key = Some(key.clone());
-    }
-    if let Some(ref key) = secrets.elevenlabs_api_key {
-        settings.voice_elevenlabs_api_key = Some(key.clone());
-    }
-}
 
 #[cfg(test)]
 mod db_tests {

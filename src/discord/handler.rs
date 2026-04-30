@@ -511,8 +511,7 @@ impl EventHandler for DiscordHandler {
                                                 ..Default::default()
                                             });
                                             let stt_type = ctx.settings.voice_stt_type.clone();
-                                            let api_key = ctx.settings.voice_elevenlabs_api_key.clone()
-                                                .or_else(|| secrets.elevenlabs_api_key.clone());
+                                            let api_key = secrets.elevenlabs_api_key.clone();
                                             let model_path = match stt_type.as_str() {
                                                 "vosk" => ctx.settings.voice_vosk_model_path.clone(),
                                                 "whisper" => ctx.settings.voice_whisper_model_path.clone(),
