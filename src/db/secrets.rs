@@ -25,6 +25,8 @@ pub struct Secrets {
     pub voice_elevenlabs_api_key: Option<String>,
     #[serde(default)]
     pub voice_elevenlabs_stt_api_key: Option<String>,
+    #[serde(default)]
+    pub custom: std::collections::HashMap<String, String>,
 }
 
 pub fn init_secrets(secrets: Secrets) {

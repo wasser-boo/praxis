@@ -61,6 +61,8 @@ pub struct SecretsInfo {
     pub elevenlabs_api_key: String,
     pub gateway_api_key: String,
     pub dashboard_admin_password: String,
+    #[serde(flatten)]
+    pub custom: std::collections::HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +76,8 @@ pub struct SecretsUpdate {
     pub gateway_api_key: Option<String>,
     pub dashboard_admin_password: Option<String>,
     pub master_password: Option<String>,
+    #[serde(flatten)]
+    pub custom: std::collections::HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -147,26 +151,26 @@ pub fn routes(db: crate::db::Database) -> Router {
     // Protected API routes with auth middleware
     let protected = Router::new()
         .route("/contexts", axum::routing::get(list_contexts))
-        .route("/contexts/{user_id}", axum::routing::get(get_context))
-        .route("/contexts/{user_id}", axum::routing::put(update_context))
-        .route("/messages/{user_id}", axum::routing::get(get_messages))
+        .route("/contexts/:user_id", axum::routing::get(get_context))
+        .route("/contexts/:user_id", axum::routing::put(update_context))
+        .route("/messages/:user_id", axum::routing::get(get_messages))
         .route("/templates", axum::routing::get(list_templates))
-        .route("/templates/{name}", axum::routing::get(get_template))
-        .route("/templates/{name}", axum::routing::put(update_template))
+        .route("/templates/:name", axum::routing::get(get_template))
+        .route("/templates/:name", axum::routing::put(update_template))
         .route("/tools", axum::routing::get(list_tools))
-        .route("/tools/{name}", axum::routing::put(update_tool))
-        .route("/memory/{user_id}", axum::routing::get(get_memory))
-        .route("/memory/{user_id}", axum::routing::put(update_memory))
+        .route("/tools/:name", axum::routing::put(update_tool))
+        .route("/memory/:user_id", axum::routing::get(get_memory))
+        .route("/memory/:user_id", axum::routing::put(update_memory))
         .route("/secrets", axum::routing::get(get_secrets))
         .route("/secrets", axum::routing::put(update_secrets))
         .route("/pairings", axum::routing::get(list_pairings))
-        .route("/pairings/{user_id}", axum::routing::delete(delete_pairing))
+        .route("/pairings/:user_id", axum::routing::delete(delete_pairing))
         .route("/pairings/pending", axum::routing::get(list_pending_pairings))
-        .route("/pairings/pending/{code}/approve", axum::routing::post(approve_pending_pairing))
-        .route("/pairings/pending/{code}", axum::routing::delete(delete_pending_pairing))
+        .route("/pairings/pending/:code/approve", axum::routing::post(approve_pending_pairing))
+        .route("/pairings/pending/:code", axum::routing::delete(delete_pending_pairing))
         .route("/cl-files", axum::routing::get(list_cl_files))
-        .route("/cl-files/{name}", axum::routing::get(get_cl_file))
-        .route("/cl-files/{name}", axum::routing::put(save_cl_file))
+        .route("/cl-files/:name", axum::routing::get(get_cl_file))
+        .route("/cl-files/:name", axum::routing::put(save_cl_file))
         .route("/cron-jobs", axum::routing::get(list_cron_jobs))
         .layer(middleware::from_fn_with_state(state.clone(), dashboard_auth_middleware));
 
@@ -486,6 +490,9 @@ async fn update_memory(
 
 async fn get_secrets() -> Result<Json<SecretsInfo>, StatusCode> {
     let secrets = crate::db::secrets::get_secrets();
+    let custom_masked: std::collections::HashMap<String, String> = secrets.custom.iter()
+        .map(|(k, v)| (k.clone(), crate::db::secrets::mask_secret(&Some(v.clone()))))
+        .collect();
     Ok(Json(SecretsInfo {
         discord_bot_token: crate::db::secrets::mask_secret(&secrets.discord_bot_token),
         openai_api_key: crate::db::secrets::mask_secret(&secrets.openai_api_key),
@@ -495,6 +502,7 @@ async fn get_secrets() -> Result<Json<SecretsInfo>, StatusCode> {
         elevenlabs_api_key: crate::db::secrets::mask_secret(&secrets.elevenlabs_api_key),
         gateway_api_key: crate::db::secrets::mask_secret(&secrets.gateway_api_key),
         dashboard_admin_password: crate::db::secrets::mask_secret(&secrets.dashboard_admin_password),
+        custom: custom_masked,
     }))
 }
 
@@ -511,6 +519,14 @@ async fn update_secrets(
     if let Some(v) = update.elevenlabs_api_key { secrets.elevenlabs_api_key = Some(v); }
     if let Some(v) = update.gateway_api_key { secrets.gateway_api_key = Some(v); }
     if let Some(v) = update.dashboard_admin_password { secrets.dashboard_admin_password = Some(v); }
+
+    for (k, v) in update.custom {
+        if v.is_empty() {
+            secrets.custom.remove(&k);
+        } else {
+            secrets.custom.insert(k, v);
+        }
+    }
 
     // Persist to enc2 if master password provided
     if let Some(ref password) = update.master_password {

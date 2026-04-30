@@ -497,7 +497,7 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
         "discord_upload_file" => {
             let filename = args["filename"].as_str().unwrap_or("");
             let base64_content = args["base64_content"].as_str().unwrap_or("");
-            match crate::tools::discord_upload::upload_file(user_id, filename, base64_content, "").await {
+            match crate::tools::discord_upload::upload_file(user_id, filename, base64_content, Some("")).await {
                 Ok(_) => format!("File '{}' uploaded", filename),
                 Err(e) => format!("Error: {}", e),
             }

@@ -51,7 +51,7 @@ async function apiFetch(path, options = {}) {
 
 async function validateTokenAndLoad() {
     try {
-        const res = await fetch(`${API_BASE}/api/status`, {
+        const res = await fetch(`${API_BASE}/api/contexts`, {
             headers: { 'Authorization': `Bearer ${authToken}` }
         });
         if (res.ok) {
@@ -109,6 +109,12 @@ async function loadTabData(tab) {
             case 'cron-jobs':
                 await loadCronJobs();
                 break;
+            case 'messages':
+                await populateUserDropdowns();
+                break;
+            case 'memory':
+                await populateUserDropdowns();
+                break;
         }
     } catch (err) {
         console.error(`Failed to load ${tab}:`, err);
@@ -141,6 +147,14 @@ async function loadOverview() {
 async function loadContexts() {
     try {
         const res = await apiFetch('/api/contexts');
+
+        if (!res.ok) {
+            const text = await res.text();
+            const list = document.getElementById('contexts-list');
+            list.innerHTML = `<div class="data-item"><span class="name" style="color:var(--error)">API error ${res.status}: ${escapeHtml(text)}</span></div>`;
+            return;
+        }
+
         const data = await res.json();
         const list = document.getElementById('contexts-list');
 
@@ -149,33 +163,56 @@ async function loadContexts() {
             return;
         }
 
-        list.innerHTML = data.contexts.map(ctx => `
+        list.innerHTML = data.contexts.map(ctx => {
+            const uid = ctx.user_id || '';
+            const safeUid = uid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            return `
             <div class="data-item">
                 <div>
-                    <span class="name">${escapeHtml(ctx.user_id)}</span>
-                    <span class="meta">Updated: ${new Date(ctx.updated_at).toLocaleString()}</span>
+                    <span class="name">${escapeHtml(uid)}</span>
+                    <span class="meta">Updated: ${ctx.updated_at ? new Date(ctx.updated_at).toLocaleString() : '-'}</span>
                 </div>
                 <div class="actions">
-                    <button class="btn btn-sm btn-primary" data-user-id="${escapeHtml(ctx.user_id)}" onclick="viewContext(this.dataset.userId)">View</button>
+                    <button class="btn btn-sm btn-primary" onclick="viewContext('${safeUid}')">View</button>
                 </div>
             </div>
-        `).join('');
+        `}).join('');
     } catch (err) {
         console.error('Failed to load contexts:', err);
+        const list = document.getElementById('contexts-list');
+        if (list) list.innerHTML = `<div class="data-item"><span class="name" style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`;
     }
 }
 
 async function viewContext(userId) {
     try {
         const res = await apiFetch(`/api/contexts/${encodeURIComponent(userId)}`);
+
+        if (!res.ok) {
+            const text = await res.text();
+            alert('Failed to load context: ' + res.status + ' ' + text);
+            return;
+        }
+
         const ctx = await res.json();
 
-        const settingsHtml = ctx.settings ? Object.entries(ctx.settings).map(([k, v]) => `
-            <div class="data-item">
-                <span class="name">${escapeHtml(k)}</span>
-                <span class="meta">${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v ?? ''))}</span>
-            </div>
-        `).join('') : '<div class="data-item"><span class="name">No settings</span></div>';
+        const redundantKeys = new Set([
+            'mimo_api_key', 'minimax_api_key', 'voice_elevenlabs_api_key', 'voice_elevenlabs_stt_api_key',
+            'cl_file', 'active_state', 'active_templates', 'llm_turn', 'compaction_summary', 'download'
+        ]);
+
+        const filteredSettings = ctx.settings
+            ? Object.entries(ctx.settings).filter(([k]) => !redundantKeys.has(k))
+            : [];
+
+        const settingsHtml = filteredSettings.length > 0
+            ? filteredSettings.map(([k, v]) => `
+                <div class="data-item">
+                    <span class="name">${escapeHtml(k)}</span>
+                    <span class="meta">${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v ?? ''))}</span>
+                </div>
+            `).join('')
+            : '<div class="data-item"><span class="name">No settings</span></div>';
 
         const customDataHtml = ctx.custom_data && Object.keys(ctx.custom_data).length > 0
             ? Object.entries(ctx.custom_data).map(([k, v]) => `
@@ -220,6 +257,7 @@ async function viewContext(userId) {
         document.getElementById('ctx-cancel-btn').addEventListener('click', () => toggleContextEdit());
     } catch (err) {
         console.error('Failed to load context:', err);
+        alert('Failed to load context: ' + err.message);
     }
 }
 
@@ -344,21 +382,40 @@ async function loadSecrets() {
         const data = await res.json();
         const container = document.getElementById('secrets-content');
 
-        container.innerHTML = `
-            <div class="data-list">
-                ${Object.entries(data).map(([key, value]) => `
+        const knownKeys = ['discord_bot_token', 'openai_api_key', 'anthropic_api_key', 'minimax_api_key',
+            'mimo_api_key', 'elevenlabs_api_key', 'gateway_api_key', 'dashboard_admin_password'];
+        const customKeys = Object.keys(data).filter(k => !knownKeys.includes(k));
+
+        const builtInHtml = knownKeys.map(key => `
+            <div class="data-item">
+                <span class="name">${escapeHtml(key)}</span>
+                <span class="meta">${escapeHtml(data[key] || 'Not set')}</span>
+            </div>
+        `).join('');
+
+        const customHtml = customKeys.length > 0
+            ? `<h3 style="margin-top:1rem">Custom Secrets</h3>
+               <div class="data-list">
+                ${customKeys.map(key => `
                     <div class="data-item">
                         <span class="name">${escapeHtml(key)}</span>
-                        <span class="meta">${escapeHtml(value || 'Not set')}</span>
+                        <span class="meta">${escapeHtml(data[key] || 'Not set')}</span>
+                        <button class="btn btn-sm btn-danger" style="margin-left:auto" onclick="deleteCustomSecret('${escapeHtml(key)}')">Delete</button>
                     </div>
                 `).join('')}
-            </div>
+               </div>`
+            : '';
+
+        container.innerHTML = `
+            <div class="data-list">${builtInHtml}</div>
+            ${customHtml}
             <div style="margin-top:1.5rem">
-                <h3>Update Secrets</h3>
+                <h3>Update Secret</h3>
                 <div class="form-group">
                     <label for="secret-field">Field</label>
                     <select id="secret-field" style="width:100%;padding:0.75rem 1rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:1rem">
-                        ${Object.keys(data).map(k => `<option value="${k}">${escapeHtml(k)}</option>`).join('')}
+                        ${knownKeys.map(k => `<option value="${k}">${escapeHtml(k)}</option>`).join('')}
+                        ${customKeys.map(k => `<option value="${k}">${escapeHtml(k)} (custom)</option>`).join('')}
                     </select>
                 </div>
                 <div class="form-group">
@@ -371,6 +428,23 @@ async function loadSecrets() {
                 </div>
                 <button class="btn btn-primary" onclick="saveSecret()">Save Secret</button>
                 <p id="secret-msg" class="hidden" style="margin-top:0.5rem"></p>
+            </div>
+            <div style="margin-top:1.5rem">
+                <h3>Add Custom Secret</h3>
+                <div class="form-group">
+                    <label for="custom-secret-key">Key Name</label>
+                    <input type="text" id="custom-secret-key" placeholder="e.g. MY_API_KEY">
+                </div>
+                <div class="form-group">
+                    <label for="custom-secret-value">Value</label>
+                    <input type="password" id="custom-secret-value" placeholder="Enter value">
+                </div>
+                <div class="form-group">
+                    <label for="custom-secret-master">Master Password</label>
+                    <input type="password" id="custom-secret-master" placeholder="Enter MASTER_KEY">
+                </div>
+                <button class="btn btn-primary" onclick="addCustomSecret()">Add Custom Secret</button>
+                <p id="custom-secret-msg" class="hidden" style="margin-top:0.5rem"></p>
             </div>
         `;
     } catch (err) {
@@ -410,6 +484,55 @@ async function saveSecret() {
         msgEl.textContent = 'Failed: ' + err.message;
         msgEl.style.color = 'var(--error)';
         msgEl.classList.remove('hidden');
+    }
+}
+
+async function addCustomSecret() {
+    const key = document.getElementById('custom-secret-key').value.trim();
+    const value = document.getElementById('custom-secret-value').value;
+    const master = document.getElementById('custom-secret-master').value;
+    const msgEl = document.getElementById('custom-secret-msg');
+
+    if (!key || !value) {
+        msgEl.textContent = 'Key and value are required';
+        msgEl.style.color = 'var(--error)';
+        msgEl.classList.remove('hidden');
+        return;
+    }
+
+    const body = { [key]: value };
+    if (master) body.master_password = master;
+
+    try {
+        const res = await apiFetch('/api/secrets', {
+            method: 'PUT',
+            body: JSON.stringify(body)
+        });
+        const text = await res.text();
+        msgEl.textContent = text;
+        msgEl.style.color = 'var(--success)';
+        msgEl.classList.remove('hidden');
+        document.getElementById('custom-secret-key').value = '';
+        document.getElementById('custom-secret-value').value = '';
+        document.getElementById('custom-secret-master').value = '';
+        setTimeout(() => loadSecrets(), 1500);
+    } catch (err) {
+        msgEl.textContent = 'Failed: ' + err.message;
+        msgEl.style.color = 'var(--error)';
+        msgEl.classList.remove('hidden');
+    }
+}
+
+async function deleteCustomSecret(key) {
+    if (!confirm(`Delete custom secret "${key}"?`)) return;
+    try {
+        await apiFetch('/api/secrets', {
+            method: 'PUT',
+            body: JSON.stringify({ [key]: '' })
+        });
+        loadSecrets();
+    } catch (err) {
+        alert('Failed to delete: ' + err.message);
     }
 }
 
@@ -591,10 +714,32 @@ async function loadCronJobs() {
     }
 }
 
+async function populateUserDropdowns() {
+    try {
+        const res = await apiFetch('/api/contexts');
+        if (!res.ok) return;
+        const data = await res.json();
+        const users = (data.contexts || []).map(c => c.user_id).filter(Boolean);
+
+        for (const selectId of ['message-user-id', 'memory-user-id']) {
+            const select = document.getElementById(selectId);
+            if (!select) continue;
+            const current = select.value;
+            select.innerHTML = '<option value="">Select user...</option>' +
+                users.map(uid => `<option value="${escapeHtml(uid)}">${escapeHtml(uid)}</option>`).join('');
+            if (current && users.includes(current)) {
+                select.value = current;
+            }
+        }
+    } catch (err) {
+        console.error('Failed to populate user dropdowns:', err);
+    }
+}
+
 async function loadMessages() {
     const userId = document.getElementById('message-user-id').value;
     if (!userId) {
-        alert('Please enter a User ID');
+        alert('Please select a User');
         return;
     }
 
@@ -602,7 +747,14 @@ async function loadMessages() {
     list.innerHTML = '<div class="data-item"><span class="name">Loading...</span></div>';
 
     try {
-        const res = await apiFetch(`/api/messages/${userId}`);
+        const res = await apiFetch(`/api/messages/${encodeURIComponent(userId)}`);
+
+        if (!res.ok) {
+            const text = await res.text();
+            list.innerHTML = `<div class="data-item"><span class="name" style="color:var(--error)">Error ${res.status}: ${escapeHtml(text || 'No response body')}</span></div>`;
+            return;
+        }
+
         const data = await res.json();
 
         if (!data.messages || data.messages.length === 0) {
@@ -612,7 +764,7 @@ async function loadMessages() {
 
         list.innerHTML = data.messages.map(m => `
             <div class="message ${m.role}">
-                <div class="role">${m.role}${m.tool_call_id ? ' (tool: ' + escapeHtml(m.tool_call_id) + ')' : ''}</div>
+                <div class="role">${escapeHtml(m.role)}${m.tool_call_id ? ' (tool: ' + escapeHtml(m.tool_call_id) + ')' : ''}</div>
                 <div class="content">${escapeHtml(m.content || '')}</div>
             </div>
         `).join('');
@@ -624,7 +776,7 @@ async function loadMessages() {
 async function loadMemory() {
     const userId = document.getElementById('memory-user-id').value;
     if (!userId) {
-        alert('Please enter a User ID');
+        alert('Please select a User');
         return;
     }
 
@@ -632,7 +784,14 @@ async function loadMemory() {
     container.innerHTML = '<div class="data-item"><span class="name">Loading...</span></div>';
 
     try {
-        const res = await apiFetch(`/api/memory/${userId}`);
+        const res = await apiFetch(`/api/memory/${encodeURIComponent(userId)}`);
+
+        if (!res.ok) {
+            const text = await res.text();
+            container.innerHTML = `<div class="data-item"><span class="name" style="color:var(--error)">Error ${res.status}: ${escapeHtml(text || 'No response body')}</span></div>`;
+            return;
+        }
+
         const data = await res.json();
 
         container.innerHTML = `
@@ -655,6 +814,7 @@ async function loadMemory() {
 // ── Modal ─────────────────────────────────────────────────────────────────────
 
 function showModal(title, content) {
+    closeModal();
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.id = 'modal-overlay';

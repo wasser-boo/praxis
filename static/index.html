@@ -87,10 +87,14 @@
                 <!-- Messages Tab -->
                 <div id="tab-messages" class="tab">
                     <h2>Messages</h2>
-                    <div class="form-group">
-                        <label for="message-user-id">User ID</label>
-                        <input type="text" id="message-user-id" placeholder="Enter user ID">
-                        <button id="load-messages-btn" class="btn btn-primary">Load</button>
+                    <div class="form-group" style="display:flex;gap:0.5rem;align-items:end">
+                        <div style="flex:1">
+                            <label for="message-user-id">User</label>
+                            <select id="message-user-id" style="width:100%;padding:0.75rem 1rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:1rem">
+                                <option value="">Select user...</option>
+                            </select>
+                        </div>
+                        <button id="load-messages-btn" class="btn btn-primary" style="width:auto">Load</button>
                     </div>
                     <div id="messages-list" class="data-list"></div>
                 </div>
@@ -110,10 +114,14 @@
                 <!-- Memory Tab -->
                 <div id="tab-memory" class="tab">
                     <h2>Memory</h2>
-                    <div class="form-group">
-                        <label for="memory-user-id">User ID</label>
-                        <input type="text" id="memory-user-id" placeholder="Enter user ID">
-                        <button id="load-memory-btn" class="btn btn-primary">Load</button>
+                    <div class="form-group" style="display:flex;gap:0.5rem;align-items:end">
+                        <div style="flex:1">
+                            <label for="memory-user-id">User</label>
+                            <select id="memory-user-id" style="width:100%;padding:0.75rem 1rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:1rem">
+                                <option value="">Select user...</option>
+                            </select>
+                        </div>
+                        <button id="load-memory-btn" class="btn btn-primary" style="width:auto">Load</button>
                     </div>
                     <div id="memory-content"></div>
                 </div>
