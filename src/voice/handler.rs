@@ -71,8 +71,8 @@ impl VoiceHandler {
             drop(last_time);
             let mut last_ssrc = self.last_active_ssrc.lock().await;
             *last_ssrc = Some(ssrc);
-            tracing::trace!("VOICE: Audio with content added, user buffer size {} samples, ssrc {}",
-                self.user_buffers.get(&ssrc).map(|b| b.len()).unwrap_or(0), ssrc);
+            tracing::debug!("VOICE: Speech detected (ssrc={}, buffer={} samples)", ssrc,
+                self.user_buffers.get(&ssrc).map(|b| b.len()).unwrap_or(0));
         }
     }
 
@@ -112,8 +112,8 @@ impl VoiceHandler {
             return;
         }
 
-        tracing::info!("VOICE_HANDLER: Pause detected ({}ms), sending {} samples for transcription",
-            time_since_speech.as_millis(), buffer_len);
+        tracing::info!("VOICE_HANDLER: Pause detected ({}ms), sending {} samples for transcription (ssrc={})",
+            time_since_speech.as_millis(), buffer_len, current_ssrc);
         if let Some(user_id) = self.get_user_from_ssrc(current_ssrc) {
             let tx_guard = self.transcription_tx.lock().await;
             if let Some(tx) = tx_guard.as_ref() {
@@ -180,8 +180,8 @@ pub mod songbird_integration {
                 EventContext::VoiceTick(tick) => {
                     let speaking_count = tick.speaking.len();
                     let silent_count = tick.silent.len();
-                    if speaking_count > 0 || silent_count > 0 {
-                        tracing::trace!("VOICETICK: {}/{} speaking, {}/{} silent", speaking_count, speaking_count + silent_count, silent_count, speaking_count + silent_count);
+                    if speaking_count > 0 {
+                        tracing::debug!("VOICETICK: {} user(s) speaking", speaking_count);
                     }
                     for (ssrc, data) in &tick.speaking {
                         let user_id_str = self.handler.get_user_from_ssrc(*ssrc).map(|u| u.to_string()).unwrap_or_else(|| "?".into());

@@ -5,8 +5,11 @@ use serde::{Deserialize, Serialize};
 /// - ["orange", "tomato"] means match if text contains "orange" or "tomato"
 /// - [] means never match (listening disabled)
 pub fn matches_wake_word(text: &str, wake_words: &[String]) -> WakeWordMatch {
+    tracing::debug!("WAKE_WORD: Checking '{}' against {:?}", text, wake_words);
+
     // Empty = listening disabled
     if wake_words.is_empty() {
+        tracing::debug!("WAKE_WORD: No wake words configured, listening disabled");
         return WakeWordMatch {
             matched: false,
             wake_word: None,
@@ -16,6 +19,7 @@ pub fn matches_wake_word(text: &str, wake_words: &[String]) -> WakeWordMatch {
 
     // ["*"] = always listen
     if wake_words.contains(&"*".to_string()) {
+        tracing::debug!("WAKE_WORD: Wildcard '*' active, always matching");
         return WakeWordMatch {
             matched: true,
             wake_word: None,
@@ -27,6 +31,7 @@ pub fn matches_wake_word(text: &str, wake_words: &[String]) -> WakeWordMatch {
     for word in wake_words {
         if text_lower.contains(&word.to_lowercase()) {
             let remaining = text_lower.replace(&word.to_lowercase(), "").trim().to_string();
+            tracing::info!("WAKE_WORD: Matched wake word '{}' in '{}', remaining: '{}'", word, text, remaining);
             return WakeWordMatch {
                 matched: true,
                 wake_word: Some(word.clone()),
@@ -35,6 +40,7 @@ pub fn matches_wake_word(text: &str, wake_words: &[String]) -> WakeWordMatch {
         }
     }
 
+    tracing::debug!("WAKE_WORD: No wake word matched in '{}'", text);
     WakeWordMatch {
         matched: false,
         wake_word: None,

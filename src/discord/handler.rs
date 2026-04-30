@@ -14,6 +14,7 @@ pub struct DiscordHandler {
     pub voice_muted: Arc<Mutex<bool>>,
     pub voice_deafened: Arc<Mutex<bool>>,
     pub secrets: crate::db::secrets::Secrets,
+    pub voice_handler: Option<Arc<crate::voice::handler::VoiceHandler>>,
 }
 
 impl DiscordHandler {
@@ -28,6 +29,7 @@ impl DiscordHandler {
             voice_muted: Arc::new(Mutex::new(false)),
             voice_deafened: Arc::new(Mutex::new(true)),
             secrets,
+            voice_handler: None,
         }
     }
 
@@ -418,19 +420,143 @@ impl EventHandler for DiscordHandler {
                         let manager = songbird::serenity::get(&ctx).await;
                         if let Some(manager) = manager {
                             match manager.join(guild_id, voice_channel_id).await {
-                                Ok(_handler) => {
+                                Ok(call) => {
                                     crate::discord::set_discord_voice_state(
                                         Some(guild_id.get()),
                                         Some(command.user.id.get()),
                                     )
                                     .await;
-                                    tracing::info!("Joined voice channel {} in guild {}", voice_channel_id, guild_id);
+
+                                    // Set up voice handler and transcription pipeline
+                                    let voice_handler = Arc::new(crate::voice::handler::VoiceHandler::new());
+                                    let voice_receiver = crate::voice::handler::songbird_integration::VoiceReceiver::new(voice_handler.clone());
+
+                                    // Register event handler on the call
+                                    {
+                                        let mut call_lock = call.lock().await;
+                                        call_lock.add_global_event(
+                                            songbird::events::Event::SpeakingStateUpdate,
+                                            voice_receiver.clone(),
+                                        );
+                                        call_lock.add_global_event(
+                                            songbird::events::Event::VoiceTick,
+                                            voice_receiver.clone(),
+                                        );
+                                        call_lock.add_global_event(
+                                            songbird::events::Event::ClientDisconnect,
+                                            voice_receiver.clone(),
+                                        );
+                                    }
+
+                                    // Set up transcription channel
+                                    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u64, Vec<i16>)>(10);
+                                    voice_handler.set_transcription_channel(tx).await;
+
+                                    // Spawn transcription processing task
+                                    let db = self.db.clone();
+                                    let ws_client = self.ws_client.clone();
+                                    let secrets = self.secrets.clone();
+                                    let voice_muted = self.voice_muted.clone();
+                                    tokio::spawn(async move {
+                                        tracing::info!("VOICE_PIPELINE: Transcription processor started");
+                                        while let Some((discord_user_id, audio_data)) = rx.recv().await {
+                                            // Check if muted
+                                            if *voice_muted.lock().await {
+                                                tracing::debug!("VOICE_PIPELINE: Bot is muted, skipping transcription");
+                                                continue;
+                                            }
+
+                                            // Look up paired user
+                                            let user_id = match db.get_pairing_by_discord(&discord_user_id.to_string()) {
+                                                Ok(Some(p)) => p.user_id,
+                                                _ => {
+                                                    tracing::debug!("VOICE_PIPELINE: No pairing for Discord user {}, skipping", discord_user_id);
+                                                    continue;
+                                                }
+                                            };
+
+                                            tracing::info!("VOICE_PIPELINE: Received {} samples from user {}", audio_data.len(), user_id);
+
+                                            // Get STT config from context
+                                            let ctx = db.load_context(&user_id).unwrap_or_else(|_| crate::db::contexts::Context {
+                                                user_id: user_id.clone(),
+                                                ..Default::default()
+                                            });
+                                            let stt_type = ctx.settings.voice_stt_type.clone().unwrap_or_else(|| "vosk".to_string());
+                                            let api_key = ctx.settings.voice_elevenlabs_api_key.clone()
+                                                .or_else(|| secrets.elevenlabs_api_key.clone());
+                                            let model_path = match stt_type.as_str() {
+                                                "vosk" => ctx.settings.voice_vosk_model_path.clone(),
+                                                "whisper" => ctx.settings.voice_whisper_model_path.clone(),
+                                                _ => None,
+                                            };
+
+                                            // Convert i16 samples to WAV bytes
+                                            let wav_data = crate::voice::pcm_to_wav(&audio_data, 48000, 1);
+
+                                            // Transcribe
+                                            let transcription = crate::voice::transcribe_audio(
+                                                &wav_data,
+                                                &stt_type,
+                                                api_key.as_deref(),
+                                                model_path.as_deref(),
+                                            ).await;
+
+                                            let text = match transcription {
+                                                Ok(t) => t.trim().to_string(),
+                                                Err(e) => {
+                                                    tracing::warn!("VOICE_PIPELINE: Transcription failed for user {}: {}", user_id, e);
+                                                    continue;
+                                                }
+                                            };
+
+                                            if text.is_empty() {
+                                                tracing::debug!("VOICE_PIPELINE: Empty transcription, skipping");
+                                                continue;
+                                            }
+
+                                            tracing::info!("VOICE_PIPELINE: Transcribed for user {}: '{}'", user_id, text);
+
+                                            // Check wake words
+                                            let wake_words = ctx.settings.voice_wake_words.clone().unwrap_or_default();
+                                            let wake_match = crate::voice::wake_word::matches_wake_word(&text, &wake_words);
+
+                                            if !wake_match.matched {
+                                                tracing::debug!("VOICE_PIPELINE: No wake word in '{}', skipping", text);
+                                                continue;
+                                            }
+
+                                            let message_text = if wake_match.remaining_text.is_empty() {
+                                                text.clone()
+                                            } else {
+                                                wake_match.remaining_text.clone()
+                                            };
+
+                                            tracing::info!("VOICE_PIPELINE: Wake word {:?} matched, sending message: '{}'",
+                                                wake_match.wake_word, message_text);
+
+                                            // Send to gateway via WsClient
+                                            let payload = crate::discord::ws_client::OutgoingMessage::Message {
+                                                user_id: user_id.clone(),
+                                                content: message_text,
+                                                channel_id: format!("voice:{}", guild_id),
+                                            };
+
+                                            let mut ws = ws_client.lock().await;
+                                            if let Err(e) = ws.send(payload).await {
+                                                tracing::error!("VOICE_PIPELINE: Failed to send to gateway: {}", e);
+                                            }
+                                        }
+                                        tracing::info!("VOICE_PIPELINE: Transcription processor stopped");
+                                    });
+
+                                    tracing::info!("Joined voice channel {} in guild {} with STT pipeline", voice_channel_id, guild_id);
                                     let _ = command
                                         .create_response(
                                             &ctx.http,
                                             serenity::builder::CreateInteractionResponse::Message(
                                                 serenity::builder::CreateInteractionResponseMessage::new()
-                                                    .content(format!("Joined <#{}>", voice_channel_id)),
+                                                    .content(format!("Joined <#{}> (voice listening active)", voice_channel_id)),
                                             ),
                                         )
                                         .await;

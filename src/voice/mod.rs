@@ -1131,7 +1131,8 @@ pub async fn transcribe_audio(
     api_key: Option<&str>,
     model_path: Option<&str>,
 ) -> Result<String, stt::STTError> {
-    match stt_type {
+    tracing::info!("STT: Starting transcription with engine '{}', audio size {} bytes", stt_type, wav_data.len());
+    let result = match stt_type {
         "elevenlabs" => {
             let api_key = api_key.ok_or_else(|| stt::STTError::NotReady("ElevenLabs API key not set".to_string()))?;
             let stt = ElevenLabsSTT::new(api_key.to_string());
@@ -1152,7 +1153,23 @@ pub async fn transcribe_audio(
             stt.transcribe(wav_data).await
         }
         _ => Err(stt::STTError::NotReady(format!("Unknown STT type: {}", stt_type))),
+    };
+
+    match &result {
+        Ok(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                tracing::debug!("STT: Transcription result: (empty/silence)");
+            } else {
+                tracing::info!("STT: Transcription result: '{}'", trimmed);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("STT: Transcription failed: {}", e);
+        }
     }
+
+    result
 }
 
 fn wav_to_pcm(wav_data: &[u8]) -> Result<Vec<i16>, stt::STTError> {
