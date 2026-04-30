@@ -68,6 +68,26 @@ pub struct ContextSettings {
     pub voice_elevenlabs_api_key: Option<String>,
     #[serde(default)]
     pub voice_elevenlabs_voice_id: Option<String>,
+    #[serde(default = "default_elevenlabs_stt_model")]
+    pub elevenlabs_stt_model: String,
+    #[serde(default)]
+    pub elevenlabs_stt_language: Option<String>,
+    #[serde(default)]
+    pub elevenlabs_stt_tag_audio_events: bool,
+    #[serde(default = "default_elevenlabs_stt_no_verbatim")]
+    pub elevenlabs_stt_no_verbatim: bool,
+    #[serde(default = "default_elevenlabs_tts_model")]
+    pub elevenlabs_tts_model: String,
+    #[serde(default = "default_elevenlabs_stability")]
+    pub elevenlabs_stability: f32,
+    #[serde(default = "default_elevenlabs_similarity_boost")]
+    pub elevenlabs_similarity_boost: f32,
+    #[serde(default)]
+    pub elevenlabs_style: Option<f32>,
+    #[serde(default)]
+    pub elevenlabs_speed: Option<f32>,
+    #[serde(default)]
+    pub elevenlabs_tts_language: Option<String>,
     #[serde(default)]
     pub use_tts: bool,
     #[serde(default)]
@@ -175,6 +195,21 @@ fn default_feedback_window() -> i32 {
 fn default_allowed() -> Vec<String> {
     vec!["*".to_string()]
 }
+fn default_elevenlabs_stt_model() -> String {
+    "scribe_v2".to_string()
+}
+fn default_elevenlabs_stt_no_verbatim() -> bool {
+    true
+}
+fn default_elevenlabs_tts_model() -> String {
+    "eleven_multilingual_v2".to_string()
+}
+fn default_elevenlabs_stability() -> f32 {
+    0.5
+}
+fn default_elevenlabs_similarity_boost() -> f32 {
+    0.75
+}
 
 impl Default for ContextSettings {
     fn default() -> Self {
@@ -191,6 +226,16 @@ impl Default for ContextSettings {
             voice_tts_type: default_tts(),
             voice_elevenlabs_api_key: None,
             voice_elevenlabs_voice_id: None,
+            elevenlabs_stt_model: default_elevenlabs_stt_model(),
+            elevenlabs_stt_language: None,
+            elevenlabs_stt_tag_audio_events: false,
+            elevenlabs_stt_no_verbatim: default_elevenlabs_stt_no_verbatim(),
+            elevenlabs_tts_model: default_elevenlabs_tts_model(),
+            elevenlabs_stability: default_elevenlabs_stability(),
+            elevenlabs_similarity_boost: default_elevenlabs_similarity_boost(),
+            elevenlabs_style: None,
+            elevenlabs_speed: None,
+            elevenlabs_tts_language: None,
             use_tts: false,
             voice_muted: false,
             voice_deafened: default_deafened(),

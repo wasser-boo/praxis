@@ -114,9 +114,9 @@ impl DiscordBot {
         #[cfg(feature = "songbird")]
         {
             use songbird::SerenityInit;
-            use songbird::driver::DecodeMode;
+            use songbird::driver::{DecodeMode, DecodeConfig, Channels, SampleRate};
             let voice_config = songbird::Config::default()
-                .decode_mode(DecodeMode::Decode(Default::default()));
+                .decode_mode(DecodeMode::Decode(DecodeConfig::new(Channels::Mono, SampleRate::Hz16000)));
             client_builder = client_builder.register_songbird_from_config(voice_config);
         }
 

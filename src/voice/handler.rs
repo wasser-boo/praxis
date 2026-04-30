@@ -17,10 +17,11 @@ pub struct VoiceHandler {
     pub last_active_ssrc: Arc<Mutex<Option<u32>>>,
     pub sample_rate: u32,
     pub ssrc_to_user: Arc<DashMap<u32, u64>>,
-    pub transcription_tx: Arc<Mutex<Option<mpsc::Sender<(u64, Vec<i16>)>>>>,
+    pub transcription_tx: Arc<Mutex<Option<mpsc::Sender<(String, Vec<i16>)>>>>,
     pub user_buffers: Arc<DashMap<u32, Vec<i16>>>,
     pub user_last_speech: Arc<DashMap<u32, std::time::Instant>>,
-    pub fallback_user_id: Arc<Mutex<Option<u64>>>,
+    pub fallback_user_id: Arc<Mutex<Option<String>>>,
+    pub allowed_discord_ids: Arc<Mutex<std::collections::HashSet<u64>>>,
 }
 
 impl VoiceHandler {
@@ -31,21 +32,33 @@ impl VoiceHandler {
             audio_buffer: Arc::new(Mutex::new(Vec::new())),
             last_speech_time: Arc::new(Mutex::new(std::time::Instant::now())),
             last_active_ssrc: Arc::new(Mutex::new(None)),
-            sample_rate: 48000,
+            sample_rate: 16000,
             ssrc_to_user: Arc::new(DashMap::new()),
             transcription_tx: Arc::new(Mutex::new(None)),
             user_buffers: Arc::new(DashMap::new()),
             user_last_speech: Arc::new(DashMap::new()),
             fallback_user_id: Arc::new(Mutex::new(None)),
+            allowed_discord_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
-    pub async fn set_fallback_user(&self, user_id: u64) {
-        *self.fallback_user_id.lock().await = Some(user_id);
-        tracing::info!("Voice: fallback user set to {}", user_id);
+    pub async fn set_allowed_discord_ids(&self, ids: Vec<u64>) {
+        let mut set = self.allowed_discord_ids.lock().await;
+        *set = ids.into_iter().collect();
+        tracing::info!("Voice: allowed Discord users: {:?}", set);
     }
 
-    pub async fn set_transcription_channel(&self, tx: mpsc::Sender<(u64, Vec<i16>)>) {
+    pub async fn is_user_allowed(&self, discord_id: u64) -> bool {
+        let set = self.allowed_discord_ids.lock().await;
+        set.is_empty() || set.contains(&discord_id)
+    }
+
+    pub async fn set_fallback_user(&self, user_id: String) {
+        tracing::info!("Voice: fallback user set to {}", user_id);
+        *self.fallback_user_id.lock().await = Some(user_id);
+    }
+
+    pub async fn set_transcription_channel(&self, tx: mpsc::Sender<(String, Vec<i16>)>) {
         let mut lock = self.transcription_tx.lock().await;
         *lock = Some(tx);
     }
@@ -66,13 +79,20 @@ impl VoiceHandler {
     }
 
     pub async fn add_audio_raw(&self, audio: &[i16], ssrc: u32) {
+        // If SSRC is mapped to a user, check if they're allowed
+        if let Some(discord_id) = self.get_user_from_ssrc(ssrc) {
+            if !self.is_user_allowed(discord_id).await {
+                return;
+            }
+        }
+
         self.user_buffers.entry(ssrc).or_insert_with(Vec::new).extend_from_slice(audio);
         self.user_last_speech.insert(ssrc, std::time::Instant::now());
 
         let mut buffer = self.audio_buffer.lock().await;
         buffer.extend_from_slice(audio);
 
-        let has_content = audio.iter().any(|&s| s.abs() > 100);
+        let has_content = audio.iter().any(|&s| s.abs() > 50);
         if has_content {
             let mut last_time = self.last_speech_time.lock().await;
             *last_time = std::time::Instant::now();
@@ -87,11 +107,18 @@ impl VoiceHandler {
     }
 
     pub async fn process_audio(&self, current_ssrc: u32) {
+        // If SSRC is mapped to a non-allowed user, skip
+        if let Some(discord_id) = self.get_user_from_ssrc(current_ssrc) {
+            if !self.is_user_allowed(discord_id).await {
+                return;
+            }
+        }
+
         // Get user: either from SSRC mapping or fallback
         let user_id = match self.get_user_from_ssrc(current_ssrc) {
-            Some(uid) => uid,
+            Some(uid) => uid.to_string(),
             None => {
-                match *self.fallback_user_id.lock().await {
+                match self.fallback_user_id.lock().await.clone() {
                     Some(uid) => uid,
                     None => return,
                 }
@@ -99,7 +126,7 @@ impl VoiceHandler {
         };
 
         let time_since_speech = self.time_since_last_speech().await;
-        let pause_threshold = std::time::Duration::from_secs_f32(0.8);
+        let pause_threshold = std::time::Duration::from_secs_f32(0.5);
 
         if time_since_speech < pause_threshold {
             return;
@@ -114,7 +141,7 @@ impl VoiceHandler {
             return;
         };
 
-        let min_duration_secs = 0.3;
+        let min_duration_secs = 0.2;
         let min_samples = (self.sample_rate as f32 * min_duration_secs) as usize;
 
         if buffer_len < min_samples {
@@ -152,11 +179,11 @@ impl VoiceHandler {
 pub mod songbird_integration {
     use super::*;
     use songbird::events::{Event, EventContext, EventHandler as SongbirdEventHandler};
-    use songbird::{Config, driver::DecodeMode};
+    use songbird::{Config, driver::{DecodeMode, DecodeConfig, Channels, SampleRate}};
     use async_trait::async_trait;
 
     pub fn create_songbird_config() -> Config {
-        Config::default().decode_mode(DecodeMode::Decode(Default::default()))
+        Config::default().decode_mode(DecodeMode::Decode(DecodeConfig::new(Channels::Mono, SampleRate::Hz16000)))
     }
 
     #[derive(Clone)]
@@ -183,16 +210,12 @@ pub mod songbird_integration {
                 EventContext::VoiceTick(tick) => {
                     let speaking_count = tick.speaking.len();
                     if speaking_count > 0 {
-                        let mapped: Vec<String> = tick.speaking.keys()
-                            .filter_map(|ssrc| self.handler.get_user_from_ssrc(*ssrc).map(|u| format!("{}->{}", ssrc, u)))
-                            .collect();
                         let unmapped: Vec<u32> = tick.speaking.keys()
                             .filter(|ssrc| self.handler.get_user_from_ssrc(**ssrc).is_none())
                             .copied()
                             .collect();
                         if !unmapped.is_empty() {
-                            tracing::info!("VOICETICK: {} speaking, mapped=[{}], unmapped={:?}",
-                                speaking_count, mapped.join(", "), unmapped);
+                            tracing::debug!("VOICETICK: {} speaking, unmapped={:?}", speaking_count, unmapped);
                         }
                     }
                     for (ssrc, data) in &tick.speaking {
@@ -270,7 +293,7 @@ mod handler_tests {
     async fn test_voice_handler_new() {
         let handler = VoiceHandler::new();
         assert!(!handler.is_muted().await);
-        assert_eq!(handler.sample_rate, 48000);
+        assert_eq!(handler.sample_rate, 16000);
         assert!(handler.get_user_from_ssrc(1234).is_none());
     }
 
@@ -306,11 +329,11 @@ mod handler_tests {
     async fn test_add_audio_raw_updates_buffer() {
         let handler = VoiceHandler::new();
         handler.set_ssrc_user(100, 42);
-        let audio = vec![1000i16; 4800]; // 0.1s at 48kHz
+        let audio = vec![1000i16; 1600]; // 0.1s at 16kHz
         handler.add_audio_raw(&audio, 100).await;
 
         let buffer = handler.audio_buffer.lock().await;
-        assert_eq!(buffer.len(), 4800);
+        assert_eq!(buffer.len(), 1600);
     }
 
     #[tokio::test]
@@ -331,15 +354,13 @@ mod handler_tests {
     #[tokio::test]
     async fn test_transcription_channel() {
         let handler = VoiceHandler::new();
-        let (tx, mut rx) = mpsc::channel::<(u64, Vec<i16>)>(10);
+        let (tx, mut rx) = mpsc::channel::<(String, Vec<i16>)>(10);
         handler.set_transcription_channel(tx).await;
         handler.set_ssrc_user(100, 42);
 
-        // Add enough audio to exceed minimum
-        let audio = vec![1000i16; 48000]; // 1s at 48kHz
+        let audio = vec![1000i16; 16000]; // 1s at 16kHz
         handler.add_audio_raw(&audio, 100).await;
 
-        // Reset last_speech_time to simulate pause
         {
             let mut last = handler.last_speech_time.lock().await;
             *last = std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -350,17 +371,17 @@ mod handler_tests {
         let msg = rx.recv().await;
         assert!(msg.is_some());
         let (user_id, _) = msg.unwrap();
-        assert_eq!(user_id, 42);
+        assert_eq!(user_id, "42");
     }
 
     #[tokio::test]
     async fn test_process_audio_no_ssrc_mapping() {
         let handler = VoiceHandler::new();
-        let (tx, _rx) = mpsc::channel::<(u64, Vec<i16>)>(10);
+        let (tx, _rx) = mpsc::channel::<(String, Vec<i16>)>(10);
         handler.set_transcription_channel(tx).await;
 
         // Add audio without SSRC mapping
-        let audio = vec![1000i16; 48000];
+        let audio = vec![1000i16; 16000];
         handler.add_audio_raw(&audio, 999).await;
 
         // Reset speech time
@@ -377,7 +398,7 @@ mod handler_tests {
     async fn test_process_audio_too_short() {
         let handler = VoiceHandler::new();
         handler.set_ssrc_user(100, 42);
-        let (tx, mut rx) = mpsc::channel::<(u64, Vec<i16>)>(10);
+        let (tx, mut rx) = mpsc::channel::<(String, Vec<i16>)>(10);
         handler.set_transcription_channel(tx).await;
 
         // Add very short audio (below minimum)

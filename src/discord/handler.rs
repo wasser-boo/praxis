@@ -452,10 +452,19 @@ impl EventHandler for DiscordHandler {
                                     // Set fallback user from the Discord user who invoked /join
                                     let fallback_discord_id = command.user.id.get();
                                     if let Ok(Some(pairing)) = self.db.get_pairing_by_discord(&fallback_discord_id.to_string()) {
-                                        if let Ok(uid) = pairing.user_id.parse::<u64>() {
-                                            voice_handler.set_fallback_user(uid).await;
+                                        voice_handler.set_fallback_user(pairing.user_id.clone()).await;
+                                    }
+
+                                    // Set allowed Discord user IDs (only paired users)
+                                    let mut allowed_ids = vec![fallback_discord_id];
+                                    if let Ok(all_pairings) = self.db.list_all_pairings() {
+                                        for p in &all_pairings {
+                                            if let Ok(did) = p.discord_user_id.parse::<u64>() {
+                                                allowed_ids.push(did);
+                                            }
                                         }
                                     }
+                                    voice_handler.set_allowed_discord_ids(allowed_ids).await;
 
                                     let voice_receiver = crate::voice::handler::songbird_integration::VoiceReceiver::new(voice_handler.clone());
 
@@ -477,7 +486,7 @@ impl EventHandler for DiscordHandler {
                                     }
 
                                     // Set up transcription channel
-                                    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u64, Vec<i16>)>(10);
+                                    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Vec<i16>)>(10);
                                     voice_handler.set_transcription_channel(tx).await;
 
                                     // Spawn transcription processing task
@@ -487,21 +496,12 @@ impl EventHandler for DiscordHandler {
                                     let voice_muted = self.voice_muted.clone();
                                     tokio::spawn(async move {
                                         tracing::info!("VOICE_PIPELINE: Transcription processor started");
-                                        while let Some((discord_user_id, audio_data)) = rx.recv().await {
+                                        while let Some((user_id, audio_data)) = rx.recv().await {
                                             // Check if muted
                                             if *voice_muted.lock().await {
                                                 tracing::debug!("VOICE_PIPELINE: Bot is muted, skipping transcription");
                                                 continue;
                                             }
-
-                                            // Look up paired user
-                                            let user_id = match db.get_pairing_by_discord(&discord_user_id.to_string()) {
-                                                Ok(Some(p)) => p.user_id,
-                                                _ => {
-                                                    tracing::debug!("VOICE_PIPELINE: No pairing for Discord user {}, skipping", discord_user_id);
-                                                    continue;
-                                                }
-                                            };
 
                                             tracing::info!("VOICE_PIPELINE: Received {} samples from user {}", audio_data.len(), user_id);
 
@@ -519,15 +519,21 @@ impl EventHandler for DiscordHandler {
                                                 _ => None,
                                             };
 
-                                            // Convert i16 samples to WAV bytes
-                                            let wav_data = crate::voice::pcm_to_wav(&audio_data, 48000, 1);
+                                            let stt_config = crate::voice::STTConfig {
+                                                engine: stt_type,
+                                                api_key,
+                                                model_path,
+                                                elevenlabs_model: ctx.settings.elevenlabs_stt_model.clone(),
+                                                elevenlabs_language: ctx.settings.elevenlabs_stt_language.clone(),
+                                                elevenlabs_tag_audio_events: ctx.settings.elevenlabs_stt_tag_audio_events,
+                                                elevenlabs_no_verbatim: ctx.settings.elevenlabs_stt_no_verbatim,
+                                            };
 
-                                            // Transcribe
+                                            let wav_data = crate::voice::pcm_to_wav(&audio_data, 16000, 1);
+
                                             let transcription = crate::voice::transcribe_audio(
                                                 &wav_data,
-                                                &stt_type,
-                                                api_key.as_deref(),
-                                                model_path.as_deref(),
+                                                &stt_config,
                                             ).await;
 
                                             let text = match transcription {

@@ -356,6 +356,12 @@ fn spawn_tts(text: String, settings: &crate::db::contexts::ContextSettings, user
     let rvc_index_path = settings.rvc_index_path.clone();
     let elevenlabs_api_key = settings.voice_elevenlabs_api_key.clone();
     let elevenlabs_voice_id = settings.voice_elevenlabs_voice_id.clone();
+    let elevenlabs_tts_model = settings.elevenlabs_tts_model.clone();
+    let elevenlabs_stability = settings.elevenlabs_stability;
+    let elevenlabs_similarity_boost = settings.elevenlabs_similarity_boost;
+    let elevenlabs_style = settings.elevenlabs_style;
+    let elevenlabs_speed = settings.elevenlabs_speed;
+    let elevenlabs_tts_language = settings.elevenlabs_tts_language.clone();
     let minimax_api_key = settings.minimax_api_key.clone();
     let minimax_voice_id = settings.minimax_voice_id.clone();
     let minimax_model = settings.minimax_tts_model.clone().unwrap_or_else(|| "speech-02-hd".to_string());
@@ -379,8 +385,19 @@ fn spawn_tts(text: String, settings: &crate::db::contexts::ContextSettings, user
             "elevenlabs" => {
                 let api_key = elevenlabs_api_key.unwrap_or_default();
                 let voice_id = elevenlabs_voice_id.unwrap_or_default();
+                if api_key.is_empty() || voice_id.is_empty() {
+                    tracing::warn!("TTS FAILED: elevenlabs: API key or voice_id not set");
+                    return;
+                }
                 let tts_engine = tts::elevenlabs::ElevenLabsTTS::new(api_key, voice_id);
-                match tts_engine.speak(&text).await {
+                let voice_settings = tts::elevenlabs::ElevenLabsVoiceSettings {
+                    stability: elevenlabs_stability,
+                    similarity_boost: elevenlabs_similarity_boost,
+                    style: elevenlabs_style,
+                    speed: elevenlabs_speed,
+                    language: elevenlabs_tts_language,
+                };
+                match tts_engine.speak_with_settings(&text, &elevenlabs_tts_model, &voice_settings).await {
                     Ok(bytes) => bytes,
                     Err(e) => { tracing::warn!("TTS FAILED: elevenlabs: {}", e); return; }
                 }

@@ -94,13 +94,11 @@ pub mod vosk_stt {
 
             let model = VOSK_MODEL.get().unwrap();
 
-            let downsampled = super::downsample_48k_to_16k(audio_data);
             let noise_threshold = 300;
-            let cleaned_audio = super::apply_noise_gate(&downsampled, noise_threshold);
+            let cleaned_audio = super::apply_noise_gate(audio_data, noise_threshold);
 
             let sample_rate = 16000.0f32;
-            tracing::info!("VOSK: Creating recognizer with {} audio samples (downsampled from {})",
-                cleaned_audio.len(), audio_data.len());
+            tracing::info!("VOSK: Creating recognizer with {} audio samples", cleaned_audio.len());
             let mut recognizer = vosk::Recognizer::new(model, sample_rate)
                 .ok_or_else(|| STTError::TranscriptionFailed("Failed to create recognizer".to_string()))?;
 
@@ -270,6 +268,10 @@ pub mod elevenlabs_stt {
         }
 
         pub async fn transcribe(&self, audio_data: &[u8]) -> Result<String, STTError> {
+            self.transcribe_with_config(audio_data, "scribe_v2", None, false, true).await
+        }
+
+        pub async fn transcribe_with_config(&self, audio_data: &[u8], model: &str, language: Option<&str>, tag_audio_events: bool, no_verbatim: bool) -> Result<String, STTError> {
             let url = "https://api.elevenlabs.io/v1/speech-to-text";
 
             let file_part = reqwest::multipart::Part::bytes(audio_data.to_vec())
@@ -277,10 +279,17 @@ pub mod elevenlabs_stt {
                 .mime_str("audio/wav")
                 .map_err(|e| STTError::TranscriptionFailed(format!("Failed to create multipart part: {}", e)))?;
 
-            let form = reqwest::multipart::Form::new()
+            let mut form = reqwest::multipart::Form::new()
                 .part("file", file_part)
-                .text("model_id", "scribe_v1")
-                .text("language", "auto");
+                .text("model_id", model.to_string())
+                .text("tag_audio_events", tag_audio_events.to_string())
+                .text("no_verbatim", no_verbatim.to_string());
+
+            if let Some(lang) = language {
+                if !lang.is_empty() {
+                    form = form.text("language_code", lang.to_string());
+                }
+            }
 
             let response = self.client
                 .post(url)
@@ -414,24 +423,62 @@ pub mod tts {
             client: Client,
         }
 
+        #[derive(Debug, Clone, Default)]
+        pub struct ElevenLabsVoiceSettings {
+            pub stability: f32,
+            pub similarity_boost: f32,
+            pub style: Option<f32>,
+            pub speed: Option<f32>,
+            pub language: Option<String>,
+        }
+
         impl ElevenLabsTTS {
             pub fn new(api_key: String, voice_id: String) -> Self {
                 Self { api_key, voice_id, client: Client::new() }
             }
 
             pub async fn speak(&self, text: &str) -> Result<Vec<u8>, TTSError> {
+                self.speak_with_model(text, "eleven_multilingual_v2").await
+            }
+
+            pub async fn speak_with_model(&self, text: &str, model: &str) -> Result<Vec<u8>, TTSError> {
+                self.speak_with_settings(text, model, &ElevenLabsVoiceSettings::default()).await
+            }
+
+            pub async fn speak_with_settings(&self, text: &str, model: &str, settings: &ElevenLabsVoiceSettings) -> Result<Vec<u8>, TTSError> {
                 let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{}/stream", self.voice_id);
+
+                let stability = if settings.stability > 0.0 { settings.stability } else { 0.5 };
+                let similarity_boost = if settings.similarity_boost > 0.0 { settings.similarity_boost } else { 0.75 };
+
+                let mut voice_settings = serde_json::json!({
+                    "stability": stability,
+                    "similarity_boost": similarity_boost,
+                });
+                if let Some(style) = settings.style {
+                    voice_settings["style"] = serde_json::json!(style);
+                }
+                if let Some(speed) = settings.speed {
+                    voice_settings["speed"] = serde_json::json!(speed);
+                }
+
+                let mut body = serde_json::json!({
+                    "text": text,
+                    "model_id": model,
+                    "voice_settings": voice_settings,
+                });
+                if let Some(ref lang) = settings.language {
+                    if !lang.is_empty() {
+                        body["language_code"] = serde_json::json!(lang);
+                    }
+                }
 
                 let response = self.client
                     .post(&url)
                     .header("xi-api-key", &self.api_key)
                     .header("Content-Type", "application/json")
                     .header("Accept", "audio/wav")
-                    .json(&serde_json::json!({
-                        "text": text,
-                        "model_id": "eleven_monolingual_v1",
-                        "voice_settings": { "stability": 0.5, "similarity_boost": 0.75 }
-                    }))
+                    .json(&body)
                     .send()
                     .await
                     .map_err(|e| TTSError::SynthesisFailed(format!("HTTP request failed: {}", e)))?;
@@ -1125,34 +1172,42 @@ pub fn apply_noise_gate(samples: &[i16], threshold: i16) -> Vec<i16> {
         .collect()
 }
 
+pub struct STTConfig {
+    pub engine: String,
+    pub api_key: Option<String>,
+    pub model_path: Option<String>,
+    pub elevenlabs_model: String,
+    pub elevenlabs_language: Option<String>,
+    pub elevenlabs_tag_audio_events: bool,
+    pub elevenlabs_no_verbatim: bool,
+}
+
 pub async fn transcribe_audio(
     wav_data: &[u8],
-    stt_type: &str,
-    api_key: Option<&str>,
-    model_path: Option<&str>,
+    config: &STTConfig,
 ) -> Result<String, stt::STTError> {
-    tracing::info!("STT: Starting transcription with engine '{}', audio size {} bytes", stt_type, wav_data.len());
-    let result = match stt_type {
+    tracing::info!("STT: Starting transcription with engine '{}', audio size {} bytes", config.engine, wav_data.len());
+    let result = match config.engine.as_str() {
         "elevenlabs" => {
-            let api_key = api_key.ok_or_else(|| stt::STTError::NotReady("ElevenLabs API key not set".to_string()))?;
+            let api_key = config.api_key.as_deref().ok_or_else(|| stt::STTError::NotReady("ElevenLabs API key not set".to_string()))?;
             let stt = ElevenLabsSTT::new(api_key.to_string());
-            stt.transcribe(wav_data).await
+            stt.transcribe_with_config(wav_data, &config.elevenlabs_model, config.elevenlabs_language.as_deref(), config.elevenlabs_tag_audio_events, config.elevenlabs_no_verbatim).await
         }
         "vosk" => {
-            let model_path = model_path.ok_or_else(|| stt::STTError::NotReady("Vosk model path not configured".to_string()))?;
+            let model_path = config.model_path.as_deref().ok_or_else(|| stt::STTError::NotReady("Vosk model path not configured".to_string()))?;
             let stt = VoskSTT::new(Some(model_path.to_string()));
             let pcm_data = wav_to_pcm(wav_data)?;
             stt.transcribe(&pcm_data).await
         }
         "whisper" => {
-            let model_path = model_path.ok_or_else(|| stt::STTError::NotReady("Whisper model path not configured".to_string()))?;
+            let model_path = config.model_path.as_deref().ok_or_else(|| stt::STTError::NotReady("Whisper model path not configured".to_string()))?;
             let stt = WhisperSTT::new(Some(model_path.to_string()));
             if !stt.is_ready() {
                 return Err(stt::STTError::NotReady("Whisper model not loaded".to_string()));
             }
             stt.transcribe(wav_data).await
         }
-        _ => Err(stt::STTError::NotReady(format!("Unknown STT type: {}", stt_type))),
+        _ => Err(stt::STTError::NotReady(format!("Unknown STT type: {}", config.engine))),
     };
 
     match &result {
@@ -1358,31 +1413,43 @@ mod voice_tests {
         assert!(result.is_err());
     }
 
+    fn make_stt_config(engine: &str) -> STTConfig {
+        STTConfig {
+            engine: engine.to_string(),
+            api_key: None,
+            model_path: None,
+            elevenlabs_model: "scribe_v2".to_string(),
+            elevenlabs_language: None,
+            elevenlabs_tag_audio_events: false,
+            elevenlabs_no_verbatim: true,
+        }
+    }
+
     #[test]
     fn test_transcribe_audio_unknown_type() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(transcribe_audio(&[0u8; 100], "unknown_engine", None, None));
+        let result = rt.block_on(transcribe_audio(&[0u8; 100], &make_stt_config("unknown_engine")));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_transcribe_audio_elevenlabs_no_key() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(transcribe_audio(&[0u8; 100], "elevenlabs", None, None));
+        let result = rt.block_on(transcribe_audio(&[0u8; 100], &make_stt_config("elevenlabs")));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_transcribe_audio_vosk_no_model() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(transcribe_audio(&[0u8; 100], "vosk", None, None));
+        let result = rt.block_on(transcribe_audio(&[0u8; 100], &make_stt_config("vosk")));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_transcribe_audio_whisper_no_model() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(transcribe_audio(&[0u8; 100], "whisper", None, None));
+        let result = rt.block_on(transcribe_audio(&[0u8; 100], &make_stt_config("whisper")));
         assert!(result.is_err());
     }
 
