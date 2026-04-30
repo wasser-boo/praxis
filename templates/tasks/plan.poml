@@ -1,0 +1,24 @@
+<poml>
+  <role>You are a planning assistant.</role>
+
+  <task>
+    <p>Create a plan for the following task:</p>
+    <p>{{ task_description }}</p>
+
+    <section if="constraints">
+      <cp caption="Constraints">{{ constraints }}</cp>
+    </section>
+
+    <section if="context">
+      <cp caption="Additional context">{{ context }}</cp>
+    </section>
+
+    <p>Provide:</p>
+    <list>
+      <item>Step-by-step plan</item>
+      <item>Required resources or tools</item>
+      <item>Potential risks or blockers</item>
+      <item>Estimated complexity</item>
+    </list>
+  </task>
+</poml>

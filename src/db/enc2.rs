@@ -1,8 +1,159 @@
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes256Gcm, Nonce,
-};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use aes_gcm::aead::Aead;
 use argon2::Argon2;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use base64::Engine;
+
+const ENCRYPTED_SECRETS_FILE: &str = "secrets.enc2";
+const SALT_FILE: &str = ".secrets_salt";
+const NONCE_SIZE: usize = 12;
+const SALT_SIZE: usize = 32;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EncryptedSecrets {
+    pub ciphertext: String,
+    pub nonce: String,
+}
+
+fn derive_key(password: &str, salt: &[u8]) -> anyhow::Result<[u8; 32]> {
+    let mut key = [0u8; 32];
+    let argon2 = Argon2::default();
+    argon2.hash_password_into(password.as_bytes(), salt, &mut key)
+        .map_err(|e| anyhow::anyhow!("Key derivation failed: {}", e))?;
+    Ok(key)
+}
+
+fn generate_salt() -> [u8; SALT_SIZE] {
+    let mut salt = [0u8; SALT_SIZE];
+    rand::thread_rng().fill_bytes(&mut salt);
+    salt
+}
+
+fn load_or_create_salt() -> anyhow::Result<[u8; SALT_SIZE]> {
+    let path = Path::new(SALT_FILE);
+    if path.exists() {
+        let data = std::fs::read(path)?;
+        if data.len() == SALT_SIZE {
+            let mut salt = [0u8; SALT_SIZE];
+            salt.copy_from_slice(&data);
+            return Ok(salt);
+        }
+    }
+
+    let salt = generate_salt();
+    std::fs::write(path, &salt)?;
+    tracing::info!("Generated new encryption salt");
+    Ok(salt)
+}
+
+pub fn encrypt(data: &str, password: &str) -> anyhow::Result<EncryptedSecrets> {
+    let salt = load_or_create_salt()?;
+    let key = derive_key(password, &salt)?;
+
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| anyhow::anyhow!("Cipher creation failed: {}", e))?;
+
+    let mut nonce_bytes = [0u8; NONCE_SIZE];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher.encrypt(nonce, data.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+
+    Ok(EncryptedSecrets {
+        ciphertext: base64::engine::general_purpose::STANDARD.encode(&ciphertext),
+        nonce: base64::engine::general_purpose::STANDARD.encode(&nonce_bytes),
+    })
+}
+
+pub fn decrypt(encrypted: &EncryptedSecrets, password: &str) -> anyhow::Result<String> {
+    let salt = load_or_create_salt()?;
+    let key = derive_key(password, &salt)?;
+
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| anyhow::anyhow!("Cipher creation failed: {}", e))?;
+
+    let nonce_bytes = base64::engine::general_purpose::STANDARD.decode(&encrypted.nonce)
+        .map_err(|e| anyhow::anyhow!("Invalid nonce: {}", e))?;
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = base64::engine::general_purpose::STANDARD.decode(&encrypted.ciphertext)
+        .map_err(|e| anyhow::anyhow!("Invalid ciphertext: {}", e))?;
+
+    let plaintext = cipher.decrypt(nonce, ciphertext.as_ref())
+        .map_err(|e| anyhow::anyhow!("Decryption failed (wrong password?): {}", e))?;
+
+    String::from_utf8(plaintext)
+        .map_err(|e| anyhow::anyhow!("Invalid UTF-8: {}", e))
+}
+
+pub fn save_encrypted_secrets(secrets_json: &str, password: &str) -> anyhow::Result<()> {
+    let encrypted = encrypt(secrets_json, password)?;
+    let content = serde_json::to_string_pretty(&encrypted)?;
+    std::fs::write(ENCRYPTED_SECRETS_FILE, content)?;
+    tracing::info!("Saved encrypted secrets to {}", ENCRYPTED_SECRETS_FILE);
+    Ok(())
+}
+
+pub fn load_encrypted_secrets(password: &str) -> anyhow::Result<String> {
+    let path = Path::new(ENCRYPTED_SECRETS_FILE);
+    if !path.exists() {
+        return Err(anyhow::anyhow!("No encrypted secrets file found"));
+    }
+
+    let content = std::fs::read_to_string(path)?;
+    let encrypted: EncryptedSecrets = serde_json::from_str(&content)?;
+
+    decrypt(&encrypted, password)
+}
+
+pub fn has_encrypted_secrets() -> bool {
+    Path::new(ENCRYPTED_SECRETS_FILE).exists()
+}
+
+pub fn verify_password(password: &str) -> bool {
+    load_encrypted_secrets(password).is_ok()
+}
+
+pub fn hash_master_key(password: &str) -> String {
+    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let hash = argon2.hash_password(password.as_bytes(), &salt)
+        .expect("Argon2 hashing failed");
+    hash.to_string()
+}
+
+pub fn verify_master_key_hash(password: &str, hash_str: &str) -> bool {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    let hash = match PasswordHash::new(hash_str) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    Argon2::default().verify_password(password.as_bytes(), &hash).is_ok()
+}
+
+pub fn migrate_plaintext_to_encrypted(password: &str) -> anyhow::Result<()> {
+    let plaintext_path = Path::new("secrets.json");
+    if !plaintext_path.exists() {
+        tracing::info!("No plaintext secrets.json to migrate");
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(plaintext_path)?;
+
+    let _: serde_json::Value = serde_json::from_str(&content)?;
+
+    save_encrypted_secrets(&content, password)?;
+
+    let backup_path = "secrets.json.migrated";
+    std::fs::rename(plaintext_path, backup_path)?;
+    tracing::info!("Migrated secrets.json to encrypted format, backup at {}", backup_path);
+
+    Ok(())
+}
 
 pub struct Encryption {
     cipher: Aes256Gcm,
@@ -57,7 +208,7 @@ mod security_tests {
     use super::*;
 
     #[test]
-    fn test_encrypt_decrypt() {
+    fn test_encryption_struct() {
         let enc = Encryption::new("testpassword", b"testsalt12345678").unwrap();
         let encrypted = enc.encrypt("Hello, World!").unwrap();
         let decrypted = enc.decrypt(&encrypted).unwrap();
@@ -65,7 +216,7 @@ mod security_tests {
     }
 
     #[test]
-    fn test_different_passwords() {
+    fn test_different_passwords_struct() {
         let enc1 = Encryption::new("password1", b"testsalt12345678").unwrap();
         let enc2 = Encryption::new("password2", b"testsalt12345678").unwrap();
         let encrypted = enc1.encrypt("secret").unwrap();
@@ -73,8 +224,45 @@ mod security_tests {
     }
 
     #[test]
-    fn test_invalid_data() {
+    fn test_invalid_data_struct() {
         let enc = Encryption::new("password", b"testsalt12345678").unwrap();
         assert!(enc.decrypt(&[1, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_direct() {
+        let temp = tempfile::tempdir().unwrap();
+        let salt_path = temp.path().join(".secrets_salt");
+        let _secrets_path = temp.path().join("secrets.enc2");
+
+        // Generate salt
+        let salt = generate_salt();
+        std::fs::write(&salt_path, &salt).unwrap();
+
+        // Test encrypt/decrypt using temp paths
+        let key = derive_key("testpassword", &salt).unwrap();
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+
+        let mut nonce_bytes = [0u8; NONCE_SIZE];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let ciphertext = cipher.encrypt(nonce, b"Hello, World!".as_slice()).unwrap();
+
+        let encrypted = EncryptedSecrets {
+            ciphertext: base64::engine::general_purpose::STANDARD.encode(&ciphertext),
+            nonce: base64::engine::general_purpose::STANDARD.encode(&nonce_bytes),
+        };
+
+        // Decrypt
+        let key2 = derive_key("testpassword", &salt).unwrap();
+        let cipher2 = Aes256Gcm::new_from_slice(&key2).unwrap();
+
+        let nonce_bytes2 = base64::engine::general_purpose::STANDARD.decode(&encrypted.nonce).unwrap();
+        let nonce2 = Nonce::from_slice(&nonce_bytes2);
+        let ct = base64::engine::general_purpose::STANDARD.decode(&encrypted.ciphertext).unwrap();
+
+        let plaintext = cipher2.decrypt(nonce2, ct.as_ref()).unwrap();
+        assert_eq!(String::from_utf8(plaintext).unwrap(), "Hello, World!");
     }
 }

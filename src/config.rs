@@ -1,5 +1,20 @@
 use std::env;
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApiMode {
+    OpenAI,
+    Anthropic,
+}
+
+impl ApiMode {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "anthropic" => ApiMode::Anthropic,
+            _ => ApiMode::OpenAI,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub poml_cli: String,
@@ -7,8 +22,19 @@ pub struct Config {
     pub openai_api_key: Option<String>,
     pub openai_model: String,
     pub openai_api_base: String,
+    pub anthropic_api_key: Option<String>,
+    pub anthropic_model: String,
+    pub anthropic_api_base: String,
     pub ollama_api_base: String,
     pub ollama_model: String,
+    pub minimax_api_key: Option<String>,
+    pub minimax_model: String,
+    pub minimax_api_base: String,
+    pub minimax_api_mode: ApiMode,
+    pub mimo_api_key: Option<String>,
+    pub mimo_model: String,
+    pub mimo_api_base: String,
+    pub mimo_api_mode: ApiMode,
     pub gateway_port: u16,
     pub gateway_api_key: String,
     pub dashboard_port: u16,
@@ -26,28 +52,67 @@ impl Config {
             openai_model: env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string()),
             openai_api_base: env::var("OPENAI_API_BASE")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok(),
+            anthropic_model: env::var("ANTHROPIC_MODEL")
+                .unwrap_or_else(|_| "claude-3-5-sonnet-20241022".to_string()),
+            anthropic_api_base: env::var("ANTHROPIC_API_BASE")
+                .unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
             ollama_api_base: env::var("OLLAMA_API_BASE")
                 .unwrap_or_else(|_| "http://localhost:11434".to_string()),
             ollama_model: env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3".to_string()),
+            minimax_api_key: env::var("MINIMAX_API_KEY").ok(),
+            minimax_model: env::var("MINIMAX_MODEL")
+                .unwrap_or_else(|_| "MiniMax-Text-01".to_string()),
+            minimax_api_base: env::var("MINIMAX_API_BASE")
+                .unwrap_or_else(|_| "https://api.minimax.chat/v1".to_string()),
+            minimax_api_mode: ApiMode::from_str(
+                &env::var("MINIMAX_API_MODE").unwrap_or_else(|_| "openai".to_string())
+            ),
+            mimo_api_key: env::var("MIMO_API_KEY").ok(),
+            mimo_model: env::var("MIMO_MODEL").unwrap_or_else(|_| "mimo".to_string()),
+            mimo_api_base: env::var("MIMO_API_BASE")
+                .unwrap_or_else(|_| "https://api.mimo.com/v1".to_string()),
+            mimo_api_mode: ApiMode::from_str(
+                &env::var("MIMO_API_MODE").unwrap_or_else(|_| "openai".to_string())
+            ),
             gateway_port: env::var("GATEWAY_PORT")
                 .unwrap_or_else(|_| "3537".to_string())
                 .parse()
                 .unwrap_or(3537),
-            gateway_api_key: env::var("GATEWAY_API_KEY").unwrap_or_else(|_| {
-                let key = uuid::Uuid::new_v4().to_string();
-                tracing::warn!("GATEWAY_API_KEY not set, generated: {}", key);
-                key
-            }),
+            gateway_api_key: env::var("GATEWAY_API_KEY").unwrap_or_default(),
             dashboard_port: env::var("DASHBOARD_PORT")
                 .unwrap_or_else(|_| "1337".to_string())
                 .parse()
                 .unwrap_or(1337),
-            dashboard_admin_password: env::var("DASHBOARD_ADMIN_PASSWORD").unwrap_or_else(|_| {
-                tracing::warn!("DASHBOARD_ADMIN_PASSWORD not set, using default 'admin'");
-                "admin".to_string()
-            }),
+            dashboard_admin_password: env::var("DASHBOARD_ADMIN_PASSWORD").unwrap_or_default(),
             data_dir: env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+        }
+    }
+
+    pub fn apply_secrets(&mut self, secrets: &crate::db::secrets::Secrets) {
+        if let Some(ref key) = secrets.gateway_api_key {
+            if !key.is_empty() && self.gateway_api_key.is_empty() {
+                self.gateway_api_key = key.clone();
+            }
+        }
+        if let Some(ref pass) = secrets.dashboard_admin_password {
+            if !pass.is_empty() && self.dashboard_admin_password.is_empty() {
+                self.dashboard_admin_password = pass.clone();
+            }
+        }
+    }
+
+    pub fn ensure_generated(&mut self) {
+        if self.gateway_api_key.is_empty() {
+            let key = uuid::Uuid::new_v4().to_string();
+            tracing::info!("GATEWAY_API_KEY not set, generated: {}", key);
+            self.gateway_api_key = key;
+        }
+        if self.dashboard_admin_password.is_empty() {
+            let pass = uuid::Uuid::new_v4().to_string()[..12].to_string();
+            tracing::info!("DASHBOARD_ADMIN_PASSWORD not set, generated: {}", pass);
+            self.dashboard_admin_password = pass;
         }
     }
 

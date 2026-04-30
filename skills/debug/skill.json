@@ -1,0 +1,4 @@
+{
+    "name": "debug",
+    "description": "Debug errors and exceptions. Use this skill when the user encounters an error, stack trace, or unexpected behavior."
+}

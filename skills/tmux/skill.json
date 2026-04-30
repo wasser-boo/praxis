@@ -1,0 +1,4 @@
+{
+    "name": "tmux",
+    "description": "Manage tmux sessions, windows, and panes. Use this skill when the user wants to work with terminal multiplexer."
+}

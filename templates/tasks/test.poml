@@ -1,0 +1,26 @@
+<poml>
+  <role>You are a test writing assistant.</role>
+
+  <task>
+    <p>Write tests for the following code:</p>
+    <code>{{ code }}</code>
+
+    <p>Language: <b>{{ language }}</b></p>
+
+    <section if="test_framework">
+      <p>Test framework: <b>{{ test_framework }}</b></p>
+    </section>
+
+    <section if="coverage_goal">
+      <p>Coverage goal: <b>{{ coverage_goal }}</b></p>
+    </section>
+
+    <p>Write comprehensive tests covering:</p>
+    <list>
+      <item>Happy path scenarios</item>
+      <item>Edge cases</item>
+      <item>Error conditions</item>
+      <item>Boundary values</item>
+    </list>
+  </task>
+</poml>

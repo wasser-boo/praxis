@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6C5CE7"/>
+      <stop offset="100%" stop-color="#A29BFE"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00CEC9"/>
+      <stop offset="100%" stop-color="#55EFC4"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="#0F0A1A"/>
+  <g transform="translate(64,64)">
+    <line x1="0" y1="-34" x2="30" y2="17" stroke="url(#g1)" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="30" y1="17" x2="-30" y2="17" stroke="url(#g1)" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="-30" y1="17" x2="0" y2="-34" stroke="url(#g1)" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+    <line x1="0" y1="-34" x2="0" y2="34" stroke="url(#g2)" stroke-width="2.5" stroke-linecap="round" opacity="0.4"/>
+    <line x1="30" y1="17" x2="0" y2="34" stroke="url(#g2)" stroke-width="2.5" stroke-linecap="round" opacity="0.4"/>
+    <line x1="-30" y1="17" x2="0" y2="34" stroke="url(#g2)" stroke-width="2.5" stroke-linecap="round" opacity="0.4"/>
+    <circle cx="0" cy="-34" r="8" fill="url(#g1)" filter="url(#glow)"/>
+    <circle cx="30" cy="17" r="8" fill="url(#g1)" filter="url(#glow)"/>
+    <circle cx="-30" cy="17" r="8" fill="url(#g1)" filter="url(#glow)"/>
+    <circle cx="0" cy="34" r="6" fill="url(#g2)" filter="url(#glow)"/>
+    <circle cx="0" cy="0" r="5" fill="#DFE6E9" opacity="0.9"/>
+    <line x1="0" y1="0" x2="0" y2="-26" stroke="#DFE6E9" stroke-width="1.5" stroke-linecap="round" opacity="0.3"/>
+    <line x1="0" y1="0" x2="22" y2="11" stroke="#DFE6E9" stroke-width="1.5" stroke-linecap="round" opacity="0.3"/>
+    <line x1="0" y1="0" x2="-22" y2="11" stroke="#DFE6E9" stroke-width="1.5" stroke-linecap="round" opacity="0.3"/>
+    <line x1="0" y1="0" x2="0" y2="28" stroke="#DFE6E9" stroke-width="1.5" stroke-linecap="round" opacity="0.2"/>
+  </g>
+  <text x="64" y="108" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="16" font-weight="700" fill="#DFE6E9" letter-spacing="3">PRAXIS</text>
+</svg>

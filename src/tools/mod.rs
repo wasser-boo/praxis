@@ -9,6 +9,7 @@ pub mod discord_send_message;
 pub mod web_search;
 pub mod rag_query;
 pub mod rag_ingest;
+pub mod vector;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

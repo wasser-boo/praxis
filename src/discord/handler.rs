@@ -144,13 +144,13 @@ impl EventHandler for DiscordHandler {
             match ws_client.recv().await {
                 Ok(IncomingMessage::Response { content, .. }) => {
                     typing_handle.abort();
-                    if let Err(e) = msg.reply(&ctx.http, &content).await {
+                    if let Err(e) = send_message_split(&ctx.http, msg.channel_id, &content).await {
                         tracing::error!("Failed to send response: {}", e);
                     }
                     break;
                 }
                 Ok(IncomingMessage::Feedback { content, .. }) => {
-                    if let Err(e) = msg.reply(&ctx.http, &content).await {
+                    if let Err(e) = send_message_split(&ctx.http, msg.channel_id, &content).await {
                         tracing::error!("Failed to send feedback: {}", e);
                     }
                 }
@@ -375,10 +375,107 @@ impl EventHandler for DiscordHandler {
     }
 }
 
+/// Split a message into chunks of max 2000 characters (Discord limit).
+/// Tries to split at newlines first, then at spaces, then hard-cut.
+pub fn split_message(content: &str, max_len: usize) -> Vec<String> {
+    if content.len() <= max_len {
+        return vec![content.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = content;
+
+    while remaining.len() > max_len {
+        // Try to split at newline
+        let split_pos = remaining[..max_len].rfind('\n')
+            .or_else(|| remaining[..max_len].rfind(' '))
+            .unwrap_or(max_len);
+
+        let (chunk, rest) = remaining.split_at(split_pos);
+        chunks.push(chunk.trim().to_string());
+        remaining = rest.trim_start();
+    }
+
+    if !remaining.is_empty() {
+        chunks.push(remaining.to_string());
+    }
+
+    chunks
+}
+
+/// Send a message to Discord, splitting if necessary.
+pub async fn send_message_split(
+    http: &serenity::http::Http,
+    channel_id: serenity::model::id::ChannelId,
+    content: &str,
+) -> Result<(), serenity::Error> {
+    let chunks = split_message(content, 2000);
+    for chunk in chunks {
+        channel_id.say(http, &chunk).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod discord_tests {
+    use super::*;
+
     #[test]
     fn test_handler_types_exist() {
         assert!(true);
+    }
+
+    #[test]
+    fn test_split_message_short() {
+        let msg = "Hello World";
+        let chunks = split_message(msg, 2000);
+        assert_eq!(chunks, vec!["Hello World"]);
+    }
+
+    #[test]
+    fn test_split_message_long() {
+        let msg = "a".repeat(3000);
+        let chunks = split_message(&msg, 2000);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 2000);
+        assert_eq!(chunks[1].len(), 1000);
+    }
+
+    #[test]
+    fn test_split_message_at_newline() {
+        let mut msg = "a".repeat(1990);
+        msg.push('\n');
+        msg.push_str("b".repeat(100).as_str());
+
+        let chunks = split_message(&msg, 2000);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].ends_with('a'));
+        assert!(chunks[1].starts_with('b'));
+    }
+
+    #[test]
+    fn test_split_message_at_space() {
+        let mut msg = "a".repeat(1990);
+        msg.push(' ');
+        msg.push_str("b".repeat(100).as_str());
+
+        let chunks = split_message(&msg, 2000);
+        assert_eq!(chunks.len(), 2);
+    }
+
+    #[test]
+    fn test_split_message_multiple_chunks() {
+        let msg = "x".repeat(5000);
+        let chunks = split_message(&msg, 2000);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), 2000);
+        assert_eq!(chunks[1].len(), 2000);
+        assert_eq!(chunks[2].len(), 1000);
+    }
+
+    #[test]
+    fn test_split_message_empty() {
+        let chunks = split_message("", 2000);
+        assert_eq!(chunks, vec![""]);
     }
 }

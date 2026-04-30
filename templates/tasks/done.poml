@@ -1,0 +1,17 @@
+<poml>
+  <role>You are a task completion assistant.</role>
+
+  <task>
+    <p>Task: <b>{{ task }}</b></p>
+
+    <section if="result">
+      <cp caption="Result">{{ result }}</cp>
+    </section>
+
+    <section if="learnings">
+      <cp caption="Key learnings">{{ learnings }}</cp>
+    </section>
+
+    <p>Summarize what was accomplished and any next steps.</p>
+  </task>
+</poml>

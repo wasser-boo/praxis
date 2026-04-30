@@ -21,12 +21,12 @@ pub struct GatewayState {
 }
 
 pub async fn start(db: crate::db::Database, config: crate::config::Config) -> anyhow::Result<()> {
-    let secrets = crate::db::secrets::get_secrets().await.unwrap_or_default();
+    let secrets = crate::db::secrets::get_secrets();
     let event_tx = crate::event_channel::init();
     let llm = Arc::new(llm::LLMRouter::new(&config, &secrets));
 
     let state = GatewayState {
-        db,
+        db: db.clone(),
         config: config.clone(),
         secrets,
         llm,
@@ -34,17 +34,88 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
         start_time: std::time::Instant::now(),
     };
 
+    let rate_limiter = Arc::new(rate_limiter::UserRateLimiter::new(60));
+
     let app = axum::Router::new()
-        .route("/ws", axum::routing::get(ws_handler::ws_handler))
         .route("/health", axum::routing::get(http_handler::health_check))
         .route("/api/auth/login", axum::routing::post(auth::login_handler))
         .with_state(state.clone());
+
+    let protected = axum::Router::new()
+        .route("/ws", axum::routing::get(ws_handler::ws_handler))
+        .route("/api/status", axum::routing::get(http_handler::status))
+        .with_state(state.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::auth_middleware_fn,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            rate_limiter.clone(),
+            rate_limit_middleware,
+        ));
+
+    let app = app.merge(protected);
+
+    let cron_db = db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(e) = run_due_cron_jobs(&cron_db).await {
+                tracing::error!("Cron scheduler error: {}", e);
+            }
+        }
+    });
 
     let addr = format!("0.0.0.0:{}", config.gateway_port);
     tracing::info!("Gateway listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+async fn rate_limit_middleware(
+    axum::extract::State(limiter): axum::extract::State<Arc<rate_limiter::UserRateLimiter>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    // Extract user ID from auth header or use IP as fallback
+    let user_id = req
+        .headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("anonymous")
+        .to_string();
+
+    match limiter.check(&user_id) {
+        Ok(()) => Ok(next.run(req).await),
+        Err(_) => Err(axum::http::StatusCode::TOO_MANY_REQUESTS),
+    }
+}
+
+async fn run_due_cron_jobs(db: &crate::db::Database) -> anyhow::Result<()> {
+    let conn = db.conn();
+    let mut stmt = conn.prepare(
+        "SELECT id, name, user_id, template, prompt FROM cron_jobs WHERE enabled = 1"
+    )?;
+
+    let jobs: Vec<(String, String, String, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (id, name, _user_id, _template, _prompt) in jobs {
+        tracing::debug!("Cron job check: {} ({})", name, id);
+    }
 
     Ok(())
 }

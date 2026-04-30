@@ -5,6 +5,7 @@ pub mod db;
 pub mod discord;
 pub mod event_channel;
 pub mod gateway;
+pub mod onboard;
 pub mod plugins;
 pub mod skills;
 pub mod tags;

@@ -44,13 +44,35 @@ pub struct WsClient {
 
 impl WsClient {
     pub async fn connect(url: &str) -> Result<Self> {
-        let (ws_stream, _) = connect_async(url).await?;
-        let (sender, receiver) = ws_stream.split();
-        Ok(Self {
-            sender: Arc::new(Mutex::new(sender)),
-            receiver: Arc::new(Mutex::new(receiver)),
-            url: url.to_string(),
-        })
+        Self::connect_with_retries(url, 10, std::time::Duration::from_millis(500)).await
+    }
+
+    pub async fn connect_with_retries(url: &str, max_retries: u32, base_delay: std::time::Duration) -> Result<Self> {
+        let mut last_err = None;
+        for attempt in 0..max_retries {
+            match connect_async(url).await {
+                Ok((ws_stream, _)) => {
+                    let (sender, receiver) = ws_stream.split();
+                    return Ok(Self {
+                        sender: Arc::new(Mutex::new(sender)),
+                        receiver: Arc::new(Mutex::new(receiver)),
+                        url: url.to_string(),
+                    });
+                }
+                Err(e) => {
+                    if attempt == 0 {
+                        tracing::info!("Gateway not ready yet, waiting for it to start...");
+                    }
+                    last_err = Some(e);
+                    let delay = base_delay * 2u32.pow(attempt.min(4));
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+        match last_err {
+            Some(e) => Err(e.into()),
+            None => Err(anyhow::anyhow!("Connection failed after {} retries", max_retries)),
+        }
     }
 
     pub async fn send(&self, msg: OutgoingMessage) -> Result<()> {

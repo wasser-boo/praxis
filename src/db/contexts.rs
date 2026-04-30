@@ -18,7 +18,7 @@ pub struct Context {
     pub active_templates: Vec<String>,
     #[serde(default)]
     pub settings: ContextSettings,
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub custom_data: serde_json::Value,
 }
 
@@ -128,6 +128,30 @@ pub struct ContextSettings {
     pub max_tool_calls: Option<i32>,
     #[serde(default)]
     pub summarize_char_limit: Option<i32>,
+    #[serde(default)]
+    pub active_templates: Vec<String>,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub cl_file: Option<String>,
+    #[serde(default)]
+    pub active_state: Option<String>,
+    #[serde(default)]
+    pub current_template: String,
+    #[serde(default)]
+    pub tags_enabled: bool,
+    #[serde(default)]
+    pub llm_turn: i32,
+    #[serde(default)]
+    pub compaction_enabled: bool,
+    #[serde(default)]
+    pub compaction_summary: String,
+    #[serde(default)]
+    pub agent_name: String,
+    #[serde(default)]
+    pub voice_wake_words: Vec<String>,
 }
 
 fn default_stt() -> String {
@@ -197,6 +221,18 @@ impl Default for ContextSettings {
             max_llm_turns: None,
             max_tool_calls: None,
             summarize_char_limit: None,
+            active_templates: Vec::new(),
+            done: false,
+            path: String::new(),
+            cl_file: None,
+            active_state: None,
+            current_template: String::new(),
+            tags_enabled: false,
+            llm_turn: 0,
+            compaction_enabled: false,
+            compaction_summary: String::new(),
+            agent_name: "assistant".to_string(),
+            voice_wake_words: Vec::new(),
         }
     }
 }
@@ -251,6 +287,19 @@ impl Database {
 
     pub fn increment_turn(&self, ctx: &mut Context) {
         ctx.turn += 1;
+    }
+}
+
+/// Merge secrets into context settings at runtime (not stored)
+pub fn merge_secrets_into_settings(settings: &mut ContextSettings, secrets: &crate::db::secrets::Secrets) {
+    if let Some(ref key) = secrets.minimax_api_key {
+        settings.minimax_api_key = Some(key.clone());
+    }
+    if let Some(ref key) = secrets.mimo_api_key {
+        settings.mimo_api_key = Some(key.clone());
+    }
+    if let Some(ref key) = secrets.elevenlabs_api_key {
+        settings.voice_elevenlabs_api_key = Some(key.clone());
     }
 }
 

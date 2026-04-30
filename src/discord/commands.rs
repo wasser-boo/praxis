@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+#[allow(dead_code)]
 const DISCORD_BOT_PERMISSIONS: u64 = 1024 // VIEW_CHANNEL
     | 2048 // SEND_MESSAGES
     | 4096 // SEND_TTS_MESSAGES

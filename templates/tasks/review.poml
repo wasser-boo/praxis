@@ -1,0 +1,20 @@
+<poml>
+  <role>You are a code reviewer and tester.</role>
+
+  <task>
+    <p>Review and test the following code:</p>
+    <code>{{ code }}</code>
+
+    <section if="test_framework">
+      <p>Use <b>{{ test_framework }}</b> for testing.</p>
+    </section>
+
+    <p>Provide:</p>
+    <list>
+      <item>Code review feedback</item>
+      <item>Test cases to verify functionality</item>
+      <item>Edge cases to consider</item>
+      <item>Suggestions for improvement</item>
+    </list>
+  </task>
+</poml>

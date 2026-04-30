@@ -22,9 +22,12 @@ pub struct LoginResponse {
 pub async fn login_handler(
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
+    let secrets = crate::db::secrets::get_secrets();
     let config = crate::config::Config::from_env();
+    let admin_password = secrets.dashboard_admin_password.unwrap_or(config.dashboard_admin_password);
+    let gateway_api_key = secrets.gateway_api_key.unwrap_or(config.gateway_api_key);
 
-    if payload.password != config.dashboard_admin_password {
+    if payload.password != admin_password {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -37,29 +40,39 @@ pub async fn login_handler(
     let token = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(config.gateway_api_key.as_bytes()),
+        &EncodingKey::from_secret(gateway_api_key.as_bytes()),
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(LoginResponse { token }))
 }
 
-pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCode> {
-    let config = crate::config::Config::from_env();
-
+pub async fn auth_middleware_fn(
+    axum::extract::State(state): axum::extract::State<crate::gateway::GatewayState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
     let auth_header = req
         .headers()
         .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .and_then(|v| v.to_str().ok());
 
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = match auth_header {
+        Some(header) => match header.strip_prefix("Bearer ") {
+            Some(t) => t,
+            None => return Err(StatusCode::UNAUTHORIZED),
+        },
+        None => {
+            if req.uri().path() == "/ws" {
+                return Ok(next.run(req).await);
+            }
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
 
     let jwt_result = decode::<Claims>(
         token,
-        &DecodingKey::from_secret(config.gateway_api_key.as_bytes()),
+        &DecodingKey::from_secret(state.config.gateway_api_key.as_bytes()),
         &Validation::default(),
     );
 
@@ -67,7 +80,7 @@ pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, Statu
         return Ok(next.run(req).await);
     }
 
-    if token == config.gateway_api_key {
+    if token == state.config.gateway_api_key {
         return Ok(next.run(req).await);
     }
 
