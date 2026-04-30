@@ -8,6 +8,25 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 
+fn generate_silent_wav(duration_ms: u32) -> Vec<u8> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 48000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let num_samples = (48000 * duration_ms / 1000) as usize;
+    let mut buffer = Vec::new();
+    {
+        let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buffer), spec).unwrap();
+        for _ in 0..num_samples {
+            writer.write_sample(0i16).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+    buffer
+}
+
 pub struct DiscordHandler {
     pub db: Database,
     pub ws_client: Arc<Mutex<WsClient>>,
@@ -483,6 +502,21 @@ impl EventHandler for DiscordHandler {
                                             songbird::events::Event::Core(songbird::events::CoreEvent::ClientDisconnect),
                                             voice_receiver.clone(),
                                         );
+                                        call_lock.add_global_event(
+                                            songbird::events::Event::Core(songbird::events::CoreEvent::DriverConnect),
+                                            voice_receiver.clone(),
+                                        );
+                                        call_lock.add_global_event(
+                                            songbird::events::Event::Core(songbird::events::CoreEvent::DriverDisconnect),
+                                            voice_receiver.clone(),
+                                        );
+
+                                        // Play a brief silent clip to force Discord to send
+                                        // SpeakingStateUpdate events for all users in the channel.
+                                        // Without this, the SSRC-to-user mapping never populates
+                                        // and we can't identify who is speaking.
+                                        let silent_wav = generate_silent_wav(500);
+                                        call_lock.play_input(songbird::input::Input::from(silent_wav));
                                     }
 
                                     // Set up transcription channel
