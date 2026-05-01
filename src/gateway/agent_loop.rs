@@ -66,11 +66,7 @@ pub async fn run_agent_loop(
     // Store user message
     state.db.add_message(
         user_id,
-        &crate::db::messages::Message {
-            role: "user".to_string(),
-            content: user_message.to_string(),
-            tool_call_id: None,
-        },
+        &crate::db::messages::Message::user(user_message.to_string()),
     )?;
 
     loop {
@@ -107,10 +103,31 @@ pub async fn run_agent_loop(
 
         let history = state.db.get_messages(user_id, 50)?;
         for msg in &history {
+            // Skip tool-call messages if setting is disabled
+            if !ctx.settings.history_with_toolcalls
+                && (msg.role == "tool" || msg.tool_calls.is_some())
+            {
+                continue;
+            }
+            let tool_calls = msg.tool_calls.as_ref().map(|tcs| {
+                tcs.iter()
+                    .map(|tc| ToolCall {
+                        id: tc.id.clone(),
+                        function: crate::gateway::llm::provider::FunctionCall {
+                            name: tc.function.name.clone(),
+                            arguments: tc.function.arguments.clone(),
+                        },
+                    })
+                    .collect()
+            });
             messages.push(ChatMessage {
                 role: msg.role.clone(),
-                content: Some(msg.content.clone()),
-                tool_calls: None,
+                content: if msg.content.is_empty() {
+                    None
+                } else {
+                    Some(msg.content.clone())
+                },
+                tool_calls,
                 tool_call_id: msg.tool_call_id.clone(),
             });
         }
@@ -139,6 +156,25 @@ pub async fn run_agent_loop(
 
         // Handle tool calls
         if let Some(tool_calls) = &response.tool_calls {
+            // Persist the assistant message with tool_calls
+            let db_tool_calls: Vec<crate::db::messages::ToolCallData> = tool_calls
+                .iter()
+                .map(|tc| crate::db::messages::ToolCallData {
+                    id: tc.id.clone(),
+                    function: crate::db::messages::FunctionCallData {
+                        name: tc.function.name.clone(),
+                        arguments: tc.function.arguments.clone(),
+                    },
+                })
+                .collect();
+            state.db.add_message(
+                user_id,
+                &crate::db::messages::Message::assistant_with_tool_calls(
+                    response.content.clone().unwrap_or_default(),
+                    db_tool_calls,
+                ),
+            )?;
+
             let mut tool_call_count = 0;
             for tc in tool_calls {
                 if tool_call_count >= config.max_tool_calls {
@@ -155,15 +191,16 @@ pub async fn run_agent_loop(
                 let result = execute_tool_call(&state.db, user_id, tc).await;
                 state.db.add_message(
                     user_id,
-                    &crate::db::messages::Message {
-                        role: "tool".to_string(),
-                        content: result.clone(),
-                        tool_call_id: Some(tc.id.clone()),
-                    },
+                    &crate::db::messages::Message::tool(result.clone(), tc.id.clone()),
                 )?;
                 tool_call_count += 1;
             }
             // Continue loop for next LLM turn
+            // Reload context to check if agent_complete set done=true
+            ctx = state.db.load_context(user_id)?;
+            if ctx.settings.done {
+                completed = true;
+            }
             continue;
         }
 
@@ -254,21 +291,13 @@ pub async fn run_agent_loop(
             // Store cleaned response
             state.db.add_message(
                 user_id,
-                &crate::db::messages::Message {
-                    role: "assistant".to_string(),
-                    content: tag_result.cleaned_response.clone(),
-                    tool_call_id: None,
-                },
+                &crate::db::messages::Message::assistant(tag_result.cleaned_response.clone()),
             )?;
         } else {
             // Store raw response
             state.db.add_message(
                 user_id,
-                &crate::db::messages::Message {
-                    role: "assistant".to_string(),
-                    content: response_text.clone(),
-                    tool_call_id: None,
-                },
+                &crate::db::messages::Message::assistant(response_text.clone()),
             )?;
         }
 
@@ -527,15 +556,39 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
                 Err(e) => format!("Error: {}", e),
             }
         }
-        "agent_next" => "Advanced to next step".to_string(),
-        "agent_complete" => "Task marked as complete".to_string(),
+        "agent_next" => crate::tools::agent_control::run(
+            db,
+            user_id,
+            crate::tools::agent_control::AgentControlSignal::Next,
+        )
+        .await
+        .unwrap_or_else(|e| format!("Error: {}", e)),
+        "agent_complete" => crate::tools::agent_control::run(
+            db,
+            user_id,
+            crate::tools::agent_control::AgentControlSignal::Complete,
+        )
+        .await
+        .unwrap_or_else(|e| format!("Error: {}", e)),
         "agent_set_path" => {
             let path = args["path"].as_str().unwrap_or("");
-            format!("Working directory set to: {}", path)
+            crate::tools::agent_control::run(
+                db,
+                user_id,
+                crate::tools::agent_control::AgentControlSignal::Path(path.to_string()),
+            )
+            .await
+            .unwrap_or_else(|e| format!("Error: {}", e))
         }
         "agent_feedback" => {
             let message = args["message"].as_str().unwrap_or("");
-            format!("Feedback: {}", message)
+            crate::tools::agent_control::run(
+                db,
+                user_id,
+                crate::tools::agent_control::AgentControlSignal::Feedback(message.to_string()),
+            )
+            .await
+            .unwrap_or_else(|e| format!("Error: {}", e))
         }
         "discord_upload_file" => {
             let filename = args["filename"].as_str().unwrap_or("");
