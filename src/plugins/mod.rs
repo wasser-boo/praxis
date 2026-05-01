@@ -10,6 +10,7 @@ pub struct Plugin {
     pub description: String,
     pub version: String,
     pub tools: Vec<PluginTool>,
+    #[serde(default)]
     pub context: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub secrets: Vec<String>,
@@ -194,8 +195,13 @@ async fn execute_script(
 
     if let Some(sec) = secrets {
         if !sec.is_empty() {
+            tracing::info!(path = %path, secret_keys = ?sec.keys().collect::<Vec<_>>(), "Passing PLUGIN_SECRETS to script");
             cmd.env("PLUGIN_SECRETS", serde_json::to_string(sec).unwrap_or_default());
+        } else {
+            tracing::warn!(path = %path, "No plugin secrets to pass (empty map)");
         }
+    } else {
+        tracing::warn!(path = %path, "No plugin secrets to pass (None)");
     }
 
     let output = cmd

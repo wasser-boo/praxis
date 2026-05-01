@@ -15,6 +15,10 @@ use tokio::sync::Mutex;
 
 const DEFAULT_GATEWAY_URL: &str = "ws://localhost:3537/ws";
 
+// ── TTS Playback Lock ───────────────────────────────────────────────────────
+// Ensures TTS tracks play sequentially, not overlapping
+static TTS_PLAYBACK_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // ── Voice State ──────────────────────────────────────────────────────────────
 
 static DISCORD_VOICE_STATE: OnceCell<Arc<Mutex<DiscordVoiceState>>> = OnceCell::new();
@@ -319,6 +323,9 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
 async fn handle_voice_tts(user_id: String, audio_data: Vec<u8>) {
     tracing::info!("Voice TTS for user {}: {} bytes", user_id, audio_data.len());
 
+    // Acquire TTS playback lock - ensures sequential playback
+    let _tts_guard = TTS_PLAYBACK_LOCK.lock().await;
+
     if let Some(voice_state) = get_discord_voice_state() {
         let guard = voice_state.lock().await;
         if let Some(guild_id) = guard.guild_id {
@@ -336,10 +343,18 @@ async fn handle_voice_tts(user_id: String, audio_data: Vec<u8>) {
                             );
                             let wav_data =
                                 crate::voice::pcm_to_wav(&samples, original_sample_rate, 1);
-                            let mut call = handler.lock().await;
+                            let duration_ms = (samples.len() as u64 * 1000) / original_sample_rate as u64;
                             let source = songbird::input::Input::from(wav_data);
-                            call.enqueue_input(source);
-                            tracing::info!("TTS audio queued in guild {}", guild_id);
+                            {
+                                let mut call = handler.lock().await;
+                                call.play_input(source);
+                            }
+                            tracing::info!("TTS audio playing in guild {} ({}ms)", guild_id, duration_ms);
+                            // Wait for estimated duration + small buffer
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                duration_ms + 200,
+                            )).await;
+                            tracing::info!("TTS audio finished in guild {}", guild_id);
                         }
                         Ok(_) => tracing::warn!("No audio samples"),
                         Err(e) => tracing::error!("Audio decode failed: {}", e),
@@ -348,6 +363,7 @@ async fn handle_voice_tts(user_id: String, audio_data: Vec<u8>) {
             }
         }
     }
+    // _tts_guard dropped here, next TTS can play
 }
 
 #[cfg(not(feature = "songbird"))]

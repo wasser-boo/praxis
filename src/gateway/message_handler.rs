@@ -30,6 +30,39 @@ pub async fn handle_message(
             }
         }
     }
+
+    // Inject computed variables into custom_data
+    {
+        if ctx.custom_data.is_null() {
+            ctx.custom_data = serde_json::json!({});
+        }
+        if let Some(obj) = ctx.custom_data.as_object_mut() {
+            obj.insert("user_prompt".to_string(), serde_json::json!(content));
+
+            let effective_path = if ctx.settings.path.is_empty() {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| "/".to_string())
+            } else {
+                ctx.settings.path.clone()
+            };
+            obj.insert("path".to_string(), serde_json::json!(effective_path));
+            obj.insert("time".to_string(), serde_json::json!(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()));
+
+            let user_template = obj.get("user_template").cloned()
+                .unwrap_or_else(|| serde_json::json!("user"));
+            obj.insert("user_template".to_string(), user_template);
+
+            let memory = crate::db::memory::load_memory(&state.db, user_id);
+            obj.insert("memory".to_string(), serde_json::json!({
+                "facts": memory.learned_facts,
+                "topics": memory.last_topics,
+                "preferences": memory.user_preferences,
+                "variables": memory.custom_variables,
+            }));
+        }
+    }
+
     let _ = state.db.save_context(&ctx);
 
     state.db.add_message(
