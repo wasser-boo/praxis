@@ -573,6 +573,7 @@ impl EventHandler for DiscordHandler {
                                     let req_lock = self.request_lock.clone();
                                     let secrets = self.secrets.clone();
                                     let voice_muted = self.voice_muted.clone();
+                                    let http = ctx.http.clone();
                                     tokio::spawn(async move {
                                         tracing::info!(
                                             "VOICE_PIPELINE: Transcription processor started"
@@ -691,15 +692,15 @@ impl EventHandler for DiscordHandler {
                                             tracing::info!("VOICE_PIPELINE: Wake word {:?} matched, sending message: '{}'",
                                                 wake_match.wake_word, message_text);
 
-                                            // Acquire request lock to prevent race with text handler
-                                            let _req_guard = req_lock.lock().await;
-
                                             // Send to gateway via WsClient
                                             let payload = crate::discord::ws_client::OutgoingMessage::Message {
                                                 user_id: praxis_user_id.clone(),
                                                 content: message_text,
                                                 channel_id: format!("voice:{}", guild_id),
                                             };
+
+                                            // Acquire request lock to prevent race with text handler
+                                            let _req_guard = req_lock.lock().await;
 
                                             {
                                                 let ws = ws_client.lock().await;
@@ -712,24 +713,48 @@ impl EventHandler for DiscordHandler {
                                                 }
                                             }
 
-                                            // Consume the response
+                                            // Consume the response and send text to Discord
+                                            let response_text;
                                             {
                                                 let ws = ws_client.lock().await;
                                                 match ws.recv().await {
                                                     Ok(crate::discord::ws_client::IncomingMessage::Response { content, .. }) => {
                                                         tracing::info!("VOICE_PIPELINE: Got response ({} chars)", content.len());
+                                                        response_text = Some(content);
                                                     }
-                                                    Ok(crate::discord::ws_client::IncomingMessage::Feedback { .. }) => {}
+                                                    Ok(crate::discord::ws_client::IncomingMessage::Feedback { .. }) => {
+                                                        response_text = None;
+                                                    }
                                                     Ok(crate::discord::ws_client::IncomingMessage::Error { message }) => {
                                                         tracing::warn!("VOICE_PIPELINE: Gateway error: {}", message);
+                                                        response_text = None;
                                                     }
-                                                    Ok(_) => {}
+                                                    Ok(_) => { response_text = None; }
                                                     Err(e) => {
                                                         tracing::warn!("VOICE_PIPELINE: Failed to receive response: {}", e);
+                                                        response_text = None;
                                                     }
                                                 }
                                             }
                                             // _req_guard dropped here, releasing lock
+
+                                            // Send text response to Discord channel
+                                            if let Some(text) = response_text {
+                                                if !text.trim().is_empty() {
+                                                    let guild = serenity::model::id::GuildId::new(guild_id);
+                                                    if let Ok(channels) = guild.channels(&http).await {
+                                                        if let Some((channel_id, _)) = channels.iter()
+                                                            .find(|(_, ch)| ch.kind == serenity::model::channel::ChannelType::Text)
+                                                        {
+                                                            if let Err(e) = send_message_split(
+                                                                &http, *channel_id, &text
+                                                            ).await {
+                                                                tracing::error!("VOICE_PIPELINE: Failed to send text response: {}", e);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                         tracing::info!(
                                             "VOICE_PIPELINE: Transcription processor stopped"

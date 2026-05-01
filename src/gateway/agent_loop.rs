@@ -76,10 +76,24 @@ pub async fn run_agent_loop(
         }
     }
 
+    // Apply user template
+    let user_template_name = ctx.custom_data
+        .get("user_template")
+        .and_then(|v| v.as_str())
+        .unwrap_or("user");
+    let user_template_path = format!("templates/{}.poml", user_template_name);
+    let rendered_user_message = if std::path::Path::new(&user_template_path).exists() {
+        let tmpl_ctx = serde_json::json!({ "user_prompt": user_message });
+        crate::gateway::poml::render(&user_template_path, &tmpl_ctx).await
+            .unwrap_or_else(|_| user_message.to_string())
+    } else {
+        user_message.to_string()
+    };
+
     // Store user message
     state.db.add_message(
         user_id,
-        &crate::db::messages::Message::user(user_message.to_string()),
+        &crate::db::messages::Message::user(rendered_user_message),
     )?;
 
     loop {
@@ -432,15 +446,22 @@ async fn build_system_prompt(
         "mode": ctx.mode,
         "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
         "user_message": user_message,
+        "user_prompt": user_message,
+        "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     });
 
     if let Some(ref name) = ctx.user_name {
         context_json["user_name"] = serde_json::json!(name);
     }
 
-    if !ctx.settings.path.is_empty() {
-        context_json["path"] = serde_json::json!(ctx.settings.path);
-    }
+    let effective_path = if ctx.settings.path.is_empty() {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "/".to_string())
+    } else {
+        ctx.settings.path.clone()
+    };
+    context_json["path"] = serde_json::json!(effective_path);
 
     if let Some(ref state) = ctx.settings.active_state {
         context_json["active_state"] = serde_json::json!(state);
@@ -455,6 +476,15 @@ async fn build_system_prompt(
     let mut skills_registry = crate::skills::SkillRegistry::new();
     let _ = skills_registry.load_from_dir(std::path::Path::new("skills"));
     context_json["skills"] = skills_registry.to_context_array();
+
+    // Load memory
+    let memory = crate::db::memory::load_memory(&_state.db, &ctx.user_id);
+    context_json["memory"] = serde_json::json!({
+        "facts": memory.learned_facts,
+        "topics": memory.last_topics,
+        "preferences": memory.user_preferences,
+        "variables": memory.custom_variables,
+    });
 
     let template_path = "templates/system.poml";
     match crate::gateway::poml::render(template_path, &context_json).await {

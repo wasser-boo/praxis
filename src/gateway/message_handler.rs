@@ -321,6 +321,9 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
     let _ = skills_registry.load_from_dir(std::path::Path::new("skills"));
     let skills = skills_registry.to_context_array();
 
+    // Load memory
+    let memory = crate::db::memory::load_memory(&state.db, &ctx.user_id);
+
     // Calculate uptime
     let uptime_secs = state.start_time.elapsed().as_secs();
     let uptime = format_uptime(uptime_secs);
@@ -349,6 +352,20 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
         "uptime_secs": uptime_secs,
         "paired_users_count": paired_count,
         "paired_users": paired_list,
+        "path": if ctx.settings.path.is_empty() {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "/".to_string())
+        } else {
+            ctx.settings.path.clone()
+        },
+        "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        "memory": serde_json::json!({
+            "facts": memory.learned_facts,
+            "topics": memory.last_topics,
+            "preferences": memory.user_preferences,
+            "variables": memory.custom_variables,
+        }),
     });
 
     match crate::gateway::poml::render(template_path, &context).await {
