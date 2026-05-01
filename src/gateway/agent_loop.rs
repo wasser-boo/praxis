@@ -189,6 +189,20 @@ pub async fn run_agent_loop(
                 ),
             )?;
 
+            if let Some(ref content) = response.content {
+                if !content.trim().is_empty() {
+                    let send_first = ctx.custom_data
+                        .get("send_first_response")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    if send_first {
+                        if let Some(ref tx) = feedback_tx {
+                            let _ = tx.send(content.clone());
+                        }
+                    }
+                }
+            }
+
             let mut tool_call_count = 0;
             for tc in tool_calls {
                 if tool_call_count >= config.max_tool_calls {

@@ -338,8 +338,8 @@ async fn handle_voice_tts(user_id: String, audio_data: Vec<u8>) {
                                 crate::voice::pcm_to_wav(&samples, original_sample_rate, 1);
                             let mut call = handler.lock().await;
                             let source = songbird::input::Input::from(wav_data);
-                            call.play_input(source);
-                            tracing::info!("TTS audio played in guild {}", guild_id);
+                            call.enqueue_input(source);
+                            tracing::info!("TTS audio queued in guild {}", guild_id);
                         }
                         Ok(_) => tracing::warn!("No audio samples"),
                         Err(e) => tracing::error!("Audio decode failed: {}", e),

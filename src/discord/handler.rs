@@ -34,6 +34,7 @@ fn generate_silent_wav(duration_ms: u32) -> Vec<u8> {
 pub struct DiscordHandler {
     pub db: Database,
     pub ws_client: Arc<Mutex<WsClient>>,
+    pub request_lock: Arc<Mutex<()>>,
     pub voice_muted: Arc<Mutex<bool>>,
     pub voice_deafened: Arc<Mutex<bool>>,
     pub secrets: crate::db::secrets::Secrets,
@@ -49,6 +50,7 @@ impl DiscordHandler {
         Self {
             db,
             ws_client,
+            request_lock: Arc::new(Mutex::new(())),
             voice_muted: Arc::new(Mutex::new(false)),
             voice_deafened: Arc::new(Mutex::new(true)),
             secrets,
@@ -153,6 +155,8 @@ impl EventHandler for DiscordHandler {
                 let _ = typing_channel_id.start_typing(&typing_http);
             }
         });
+
+        let _req_guard = self.request_lock.lock().await;
 
         let payload = OutgoingMessage::Message {
             user_id: pairing.user_id.clone(),
@@ -566,6 +570,7 @@ impl EventHandler for DiscordHandler {
                                     // Spawn transcription processing task
                                     let db = self.db.clone();
                                     let ws_client = self.ws_client.clone();
+                                    let req_lock = self.request_lock.clone();
                                     let secrets = self.secrets.clone();
                                     let voice_muted = self.voice_muted.clone();
                                     tokio::spawn(async move {
@@ -686,6 +691,9 @@ impl EventHandler for DiscordHandler {
                                             tracing::info!("VOICE_PIPELINE: Wake word {:?} matched, sending message: '{}'",
                                                 wake_match.wake_word, message_text);
 
+                                            // Acquire request lock to prevent race with text handler
+                                            let _req_guard = req_lock.lock().await;
+
                                             // Send to gateway via WsClient
                                             let payload = crate::discord::ws_client::OutgoingMessage::Message {
                                                 user_id: praxis_user_id.clone(),
@@ -693,8 +701,6 @@ impl EventHandler for DiscordHandler {
                                                 channel_id: format!("voice:{}", guild_id),
                                             };
 
-                                            // Send and immediately drop lock to avoid
-                                            // deadlock with text message handler
                                             {
                                                 let ws = ws_client.lock().await;
                                                 if let Err(e) = ws.send(payload).await {
@@ -702,11 +708,11 @@ impl EventHandler for DiscordHandler {
                                                         "VOICE_PIPELINE: Failed to send to gateway: {}",
                                                         e
                                                     );
+                                                    continue;
                                                 }
                                             }
 
-                                            // Consume the response so it doesn't
-                                            // accumulate in the WS buffer
+                                            // Consume the response
                                             {
                                                 let ws = ws_client.lock().await;
                                                 match ws.recv().await {
@@ -723,6 +729,7 @@ impl EventHandler for DiscordHandler {
                                                     }
                                                 }
                                             }
+                                            // _req_guard dropped here, releasing lock
                                         }
                                         tracing::info!(
                                             "VOICE_PIPELINE: Transcription processor stopped"

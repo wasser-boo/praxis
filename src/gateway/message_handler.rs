@@ -233,8 +233,12 @@ async fn handle_message_agent_loop(
 
     let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
+    let use_tts = ctx.settings.use_tts;
+    let is_voice_input = channel_id.map_or(false, |ch| ch.starts_with("voice:"));
+    let tts_for_feedback = use_tts || is_voice_input;
+
     // Spawn feedback routing task
-    if !feedback_modes.is_empty() {
+    if !feedback_modes.is_empty() || tts_for_feedback {
         let feedback_modes = feedback_modes.clone();
         let uid = user_id_owned.clone();
         let ch = feedback_channel.clone();
@@ -243,13 +247,16 @@ async fn handle_message_agent_loop(
 
         tokio::spawn(async move {
             while let Some(msg) = feedback_rx.recv().await {
+                let mut handled = false;
                 for mode in &feedback_modes {
                     match mode.as_str() {
                         "tts" => {
                             spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid);
+                            handled = true;
                         }
                         "dm" => {
                             crate::event_channel::broadcast_agent_feedback(&uid, &msg);
+                            handled = true;
                         }
                         "text" => {
                             let sent_to_channel = ch.as_ref().map_or(false, |ch_id| {
@@ -265,9 +272,13 @@ async fn handle_message_agent_loop(
                             if !sent_to_channel {
                                 crate::event_channel::broadcast_agent_feedback(&uid, &msg);
                             }
+                            handled = true;
                         }
                         _ => {}
                     }
+                }
+                if !handled && tts_for_feedback {
+                    spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid);
                 }
             }
         });

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
-static SECRETS: OnceLock<Secrets> = OnceLock::new();
+static SECRETS: RwLock<Option<Secrets>> = RwLock::new(None);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Secrets {
@@ -30,11 +30,17 @@ pub struct Secrets {
 }
 
 pub fn init_secrets(secrets: Secrets) {
-    SECRETS.set(secrets).ok();
+    if let Ok(mut guard) = SECRETS.write() {
+        *guard = Some(secrets);
+    }
 }
 
 pub fn get_secrets() -> Secrets {
-    SECRETS.get().cloned().unwrap_or_default()
+    SECRETS
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_default()
 }
 
 pub fn load_secrets_with_password(password: &str) -> anyhow::Result<Secrets> {
