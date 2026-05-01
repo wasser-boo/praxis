@@ -546,10 +546,17 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
 
     let plugin_secret_keys = plugins.collect_secrets();
     let all_secrets = crate::db::secrets::get_secrets();
+    tracing::info!(
+        plugin_secret_keys = ?plugin_secret_keys,
+        custom_keys = ?all_secrets.custom.keys().collect::<Vec<_>>(),
+        custom_values = ?all_secrets.custom,
+        "Secrets before plugin filtering"
+    );
     let plugin_secrets: std::collections::HashMap<String, String> = plugin_secret_keys
         .iter()
         .filter_map(|k| all_secrets.custom.get(k).map(|v| (k.clone(), v.clone())))
         .collect();
+    tracing::info!(plugin_secrets = ?plugin_secrets, "Plugin secrets after filtering");
 
     match tc.function.name.as_str() {
         "execute_terminal" => {

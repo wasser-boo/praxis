@@ -38,11 +38,11 @@ def get_config():
 
 def make_request(url, username, password, api_key, method="GET", data=None):
     headers = {"Content-Type": "application/json"}
-    if username and password:
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    elif username and password:
         creds = base64.b64encode(f"{username}:{password}".encode()).decode()
         headers["Authorization"] = f"Basic {creds}"
-    elif api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
