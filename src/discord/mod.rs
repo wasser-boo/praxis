@@ -294,7 +294,9 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
                         e = e.field(&field.name, &field.value, field.inline);
                     }
                     let msg = serenity::builder::CreateMessage::new().embed(e);
-                    let _ = channel.send_message(&http, msg).await;
+                    if let Err(e) = channel.send_message(&http, msg).await {
+                        tracing::error!("Failed to send embed to channel {}: {}", channel_id, e);
+                    }
                 }
             }
             Ok(crate::event_channel::GatewayEvent::VoiceTts {

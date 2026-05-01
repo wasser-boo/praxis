@@ -693,12 +693,35 @@ impl EventHandler for DiscordHandler {
                                                 channel_id: format!("voice:{}", guild_id),
                                             };
 
-                                            let mut ws = ws_client.lock().await;
-                                            if let Err(e) = ws.send(payload).await {
-                                                tracing::error!(
-                                                    "VOICE_PIPELINE: Failed to send to gateway: {}",
-                                                    e
-                                                );
+                                            // Send and immediately drop lock to avoid
+                                            // deadlock with text message handler
+                                            {
+                                                let ws = ws_client.lock().await;
+                                                if let Err(e) = ws.send(payload).await {
+                                                    tracing::error!(
+                                                        "VOICE_PIPELINE: Failed to send to gateway: {}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+
+                                            // Consume the response so it doesn't
+                                            // accumulate in the WS buffer
+                                            {
+                                                let ws = ws_client.lock().await;
+                                                match ws.recv().await {
+                                                    Ok(crate::discord::ws_client::IncomingMessage::Response { content, .. }) => {
+                                                        tracing::info!("VOICE_PIPELINE: Got response ({} chars)", content.len());
+                                                    }
+                                                    Ok(crate::discord::ws_client::IncomingMessage::Feedback { .. }) => {}
+                                                    Ok(crate::discord::ws_client::IncomingMessage::Error { message }) => {
+                                                        tracing::warn!("VOICE_PIPELINE: Gateway error: {}", message);
+                                                    }
+                                                    Ok(_) => {}
+                                                    Err(e) => {
+                                                        tracing::warn!("VOICE_PIPELINE: Failed to receive response: {}", e);
+                                                    }
+                                                }
                                             }
                                         }
                                         tracing::info!(

@@ -351,7 +351,7 @@ pub mod songbird_integration {
                                 format!("ssrc={}({} nonzero samples)", ssrc, has_voice)
                             })
                             .collect();
-                        tracing::info!(
+                        tracing::debug!(
                             "VOICE_EVENT: VoiceTick with {} speaker(s): {}",
                             tick.speaking.len(),
                             ssrc_info.join(", ")

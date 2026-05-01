@@ -32,23 +32,24 @@ pub async fn web_search(query: &str, max_results: usize) -> anyhow::Result<Vec<S
 fn parse_search_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     let mut results = Vec::new();
 
-    let title_re = regex::Regex::new(r#"<a[^>]*class="result__a"[^>]*>([^<]+)</a>"#).unwrap();
+    let title_re = regex::Regex::new(r#"<a[^>]*class="result__a"[^>]*>(.*?)</a>"#).unwrap();
     let snippet_re =
-        regex::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>([^<]+)</a>"#).unwrap();
+        regex::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#).unwrap();
     let url_re =
-        regex::Regex::new(r#"<a[^>]*class="result__url"[^>]*href="([^"]+)"[^>]*>"#).unwrap();
+        regex::Regex::new(r#"<a[^>]*class="result__url"[^>]*>(.*?)</a>"#).unwrap();
+    let strip_tags = regex::Regex::new(r"<[^>]+>").unwrap();
 
-    let titles: Vec<&str> = title_re
+    let titles: Vec<String> = title_re
         .captures_iter(html)
-        .map(|c| c.get(1).unwrap().as_str())
+        .map(|c| strip_tags.replace_all(c.get(1).unwrap().as_str(), "").trim().to_string())
         .collect();
-    let snippets: Vec<&str> = snippet_re
+    let snippets: Vec<String> = snippet_re
         .captures_iter(html)
-        .map(|c| c.get(1).unwrap().as_str())
+        .map(|c| strip_tags.replace_all(c.get(1).unwrap().as_str(), "").trim().to_string())
         .collect();
-    let urls: Vec<&str> = url_re
+    let urls: Vec<String> = url_re
         .captures_iter(html)
-        .map(|c| c.get(1).unwrap().as_str())
+        .map(|c| strip_tags.replace_all(c.get(1).unwrap().as_str(), "").trim().to_string())
         .collect();
 
     let count = titles
@@ -58,9 +59,9 @@ fn parse_search_results(html: &str, max_results: usize) -> Vec<SearchResult> {
         .min(max_results);
     for i in 0..count {
         results.push(SearchResult {
-            title: titles[i].trim().to_string(),
-            url: urls[i].trim().to_string(),
-            snippet: snippets[i].trim().to_string(),
+            title: titles[i].clone(),
+            url: urls[i].clone(),
+            snippet: snippets[i].clone(),
         });
     }
 
@@ -97,5 +98,15 @@ mod rag_tests {
         <a class=\"result__url\" href=\"https://b.com\">b.com</a>";
         let results = parse_search_results(html, 1);
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_with_bold_tags_in_snippet() {
+        let html = "<a class=\"result__a\" href=\"https://example.com\">Example Title</a>
+        <a class=\"result__snippet\" href=\"https://example.com\"><b>Test</b> your internet speed</a>
+        <a class=\"result__url\" href=\"https://example.com\">example.com</a>";
+        let results = parse_search_results(html, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].snippet, "Test your internet speed");
     }
 }
