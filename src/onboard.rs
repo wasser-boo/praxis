@@ -386,15 +386,63 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     println!("Configuration saved to {}", env_path);
 
     // Create directories
-    std::fs::create_dir_all("templates")?;
+    std::fs::create_dir_all("templates/roles")?;
+    std::fs::create_dir_all("templates/tasks")?;
     std::fs::create_dir_all("contextlanguage")?;
     std::fs::create_dir_all("data")?;
     std::fs::create_dir_all("skills")?;
     std::fs::create_dir_all("plugins")?;
     std::fs::create_dir_all("static")?;
     println!(
-        "Created directories: templates/, contextlanguage/, data/, skills/, plugins/, static/"
+        "Created directories: templates/roles/, templates/tasks/, contextlanguage/, data/, skills/, plugins/, static/"
     );
+
+    // Create default templates
+    std::fs::write(
+        "templates/system.poml",
+        include_str!("../templates/system.poml"),
+    )?;
+    std::fs::write(
+        "templates/roles/senior_dev.poml",
+        include_str!("../templates/roles/senior_dev.poml"),
+    )?;
+    std::fs::write(
+        "templates/roles/technical_writer.poml",
+        include_str!("../templates/roles/technical_writer.poml"),
+    )?;
+    std::fs::write(
+        "templates/roles/researcher.poml",
+        include_str!("../templates/roles/researcher.poml"),
+    )?;
+    std::fs::write(
+        "templates/tasks/plan.poml",
+        include_str!("../templates/tasks/plan.poml"),
+    )?;
+    std::fs::write(
+        "templates/tasks/test.poml",
+        include_str!("../templates/tasks/test.poml"),
+    )?;
+    std::fs::write(
+        "templates/tasks/review.poml",
+        include_str!("../templates/tasks/review.poml"),
+    )?;
+    std::fs::write(
+        "templates/tasks/done.poml",
+        include_str!("../templates/tasks/done.poml"),
+    )?;
+    std::fs::write(
+        "templates/tasks/code.poml",
+        include_str!("../templates/tasks/code.poml"),
+    )?;
+    std::fs::write(
+        "templates/tasks/code_review.poml",
+        include_str!("../templates/tasks/code_review.poml"),
+    )?;
+    std::fs::write(
+        "templates/tasks/feedback.poml",
+        include_str!("../templates/tasks/feedback.poml"),
+    )?;
+    println!("Created default templates");
 
     // Create static dashboard files
     std::fs::write("static/index.html", include_str!("../static/index.html"))?;

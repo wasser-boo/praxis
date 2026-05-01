@@ -182,6 +182,7 @@ async fn handle_message_agent_loop(
         tags_enabled: ctx.settings.tags_enabled,
         cl_file: ctx.settings.cl_file.clone().or(ctx.cl_file.clone()),
         feedback_enabled: !feedback_modes.is_empty(),
+        message_on_toolcalling: ctx.settings.message_on_toolcalling,
     };
 
     let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel::<String>();

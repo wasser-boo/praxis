@@ -170,6 +170,10 @@ pub struct ContextSettings {
     pub feedback_mode: Vec<String>,
     #[serde(default)]
     pub feedback_channel_id: Option<String>,
+    #[serde(default = "default_feedback_template")]
+    pub feedback_template: String,
+    #[serde(default)]
+    pub message_on_toolcalling: bool,
 }
 
 fn default_stt() -> String {
@@ -210,6 +214,9 @@ fn default_elevenlabs_similarity_boost() -> f32 {
 }
 fn default_elevenlabs_speed() -> Option<f32> {
     Some(0.8)
+}
+fn default_feedback_template() -> String {
+    "tasks/feedback".to_string()
 }
 
 impl Default for ContextSettings {
@@ -252,7 +259,7 @@ impl Default for ContextSettings {
             minimax_tts_model: None,
             mimo_voice_id: None,
             mimo_tts_type: None,
-            history_with_toolcalls: false,
+            history_with_toolcalls: true,
             only_tool_calls_no_history: false,
             download: false,
             feedback_enabled: false,
@@ -278,6 +285,8 @@ impl Default for ContextSettings {
             voice_auto_pause_enabled: false,
             feedback_mode: Vec::new(),
             feedback_channel_id: None,
+            feedback_template: default_feedback_template(),
+            message_on_toolcalling: false,
         }
     }
 }

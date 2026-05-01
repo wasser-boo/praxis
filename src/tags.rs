@@ -273,7 +273,7 @@ You can use special tags in your response to control the workflow. Put them at t
 Available tags:
 - `§done` — Task is complete, stop the loop
 - `§next` — Advance to the next step in the workflow
-- `§feedback="message"` — Send a progress update to the user
+- `§feedback="message"` — Send a progress update to the user (use for status updates, not structured feedback)
 - `§push="template_name"` — Add a sub-task template to the queue
 - `§pop` — Remove the last sub-task from the queue
 - `§path="directory"` — Change the working directory
@@ -282,6 +282,8 @@ Available tags:
 - `§learn="fact: <fact>"` — Learn and store a fact
 - `§learn="pref: <key>=<value>"` — Learn a user preference
 - `§learn="topic: <topic>"` — Track a conversation topic
+
+For detailed feedback, use the feedback template (tasks/feedback) which provides structured analysis with summary, issues, and recommendations.
 
 IMPORTANT: Tags are stripped before the user sees your response. Put them at the very END.
 "#

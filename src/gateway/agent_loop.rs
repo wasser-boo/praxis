@@ -18,6 +18,7 @@ pub struct AgentLoopConfig {
     pub tags_enabled: bool,
     pub cl_file: Option<String>,
     pub feedback_enabled: bool,
+    pub message_on_toolcalling: bool,
 }
 
 impl Default for AgentLoopConfig {
@@ -28,6 +29,7 @@ impl Default for AgentLoopConfig {
             tags_enabled: true,
             cl_file: None,
             feedback_enabled: false,
+            message_on_toolcalling: false,
         }
     }
 }
@@ -145,7 +147,7 @@ pub async fn run_agent_loop(
                 }
 
                 if let Some(ref tx) = feedback_tx {
-                    if config.feedback_enabled {
+                    if config.feedback_enabled && config.message_on_toolcalling {
                         let _ = tx.send(format!("Calling tool: {}", tc.function.name));
                     }
                 }
