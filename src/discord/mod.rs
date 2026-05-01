@@ -15,9 +15,13 @@ use tokio::sync::Mutex;
 
 const DEFAULT_GATEWAY_URL: &str = "ws://localhost:3537/ws";
 
-// ── TTS Playback Lock ───────────────────────────────────────────────────────
-// Ensures TTS tracks play sequentially, not overlapping
-static TTS_PLAYBACK_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// ── TTS Playback Channel ─────────────────────────────────────────────────────
+// Dedicated mpsc channel for sequential TTS playback, decoupled from event loop
+static TTS_PLAYBACK_TX: OnceCell<tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>> = OnceCell::new();
+
+fn get_tts_playback_tx() -> Option<&'static tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>> {
+    TTS_PLAYBACK_TX.get()
+}
 
 // ── Voice State ──────────────────────────────────────────────────────────────
 
@@ -165,6 +169,15 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
         }
     };
 
+    // Initialize TTS playback channel and spawn dedicated playback task
+    let (tts_tx, mut tts_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
+    let _ = TTS_PLAYBACK_TX.set(tts_tx);
+    tokio::spawn(async move {
+        while let Some((user_id, audio_data)) = tts_rx.recv().await {
+            play_tts_audio(user_id, audio_data).await;
+        }
+    });
+
     let mut rx = event_tx.subscribe();
     loop {
         match rx.recv().await {
@@ -307,7 +320,9 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
                 user_id,
                 audio_data,
             }) => {
-                handle_voice_tts(user_id, audio_data).await;
+                if let Some(tx) = get_tts_playback_tx() {
+                    let _ = tx.send((user_id, audio_data));
+                }
             }
             Ok(_) => {}
             Err(e) => {
@@ -318,13 +333,10 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
     }
 }
 
-/// Handle voice TTS - play audio in Discord voice channel
+/// Play TTS audio in Discord voice channel (called from dedicated playback task)
 #[cfg(feature = "songbird")]
-async fn handle_voice_tts(user_id: String, audio_data: Vec<u8>) {
+async fn play_tts_audio(user_id: String, audio_data: Vec<u8>) {
     tracing::info!("Voice TTS for user {}: {} bytes", user_id, audio_data.len());
-
-    // Acquire TTS playback lock - ensures sequential playback
-    let _tts_guard = TTS_PLAYBACK_LOCK.lock().await;
 
     if let Some(voice_state) = get_discord_voice_state() {
         let guard = voice_state.lock().await;
@@ -363,12 +375,12 @@ async fn handle_voice_tts(user_id: String, audio_data: Vec<u8>) {
             }
         }
     }
-    // _tts_guard dropped here, next TTS can play
+    // Next TTS from the mpsc channel will play after this returns
 }
 
 #[cfg(not(feature = "songbird"))]
-async fn handle_voice_tts(_user_id: String, _audio_data: Vec<u8>) {
-    tracing::debug!("Voice TTS skipped - songbird not enabled");
+async fn play_tts_audio(_user_id: String, _audio_data: Vec<u8>) {
+    tracing::debug!("TTS playback skipped - songbird not enabled");
 }
 
 pub async fn start(db: Database) -> anyhow::Result<()> {
