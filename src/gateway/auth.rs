@@ -1,4 +1,4 @@
-use axum::{extract::Request, middleware::Next, response::Response, http::StatusCode, Json};
+use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response, Json};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,9 @@ pub async fn login_handler(
 ) -> Result<Json<LoginResponse>, StatusCode> {
     let secrets = crate::db::secrets::get_secrets();
     let config = crate::config::Config::from_env();
-    let admin_password = secrets.dashboard_admin_password.unwrap_or(config.dashboard_admin_password);
+    let admin_password = secrets
+        .dashboard_admin_password
+        .unwrap_or(config.dashboard_admin_password);
     let gateway_api_key = secrets.gateway_api_key.unwrap_or(config.gateway_api_key);
 
     if payload.password != admin_password {

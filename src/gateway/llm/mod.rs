@@ -1,6 +1,6 @@
 pub mod anthropic;
-pub mod minimax;
 pub mod mimo;
+pub mod minimax;
 pub mod ollama;
 pub mod openai;
 pub mod provider;
@@ -108,7 +108,10 @@ impl LLMRouter {
     }
 
     pub fn provider_names(&self) -> Vec<String> {
-        self.providers.iter().map(|p| p.name().to_string()).collect()
+        self.providers
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect()
     }
 
     pub fn default_provider(&self) -> &str {
@@ -141,7 +144,11 @@ impl LLMRouter {
 
             let request = ChatRequest {
                 messages: messages.clone(),
-                tools: if tools.is_empty() { None } else { Some(tools.clone()) },
+                tools: if tools.is_empty() {
+                    None
+                } else {
+                    Some(tools.clone())
+                },
                 temperature: Some(0.7),
                 max_tokens: Some(4096),
             };
@@ -169,8 +176,8 @@ impl LLMRouter {
 
             // Execute each tool call
             for tool_call in &tool_calls {
-                let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
-                    .unwrap_or_default();
+                let args: serde_json::Value =
+                    serde_json::from_str(&tool_call.function.arguments).unwrap_or_default();
 
                 tracing::info!(tool = %tool_call.function.name, "Executing tool call");
 
@@ -178,22 +185,45 @@ impl LLMRouter {
                 let result_str = match tool_call.function.name.as_str() {
                     "agent_complete" => {
                         agent_signal = AgentSignalFromTool::Done;
-                        crate::tools::agent_control::run(db, user_id, crate::tools::agent_control::AgentControlSignal::Complete).await
-                            .unwrap_or_else(|e| format!("Error: {}", e))
+                        crate::tools::agent_control::run(
+                            db,
+                            user_id,
+                            crate::tools::agent_control::AgentControlSignal::Complete,
+                        )
+                        .await
+                        .unwrap_or_else(|e| format!("Error: {}", e))
                     }
                     "agent_next" => {
                         agent_signal = AgentSignalFromTool::Next;
-                        crate::tools::agent_control::run(db, user_id, crate::tools::agent_control::AgentControlSignal::Next).await
-                            .unwrap_or_else(|e| format!("Error: {}", e))
+                        crate::tools::agent_control::run(
+                            db,
+                            user_id,
+                            crate::tools::agent_control::AgentControlSignal::Next,
+                        )
+                        .await
+                        .unwrap_or_else(|e| format!("Error: {}", e))
                     }
                     "agent_set_path" => {
-                        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let path = args
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         agent_signal = AgentSignalFromTool::Path(path.clone());
-                        crate::tools::agent_control::run(db, user_id, crate::tools::agent_control::AgentControlSignal::Path(path)).await
-                            .unwrap_or_else(|e| format!("Error: {}", e))
+                        crate::tools::agent_control::run(
+                            db,
+                            user_id,
+                            crate::tools::agent_control::AgentControlSignal::Path(path),
+                        )
+                        .await
+                        .unwrap_or_else(|e| format!("Error: {}", e))
                     }
                     "agent_feedback" => {
-                        let msg = args.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let msg = args
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         if !msg.is_empty() {
                             if let Some(ref tx) = feedback_tx {
                                 let _ = tx.send(msg.clone());
@@ -204,12 +234,20 @@ impl LLMRouter {
                     }
                     "execute_terminal" => {
                         let command = args["command"].as_str().unwrap_or("");
-                        match crate::tools::execute_terminal::execute_terminal(command, None).await {
+                        match crate::tools::execute_terminal::execute_terminal(command, None).await
+                        {
                             Ok(result) => {
                                 if result.exit_code == 0 {
-                                    if result.stdout.is_empty() { "Command executed (no output)".to_string() } else { result.stdout }
+                                    if result.stdout.is_empty() {
+                                        "Command executed (no output)".to_string()
+                                    } else {
+                                        result.stdout
+                                    }
                                 } else {
-                                    format!("Exit code: {}\nStdout: {}\nStderr: {}", result.exit_code, result.stdout, result.stderr)
+                                    format!(
+                                        "Exit code: {}\nStdout: {}\nStderr: {}",
+                                        result.exit_code, result.stdout, result.stderr
+                                    )
                                 }
                             }
                             Err(e) => format!("Error: {}", e),
@@ -237,8 +275,14 @@ impl LLMRouter {
                         match std::fs::read_to_string(path) {
                             Ok(content) => {
                                 if content.len() > 10000 {
-                                    format!("{}...\n[Truncated - {} bytes]", &content[..10000], content.len())
-                                } else { content }
+                                    format!(
+                                        "{}...\n[Truncated - {} bytes]",
+                                        &content[..10000],
+                                        content.len()
+                                    )
+                                } else {
+                                    content
+                                }
                             }
                             Err(e) => format!("Error: {}", e),
                         }
@@ -247,11 +291,23 @@ impl LLMRouter {
                         let query = args["query"].as_str().unwrap_or("");
                         match crate::tools::web_search::web_search(query, 5).await {
                             Ok(results) => {
-                                if results.is_empty() { "No results".to_string() }
-                                else {
-                                    results.iter().enumerate()
-                                        .map(|(i, r)| format!("{}. {}\n   {}\n   {}", i+1, r.title, r.snippet, r.url))
-                                        .collect::<Vec<_>>().join("\n\n")
+                                if results.is_empty() {
+                                    "No results".to_string()
+                                } else {
+                                    results
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, r)| {
+                                            format!(
+                                                "{}. {}\n   {}\n   {}",
+                                                i + 1,
+                                                r.title,
+                                                r.snippet,
+                                                r.url
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n\n")
                                 }
                             }
                             Err(e) => format!("Error: {}", e),

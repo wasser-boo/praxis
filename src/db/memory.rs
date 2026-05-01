@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::Database;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntry {
@@ -19,7 +19,12 @@ pub struct Memory {
 }
 
 impl Database {
-    pub fn add_memory(&self, user_id: &str, fact: &str, category: Option<&str>) -> anyhow::Result<i64> {
+    pub fn add_memory(
+        &self,
+        user_id: &str,
+        fact: &str,
+        category: Option<&str>,
+    ) -> anyhow::Result<i64> {
         let conn = self.conn();
         let id = conn.execute(
             "INSERT INTO memory (user_id, fact, category) VALUES (?1, ?2, ?3)",
@@ -72,13 +77,17 @@ pub fn load_memory(db: &Database, user_id: &str) -> Memory {
                 Some("preference") => {
                     if let Some(key) = entry.fact.splitn(2, '=').next() {
                         let val = entry.fact.splitn(2, '=').nth(1).unwrap_or("");
-                        memory.user_preferences.insert(key.to_string(), serde_json::json!(val));
+                        memory
+                            .user_preferences
+                            .insert(key.to_string(), serde_json::json!(val));
                     }
                 }
                 Some("custom_variable") => {
                     if let Some(key) = entry.fact.splitn(2, '=').next() {
                         let val = entry.fact.splitn(2, '=').nth(1).unwrap_or("");
-                        memory.custom_variables.insert(key.to_string(), serde_json::json!(val));
+                        memory
+                            .custom_variables
+                            .insert(key.to_string(), serde_json::json!(val));
                     }
                 }
                 _ => {}
@@ -125,7 +134,9 @@ pub fn add_learned_fact(memory: &mut Memory, fact: &str) {
 
 /// Update a user preference
 pub fn update_preference(memory: &mut Memory, key: &str, value: &serde_json::Value) {
-    memory.user_preferences.insert(key.to_string(), value.clone());
+    memory
+        .user_preferences
+        .insert(key.to_string(), value.clone());
 }
 
 /// Add a topic to memory
@@ -136,7 +147,10 @@ pub fn add_topic(memory: &mut Memory, topic: &str) {
 }
 
 /// Update custom variables in memory
-pub fn update_custom_variables(memory: &mut Memory, updates: &std::collections::HashMap<String, serde_json::Value>) {
+pub fn update_custom_variables(
+    memory: &mut Memory,
+    updates: &std::collections::HashMap<String, serde_json::Value>,
+) {
     for (key, value) in updates {
         memory.custom_variables.insert(key.clone(), value.clone());
     }
@@ -150,7 +164,10 @@ pub fn delete_custom_variables(memory: &mut Memory, keys: &[String]) {
 }
 
 /// Load variables from memory and merge with context custom_data
-pub fn load_variables(db: &Database, user_id: &str) -> std::collections::HashMap<String, serde_json::Value> {
+pub fn load_variables(
+    db: &Database,
+    user_id: &str,
+) -> std::collections::HashMap<String, serde_json::Value> {
     let memory = load_memory(db, user_id);
     let mut variables = std::collections::HashMap::new();
 
@@ -181,7 +198,9 @@ mod db_tests {
     #[test]
     fn test_add_and_get_memory() {
         let (db, _dir) = test_db();
-        let id = db.add_memory("user1", "User likes Rust", Some("preferences")).unwrap();
+        let id = db
+            .add_memory("user1", "User likes Rust", Some("preferences"))
+            .unwrap();
         assert!(id > 0);
         let memories = db.get_memories("user1", 10).unwrap();
         assert_eq!(memories.len(), 1);
@@ -257,8 +276,12 @@ mod db_tests {
     #[test]
     fn test_delete_custom_variables() {
         let mut memory = Memory::default();
-        memory.custom_variables.insert("a".to_string(), serde_json::json!("1"));
-        memory.custom_variables.insert("b".to_string(), serde_json::json!("2"));
+        memory
+            .custom_variables
+            .insert("a".to_string(), serde_json::json!("1"));
+        memory
+            .custom_variables
+            .insert("b".to_string(), serde_json::json!("2"));
         delete_custom_variables(&mut memory, &["a".to_string()]);
         assert!(!memory.custom_variables.contains_key("a"));
         assert!(memory.custom_variables.contains_key("b"));

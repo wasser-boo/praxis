@@ -45,7 +45,9 @@ pub fn load_secrets_with_password(password: &str) -> anyhow::Result<Secrets> {
         return Ok(secrets);
     }
 
-    Err(anyhow::anyhow!("No encrypted secrets found. Run 'praxis onboard --interactive' to set up."))
+    Err(anyhow::anyhow!(
+        "No encrypted secrets found. Run 'praxis onboard --interactive' to set up."
+    ))
 }
 
 pub fn save_secrets(secrets: &Secrets, password: &str) -> anyhow::Result<()> {
@@ -61,7 +63,7 @@ pub fn has_secrets() -> bool {
 
 pub fn mask_secret(secret: &Option<String>) -> String {
     match secret {
-        Some(s) if s.len() > 4 => format!("***{}", &s[s.len()-4..]),
+        Some(s) if s.len() > 4 => format!("***{}", &s[s.len() - 4..]),
         Some(_) => "***".to_string(),
         None => "".to_string(),
     }
@@ -81,7 +83,10 @@ pub fn migrate_plaintext_to_encrypted(password: &str) -> anyhow::Result<()> {
 
     let backup = "secrets.json.migrated";
     std::fs::rename(path, backup)?;
-    tracing::info!("Migrated secrets.json to encrypted format, backup at {}", backup);
+    tracing::info!(
+        "Migrated secrets.json to encrypted format, backup at {}",
+        backup
+    );
 
     Ok(())
 }
@@ -115,7 +120,10 @@ mod security_tests {
     fn test_mask_secret() {
         assert_eq!(mask_secret(&None), "");
         assert_eq!(mask_secret(&Some("abc".to_string())), "***");
-        assert_eq!(mask_secret(&Some("abcdefghijklmnop".to_string())), "***mnop");
+        assert_eq!(
+            mask_secret(&Some("abcdefghijklmnop".to_string())),
+            "***mnop"
+        );
     }
 
     #[test]

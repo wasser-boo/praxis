@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use super::provider::*;
+use async_trait::async_trait;
 
 pub struct OllamaProvider {
     base_url: String,
@@ -54,16 +54,19 @@ impl LLMProvider for OllamaProvider {
 
         // Add tools if provided
         if let Some(ref tools) = request.tools {
-            let ollama_tools: Vec<serde_json::Value> = tools.iter().map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.function.name,
-                        "description": t.function.description,
-                        "parameters": t.function.parameters
-                    }
+            let ollama_tools: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.function.name,
+                            "description": t.function.description,
+                            "parameters": t.function.parameters
+                        }
+                    })
                 })
-            }).collect();
+                .collect();
             body["tools"] = serde_json::json!(ollama_tools);
         }
 
@@ -82,18 +85,21 @@ impl LLMProvider for OllamaProvider {
 
         // Parse tool calls from Ollama response
         let tool_calls = message["tool_calls"].as_array().map(|calls| {
-            calls.iter().filter_map(|tc| {
-                let func = tc.get("function")?;
-                let name = func.get("name")?.as_str()?.to_string();
-                let args = func.get("arguments")?.clone();
-                Some(ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
-                    function: FunctionCall {
-                        name,
-                        arguments: args.to_string(),
-                    },
+            calls
+                .iter()
+                .filter_map(|tc| {
+                    let func = tc.get("function")?;
+                    let name = func.get("name")?.as_str()?.to_string();
+                    let args = func.get("arguments")?.clone();
+                    Some(ToolCall {
+                        id: format!("call_{}", uuid::Uuid::new_v4()),
+                        function: FunctionCall {
+                            name,
+                            arguments: args.to_string(),
+                        },
+                    })
                 })
-            }).collect()
+                .collect()
         });
 
         Ok(ChatResponse {

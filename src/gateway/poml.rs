@@ -1,28 +1,23 @@
-use std::process::Command;
-use tempfile::NamedTempFile;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::process::Command;
+use tempfile::NamedTempFile;
 
 static SET_VAR_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\[\[([a-zA-Z_][a-zA-Z0-9_.]*):((?:[^\[\]]*(?:\[[^\[\]]*\])?)*)\]\]").unwrap()
 });
 
-static DELETE_VAR_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\[\[([a-zA-Z_][a-zA-Z0-9_]*)~\]\]").unwrap()
-});
+static DELETE_VAR_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\[\[([a-zA-Z_][a-zA-Z0-9_]*)~\]\]").unwrap());
 
-static READ_VAR_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\[\[([a-zA-Z_][a-zA-Z0-9_]*)\]\]").unwrap()
-});
+static READ_VAR_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\[\[([a-zA-Z_][a-zA-Z0-9_]*)\]\]").unwrap());
 
-static THINK_TAG_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"<think>[\s\S]*?</think>").unwrap()
-});
+static THINK_TAG_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"<think>[\s\S]*?</think>").unwrap());
 
 #[allow(dead_code)]
-static AGENT_SIGNAL_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"\[\[AGENT:(\w+)(?::"([^"]*)")?\]\]"#).unwrap()
-});
+static AGENT_SIGNAL_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"\[\[AGENT:(\w+)(?::"([^"]*)")?\]\]"#).unwrap());
 
 #[derive(Debug, Clone)]
 pub enum VariableEffect {
@@ -50,10 +45,7 @@ pub async fn render(template_path: &str, context: &serde_json::Value) -> anyhow:
         .unwrap_or_else(|_| "/mnt/c/Users/blabb/Desktop/poml/python/poml/js/cli.js".to_string());
 
     let context_file = NamedTempFile::new()?;
-    std::fs::write(
-        context_file.path(),
-        serde_json::to_string_pretty(context)?,
-    )?;
+    std::fs::write(context_file.path(), serde_json::to_string_pretty(context)?)?;
 
     let output = Command::new("node")
         .arg(&poml_cli)
@@ -81,10 +73,7 @@ pub async fn render(template_path: &str, context: &serde_json::Value) -> anyhow:
     }
 }
 
-async fn render_simple(
-    template_path: &str,
-    context: &serde_json::Value,
-) -> anyhow::Result<String> {
+async fn render_simple(template_path: &str, context: &serde_json::Value) -> anyhow::Result<String> {
     let template = std::fs::read_to_string(template_path)?;
 
     let mut result = template;
@@ -125,7 +114,7 @@ pub fn extract_agent_signals(content: &str) -> (Vec<AgentSignal>, String) {
         let raw_arg = cap.get(2).map(|m| m.as_str().to_string());
         let arg = raw_arg.map(|s| {
             if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-                s[1..s.len()-1].to_string()
+                s[1..s.len() - 1].to_string()
             } else {
                 s
             }
@@ -175,8 +164,12 @@ pub fn resolve_variables_in_content(content: &str, variables: &serde_json::Value
                     serde_json::Value::String(s) => s.clone(),
                     serde_json::Value::Number(n) => n.to_string(),
                     serde_json::Value::Bool(b) => b.to_string(),
-                    serde_json::Value::Array(arr) => serde_json::to_string(arr).unwrap_or_else(|_| value.to_string()),
-                    serde_json::Value::Object(obj) => serde_json::to_string(obj).unwrap_or_else(|_| value.to_string()),
+                    serde_json::Value::Array(arr) => {
+                        serde_json::to_string(arr).unwrap_or_else(|_| value.to_string())
+                    }
+                    serde_json::Value::Object(obj) => {
+                        serde_json::to_string(obj).unwrap_or_else(|_| value.to_string())
+                    }
                     serde_json::Value::Null => "null".to_string(),
                 };
                 result = result.replace(full_match, &replacement);
@@ -232,7 +225,9 @@ pub fn validate_content_for_llm(content: &str) -> String {
             if let Some(end) = remaining.find("}}") {
                 let var_content = &remaining[..end];
                 // Check if it's a valid template variable: {{identifier}}
-                if var_content.chars().all(|c| c.is_alphanumeric() || c == '_') && !var_content.is_empty() {
+                if var_content.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && !var_content.is_empty()
+                {
                     // Valid, keep as-is
                     result.push_str("{{");
                     result.push_str(var_content);
@@ -253,8 +248,12 @@ pub fn validate_content_for_llm(content: &str) -> String {
             if let Some(end) = remaining.find("]]") {
                 let var_content = &remaining[..end];
                 // Check if it's valid: [[key: value]] or [[key~]] or [[key]]
-                if var_content.contains(':') || var_content.contains('~') ||
-                   var_content.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+                if var_content.contains(':')
+                    || var_content.contains('~')
+                    || var_content
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                {
                     // Valid [[]] syntax, escape by wrapping in extra brackets
                     result.push_str("[[[");
                     result.push_str(var_content);
@@ -370,11 +369,11 @@ mod poml_tests {
     #[test]
     fn test_extract_agent_signals_next() {
         // Test regex directly first
-    let re = regex::Regex::new(r#"\[\[AGENT:(\w+)(?::(?:"([^"]*)"|([^\]]*)))?\]\]"#).unwrap();
+        let re = regex::Regex::new(r#"\[\[AGENT:(\w+)(?::(?:"([^"]*)"|([^\]]*)))?\]\]"#).unwrap();
         let input = r#"Done [[AGENT:NEXT]]"#;
         let caps: Vec<_> = re.captures_iter(input).collect();
         assert_eq!(caps.len(), 1, "Regex should match [[AGENT:NEXT]]");
-        
+
         let (signals, clean) = extract_agent_signals(input);
         assert_eq!(clean, "Done");
         assert_eq!(signals.len(), 1);
@@ -401,8 +400,11 @@ mod poml_tests {
         let caps: Vec<_> = re.captures_iter(input).collect();
         assert_eq!(caps.len(), 1, "Should match");
         assert_eq!(caps[0].get(1).unwrap().as_str(), "set");
-        assert!(caps[0].get(2).is_some() || caps[0].get(3).is_some(), "Should have arg");
-        
+        assert!(
+            caps[0].get(2).is_some() || caps[0].get(3).is_some(),
+            "Should have arg"
+        );
+
         let (signals, _) = extract_agent_signals(input);
         assert_eq!(signals.len(), 1);
         assert!(matches!(&signals[0], AgentSignal::Set(k, v) if k == "key" && v == "value"));
@@ -416,7 +418,8 @@ mod poml_tests {
 
     #[test]
     fn test_extract_agent_signals_multiple() {
-        let (signals, clean) = extract_agent_signals(r#"Done [[AGENT:NEXT]] [[AGENT:feedback:"msg"]]"#);
+        let (signals, clean) =
+            extract_agent_signals(r#"Done [[AGENT:NEXT]] [[AGENT:feedback:"msg"]]"#);
         assert_eq!(clean, "Done");
         assert_eq!(signals.len(), 2);
     }
@@ -438,7 +441,9 @@ mod poml_tests {
             "role": "developer"
         });
 
-        let result = render_simple(tmp.path().to_str().unwrap(), &context).await.unwrap();
+        let result = render_simple(tmp.path().to_str().unwrap(), &context)
+            .await
+            .unwrap();
         assert_eq!(result, "Hello Alice, you are developer!");
     }
 
@@ -452,7 +457,9 @@ mod poml_tests {
             "mode": "agent"
         });
 
-        let result = render_simple(tmp.path().to_str().unwrap(), &context).await.unwrap();
+        let result = render_simple(tmp.path().to_str().unwrap(), &context)
+            .await
+            .unwrap();
         assert_eq!(result, "Turn: 5, Mode: agent");
     }
 

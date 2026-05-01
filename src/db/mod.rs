@@ -1,13 +1,13 @@
 pub mod contexts;
 pub mod cron_jobs;
-pub mod messages;
+pub mod enc2;
+pub mod logs;
 pub mod memory;
+pub mod messages;
 pub mod pairings;
 pub mod secrets;
 pub mod templates;
 pub mod tools;
-pub mod enc2;
-pub mod logs;
 
 use rusqlite::Connection;
 use std::path::Path;
@@ -75,10 +75,7 @@ impl Database {
 
     pub fn backup(&self, dest: &Path) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "VACUUM INTO ?1",
-            rusqlite::params![dest.to_string_lossy()],
-        )?;
+        conn.execute("VACUUM INTO ?1", rusqlite::params![dest.to_string_lossy()])?;
         Ok(())
     }
 }

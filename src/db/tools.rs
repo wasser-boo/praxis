@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::Database;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tool {
@@ -41,7 +41,8 @@ pub fn list(db: &Database) -> anyhow::Result<Vec<Tool>> {
 
 pub fn get(db: &Database, name: &str) -> anyhow::Result<Tool> {
     let tools = load_tools(db)?;
-    tools.into_iter()
+    tools
+        .into_iter()
         .find(|t| t.name == name)
         .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", name))
 }
@@ -91,24 +92,114 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
     }
 
     let defaults = vec![
-        Tool { name: "execute_terminal".into(), description: Some("Run shell command".into()), parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}), is_enabled: true },
-        Tool { name: "write_file".into(), description: Some("Create or overwrite file".into()), parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}), is_enabled: true },
-        Tool { name: "edit_file".into(), description: Some("Edit file with find/replace".into()), parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}), is_enabled: true },
-        Tool { name: "read_file".into(), description: Some("Read file contents".into()), parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}), is_enabled: true },
-        Tool { name: "web_search".into(), description: Some("Search the web".into()), parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}), is_enabled: true },
-        Tool { name: "get_context".into(), description: Some("Read current context".into()), parameters: serde_json::json!({"type":"object","properties":{}}), is_enabled: true },
-        Tool { name: "set_context".into(), description: Some("Set context variable".into()), parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string"},"value":{}},"required":["key","value"]}), is_enabled: true },
-        Tool { name: "delete_context".into(), description: Some("Delete context variable".into()), parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}), is_enabled: true },
-        Tool { name: "agent_next".into(), description: Some("Advance to next step".into()), parameters: serde_json::json!({"type":"object","properties":{}}), is_enabled: true },
-        Tool { name: "agent_complete".into(), description: Some("Mark task as done".into()), parameters: serde_json::json!({"type":"object","properties":{}}), is_enabled: true },
-        Tool { name: "agent_set_path".into(), description: Some("Set working directory".into()), parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}), is_enabled: true },
-        Tool { name: "agent_feedback".into(), description: Some("Send progress update".into()), parameters: serde_json::json!({"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}), is_enabled: true },
-        Tool { name: "discord_upload_file".into(), description: Some("Upload file to Discord".into()), parameters: serde_json::json!({"type":"object","properties":{"filename":{"type":"string"},"base64_content":{"type":"string"}},"required":["filename","base64_content"]}), is_enabled: true },
-        Tool { name: "discord_send_message".into(), description: Some("Send message to Discord channel".into()), parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string"},"message":{"type":"string"}},"required":["channel_id","message"]}), is_enabled: true },
-        Tool { name: "discord_send_embed".into(), description: Some("Send rich embed to Discord channel".into()), parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"url":{"type":"string"},"color":{"type":["string","number"],"description":"Hex color (e.g. '6C5CE7' or '#FF0000') or integer"},"footer":{"type":"string"},"author":{"type":"string"},"thumbnail":{"type":"string","description":"URL to thumbnail image"},"image":{"type":"string","description":"URL to full image"},"fields":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"value":{"type":"string"},"inline":{"type":"boolean"}},"required":["name","value"]}}},"required":["channel_id"]}), is_enabled: true },
-        Tool { name: "learn_fact".into(), description: Some("Learn and store a fact".into()), parameters: serde_json::json!({"type":"object","properties":{"fact":{"type":"string"}},"required":["fact"]}), is_enabled: true },
-        Tool { name: "learn_preference".into(), description: Some("Learn a user preference".into()), parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"]}), is_enabled: true },
-        Tool { name: "learn_topic".into(), description: Some("Track a conversation topic".into()), parameters: serde_json::json!({"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}), is_enabled: true },
+        Tool {
+            name: "execute_terminal".into(),
+            description: Some("Run shell command".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "write_file".into(),
+            description: Some("Create or overwrite file".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "edit_file".into(),
+            description: Some("Edit file with find/replace".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "read_file".into(),
+            description: Some("Read file contents".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "web_search".into(),
+            description: Some("Search the web".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "get_context".into(),
+            description: Some("Read current context".into()),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "set_context".into(),
+            description: Some("Set context variable".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string"},"value":{}},"required":["key","value"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "delete_context".into(),
+            description: Some("Delete context variable".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "agent_next".into(),
+            description: Some("Advance to next step".into()),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "agent_complete".into(),
+            description: Some("Mark task as done".into()),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "agent_set_path".into(),
+            description: Some("Set working directory".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "agent_feedback".into(),
+            description: Some("Send progress update".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "discord_upload_file".into(),
+            description: Some("Upload file to Discord".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"filename":{"type":"string"},"base64_content":{"type":"string"}},"required":["filename","base64_content"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "discord_send_message".into(),
+            description: Some("Send message to Discord channel".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string"},"message":{"type":"string"}},"required":["channel_id","message"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "discord_send_embed".into(),
+            description: Some("Send rich embed to Discord channel".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"url":{"type":"string"},"color":{"type":["string","number"],"description":"Hex color (e.g. '6C5CE7' or '#FF0000') or integer"},"footer":{"type":"string"},"author":{"type":"string"},"thumbnail":{"type":"string","description":"URL to thumbnail image"},"image":{"type":"string","description":"URL to full image"},"fields":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"value":{"type":"string"},"inline":{"type":"boolean"}},"required":["name","value"]}}},"required":["channel_id"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "learn_fact".into(),
+            description: Some("Learn and store a fact".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"fact":{"type":"string"}},"required":["fact"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "learn_preference".into(),
+            description: Some("Learn a user preference".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "learn_topic".into(),
+            description: Some("Track a conversation topic".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}),
+            is_enabled: true,
+        },
     ];
 
     save_tools(db, &defaults)?;
@@ -116,16 +207,21 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
 }
 
 /// Convert enabled tools to LLM tool definitions
-pub fn to_tool_definitions(db: &Database) -> anyhow::Result<Vec<crate::gateway::llm::provider::ToolDefinition>> {
+pub fn to_tool_definitions(
+    db: &Database,
+) -> anyhow::Result<Vec<crate::gateway::llm::provider::ToolDefinition>> {
     let tools = list_enabled(db)?;
-    Ok(tools.into_iter().map(|t| crate::gateway::llm::provider::ToolDefinition {
-        tool_type: "function".to_string(),
-        function: crate::gateway::llm::provider::FunctionDefinition {
-            name: t.name,
-            description: t.description.unwrap_or_default(),
-            parameters: t.parameters,
-        },
-    }).collect())
+    Ok(tools
+        .into_iter()
+        .map(|t| crate::gateway::llm::provider::ToolDefinition {
+            tool_type: "function".to_string(),
+            function: crate::gateway::llm::provider::FunctionDefinition {
+                name: t.name,
+                description: t.description.unwrap_or_default(),
+                parameters: t.parameters,
+            },
+        })
+        .collect())
 }
 
 #[cfg(test)]

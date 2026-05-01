@@ -22,7 +22,8 @@ fn generate_silent_wav(duration_ms: u32) -> Vec<u8> {
         for i in 0..num_samples {
             // Very quiet tone (amplitude 100) instead of silence
             // This ensures Discord detects us as "speaking"
-            let sample = ((i as f32 * 220.0 * 2.0 * std::f32::consts::PI / 48000.0).sin() * 100.0) as i16;
+            let sample =
+                ((i as f32 * 220.0 * 2.0 * std::f32::consts::PI / 48000.0).sin() * 100.0) as i16;
             writer.write_sample(sample).unwrap();
         }
         writer.finalize().unwrap();
@@ -132,10 +133,7 @@ impl EventHandler for DiscordHandler {
         let pairing = match self.db.get_pairing_by_discord(&discord_user_id) {
             Ok(Some(p)) => p,
             _ => {
-                tracing::warn!(
-                    "User {} is not paired, ignoring message",
-                    discord_user_id
-                );
+                tracing::warn!("User {} is not paired, ignoring message", discord_user_id);
                 return;
             }
         };
@@ -188,9 +186,7 @@ impl EventHandler for DiscordHandler {
                 }
                 Ok(IncomingMessage::Error { message }) => {
                     typing_handle.abort();
-                    let _ = msg
-                        .reply(&ctx.http, format!("Error: {}", message))
-                        .await;
+                    let _ = msg.reply(&ctx.http, format!("Error: {}", message)).await;
                     break;
                 }
                 Ok(IncomingMessage::Pong) => {
@@ -216,7 +212,8 @@ impl EventHandler for DiscordHandler {
             match command.data.name.as_str() {
                 "pair" => {
                     if let Err(e) =
-                        crate::discord::commands::handle_pair_command(&self.db, &ctx, &command).await
+                        crate::discord::commands::handle_pair_command(&self.db, &ctx, &command)
+                            .await
                     {
                         tracing::error!("Pair command error: {}", e);
                     }
@@ -363,10 +360,7 @@ impl EventHandler for DiscordHandler {
                     };
 
                     if let Some(obj) = ctx_data.custom_data.as_object_mut() {
-                        obj.insert(
-                            "mode".to_string(),
-                            serde_json::json!(new_mode),
-                        );
+                        obj.insert("mode".to_string(), serde_json::json!(new_mode));
                     } else {
                         ctx_data.custom_data = serde_json::json!({
                             "mode": new_mode
@@ -418,8 +412,11 @@ impl EventHandler for DiscordHandler {
                         }
                     };
 
-                    let voice_channel_id = ctx.cache.guild(guild_id)
-                        .and_then(|g| g.voice_states.get(&command.user.id).and_then(|vs| vs.channel_id));
+                    let voice_channel_id = ctx.cache.guild(guild_id).and_then(|g| {
+                        g.voice_states
+                            .get(&command.user.id)
+                            .and_then(|vs| vs.channel_id)
+                    });
 
                     let voice_channel_id = match voice_channel_id {
                         Some(id) => id,
@@ -451,30 +448,40 @@ impl EventHandler for DiscordHandler {
 
                                     // Check context for deafened setting
                                     let discord_user_id = command.user.id.to_string();
-                                    let should_deafen = match self.db.get_pairing_by_discord(&discord_user_id) {
-                                        Ok(Some(pairing)) => {
-                                            match self.db.load_context(&pairing.user_id) {
-                                                Ok(ctx) => ctx.settings.voice_deafened,
-                                                Err(_) => true,
+                                    let should_deafen =
+                                        match self.db.get_pairing_by_discord(&discord_user_id) {
+                                            Ok(Some(pairing)) => {
+                                                match self.db.load_context(&pairing.user_id) {
+                                                    Ok(ctx) => ctx.settings.voice_deafened,
+                                                    Err(_) => true,
+                                                }
                                             }
-                                        }
-                                        _ => true,
-                                    };
+                                            _ => true,
+                                        };
 
                                     {
                                         let mut call_lock = call.lock().await;
                                         let _ = call_lock.deafen(should_deafen).await;
                                     }
                                     *self.voice_deafened.lock().await = should_deafen;
-                                    tracing::info!("Voice: Bot deafened={} (from context)", should_deafen);
+                                    tracing::info!(
+                                        "Voice: Bot deafened={} (from context)",
+                                        should_deafen
+                                    );
 
                                     // Set up voice handler and transcription pipeline
-                                    let voice_handler = Arc::new(crate::voice::handler::VoiceHandler::new());
+                                    let voice_handler =
+                                        Arc::new(crate::voice::handler::VoiceHandler::new());
 
                                     // Set fallback user from the Discord user who invoked /join
                                     let fallback_discord_id = command.user.id.get();
-                                    if let Ok(Some(pairing)) = self.db.get_pairing_by_discord(&fallback_discord_id.to_string()) {
-                                        voice_handler.set_fallback_user(pairing.user_id.clone()).await;
+                                    if let Ok(Some(pairing)) = self
+                                        .db
+                                        .get_pairing_by_discord(&fallback_discord_id.to_string())
+                                    {
+                                        voice_handler
+                                            .set_fallback_user(pairing.user_id.clone())
+                                            .await;
                                     }
 
                                     // Set allowed Discord user IDs (only paired users)
@@ -489,9 +496,16 @@ impl EventHandler for DiscordHandler {
                                     voice_handler.set_allowed_discord_ids(allowed_ids).await;
 
                                     // Load context for voice settings
-                                    if let Ok(Some(pairing)) = self.db.get_pairing_by_discord(&fallback_discord_id.to_string()) {
+                                    if let Ok(Some(pairing)) = self
+                                        .db
+                                        .get_pairing_by_discord(&fallback_discord_id.to_string())
+                                    {
                                         if let Ok(ctx) = self.db.load_context(&pairing.user_id) {
-                                            voice_handler.set_auto_pause(ctx.settings.voice_auto_pause_enabled).await;
+                                            voice_handler
+                                                .set_auto_pause(
+                                                    ctx.settings.voice_auto_pause_enabled,
+                                                )
+                                                .await;
                                         }
                                     }
 
@@ -501,15 +515,21 @@ impl EventHandler for DiscordHandler {
                                     {
                                         let mut call_lock = call.lock().await;
                                         call_lock.add_global_event(
-                                            songbird::events::Event::Core(songbird::events::CoreEvent::SpeakingStateUpdate),
+                                            songbird::events::Event::Core(
+                                                songbird::events::CoreEvent::SpeakingStateUpdate,
+                                            ),
                                             voice_receiver.clone(),
                                         );
                                         call_lock.add_global_event(
-                                            songbird::events::Event::Core(songbird::events::CoreEvent::VoiceTick),
+                                            songbird::events::Event::Core(
+                                                songbird::events::CoreEvent::VoiceTick,
+                                            ),
                                             voice_receiver.clone(),
                                         );
                                         call_lock.add_global_event(
-                                            songbird::events::Event::Core(songbird::events::CoreEvent::ClientDisconnect),
+                                            songbird::events::Event::Core(
+                                                songbird::events::CoreEvent::ClientDisconnect,
+                                            ),
                                             voice_receiver.clone(),
                                         );
 
@@ -519,18 +539,24 @@ impl EventHandler for DiscordHandler {
                                         // and we can't identify who is speaking.
                                         let silent_wav = generate_silent_wav(500);
                                         tracing::info!("VOICE: Playing silent WAV ({} bytes) to trigger SpeakingStateUpdate", silent_wav.len());
-                                        call_lock.play_input(songbird::input::Input::from(silent_wav));
-                                        tracing::info!("VOICE: Silent WAV queued, waiting for events...");
+                                        call_lock
+                                            .play_input(songbird::input::Input::from(silent_wav));
+                                        tracing::info!(
+                                            "VOICE: Silent WAV queued, waiting for events..."
+                                        );
                                     }
 
                                     // Set up transcription channel
-                                    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Vec<i16>)>(10);
+                                    let (tx, mut rx) =
+                                        tokio::sync::mpsc::channel::<(String, Vec<i16>)>(10);
                                     voice_handler.set_transcription_channel(tx).await;
 
                                     // Spawn periodic buffer flusher (independent of VoiceTick)
                                     let flush_handler = voice_handler.clone();
                                     tokio::spawn(async move {
-                                        let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+                                        let mut interval = tokio::time::interval(
+                                            std::time::Duration::from_millis(200),
+                                        );
                                         loop {
                                             interval.tick().await;
                                             flush_handler.process_all_buffers().await;
@@ -543,7 +569,9 @@ impl EventHandler for DiscordHandler {
                                     let secrets = self.secrets.clone();
                                     let voice_muted = self.voice_muted.clone();
                                     tokio::spawn(async move {
-                                        tracing::info!("VOICE_PIPELINE: Transcription processor started");
+                                        tracing::info!(
+                                            "VOICE_PIPELINE: Transcription processor started"
+                                        );
                                         while let Some((user_id, audio_data)) = rx.recv().await {
                                             // Check if muted
                                             if *voice_muted.lock().await {
@@ -551,25 +579,37 @@ impl EventHandler for DiscordHandler {
                                                 continue;
                                             }
 
-                                            tracing::info!("VOICE_PIPELINE: Received {} samples from user {}", audio_data.len(), user_id);
+                                            tracing::info!(
+                                                "VOICE_PIPELINE: Received {} samples from user {}",
+                                                audio_data.len(),
+                                                user_id
+                                            );
 
                                             // Resolve Discord ID → Praxis user ID for context lookup
-                                            let praxis_user_id = if let Ok(Some(pairing)) = db.get_pairing_by_discord(&user_id) {
+                                            let praxis_user_id = if let Ok(Some(pairing)) =
+                                                db.get_pairing_by_discord(&user_id)
+                                            {
                                                 pairing.user_id.clone()
                                             } else {
                                                 user_id.clone()
                                             };
 
                                             // Get STT config from context
-                                            let ctx = db.load_context(&praxis_user_id).unwrap_or_else(|_| crate::db::contexts::Context {
-                                                user_id: praxis_user_id.clone(),
-                                                ..Default::default()
-                                            });
+                                            let ctx = db
+                                                .load_context(&praxis_user_id)
+                                                .unwrap_or_else(|_| crate::db::contexts::Context {
+                                                    user_id: praxis_user_id.clone(),
+                                                    ..Default::default()
+                                                });
                                             let stt_type = ctx.settings.voice_stt_type.clone();
                                             let api_key = secrets.elevenlabs_api_key.clone();
                                             let model_path = match stt_type.as_str() {
-                                                "vosk" => ctx.settings.voice_vosk_model_path.clone(),
-                                                "whisper" => ctx.settings.voice_whisper_model_path.clone(),
+                                                "vosk" => {
+                                                    ctx.settings.voice_vosk_model_path.clone()
+                                                }
+                                                "whisper" => {
+                                                    ctx.settings.voice_whisper_model_path.clone()
+                                                }
                                                 _ => None,
                                             };
 
@@ -577,18 +617,30 @@ impl EventHandler for DiscordHandler {
                                                 engine: stt_type,
                                                 api_key,
                                                 model_path,
-                                                elevenlabs_model: ctx.settings.elevenlabs_stt_model.clone(),
-                                                elevenlabs_language: ctx.settings.elevenlabs_stt_language.clone(),
-                                                elevenlabs_tag_audio_events: ctx.settings.elevenlabs_stt_tag_audio_events,
-                                                elevenlabs_no_verbatim: ctx.settings.elevenlabs_stt_no_verbatim,
+                                                elevenlabs_model: ctx
+                                                    .settings
+                                                    .elevenlabs_stt_model
+                                                    .clone(),
+                                                elevenlabs_language: ctx
+                                                    .settings
+                                                    .elevenlabs_stt_language
+                                                    .clone(),
+                                                elevenlabs_tag_audio_events: ctx
+                                                    .settings
+                                                    .elevenlabs_stt_tag_audio_events,
+                                                elevenlabs_no_verbatim: ctx
+                                                    .settings
+                                                    .elevenlabs_stt_no_verbatim,
                                             };
 
-                                            let wav_data = crate::voice::pcm_to_wav(&audio_data, 16000, 1);
+                                            let wav_data =
+                                                crate::voice::pcm_to_wav(&audio_data, 16000, 1);
 
                                             let transcription = crate::voice::transcribe_audio(
                                                 &wav_data,
                                                 &stt_config,
-                                            ).await;
+                                            )
+                                            .await;
 
                                             let text = match transcription {
                                                 Ok(t) => t.trim().to_string(),
@@ -599,26 +651,37 @@ impl EventHandler for DiscordHandler {
                                             };
 
                                             if text.is_empty() {
-                                                tracing::debug!("VOICE_PIPELINE: Empty transcription, skipping");
+                                                tracing::debug!(
+                                                    "VOICE_PIPELINE: Empty transcription, skipping"
+                                                );
                                                 continue;
                                             }
 
-                                            tracing::info!("VOICE_PIPELINE: Transcribed for user {}: '{}'", user_id, text);
+                                            tracing::info!(
+                                                "VOICE_PIPELINE: Transcribed for user {}: '{}'",
+                                                user_id,
+                                                text
+                                            );
 
                                             // Check wake words
                                             let wake_words = ctx.settings.voice_wake_words.clone();
-                                            let wake_match = crate::voice::wake_word::matches_wake_word(&text, &wake_words);
+                                            let wake_match =
+                                                crate::voice::wake_word::matches_wake_word(
+                                                    &text,
+                                                    &wake_words,
+                                                );
 
                                             if !wake_match.matched {
                                                 tracing::debug!("VOICE_PIPELINE: No wake word in '{}', skipping", text);
                                                 continue;
                                             }
 
-                                            let message_text = if wake_match.remaining_text.is_empty() {
-                                                text.clone()
-                                            } else {
-                                                wake_match.remaining_text.clone()
-                                            };
+                                            let message_text =
+                                                if wake_match.remaining_text.is_empty() {
+                                                    text.clone()
+                                                } else {
+                                                    wake_match.remaining_text.clone()
+                                                };
 
                                             tracing::info!("VOICE_PIPELINE: Wake word {:?} matched, sending message: '{}'",
                                                 wake_match.wake_word, message_text);
@@ -632,13 +695,22 @@ impl EventHandler for DiscordHandler {
 
                                             let mut ws = ws_client.lock().await;
                                             if let Err(e) = ws.send(payload).await {
-                                                tracing::error!("VOICE_PIPELINE: Failed to send to gateway: {}", e);
+                                                tracing::error!(
+                                                    "VOICE_PIPELINE: Failed to send to gateway: {}",
+                                                    e
+                                                );
                                             }
                                         }
-                                        tracing::info!("VOICE_PIPELINE: Transcription processor stopped");
+                                        tracing::info!(
+                                            "VOICE_PIPELINE: Transcription processor stopped"
+                                        );
                                     });
 
-                                    tracing::info!("Joined voice channel {} in guild {} with STT pipeline", voice_channel_id, guild_id);
+                                    tracing::info!(
+                                        "Joined voice channel {} in guild {} with STT pipeline",
+                                        voice_channel_id,
+                                        guild_id
+                                    );
                                     let _ = command
                                         .create_response(
                                             &ctx.http,
@@ -769,7 +841,8 @@ pub fn split_message(content: &str, max_len: usize) -> Vec<String> {
 
     while remaining.len() > max_len {
         // Try to split at newline
-        let split_pos = remaining[..max_len].rfind('\n')
+        let split_pos = remaining[..max_len]
+            .rfind('\n')
             .or_else(|| remaining[..max_len].rfind(' '))
             .unwrap_or(max_len);
 

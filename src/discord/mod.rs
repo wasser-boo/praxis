@@ -7,11 +7,11 @@ pub use ws_client::{IncomingMessage, OutgoingMessage, WsClient};
 use crate::db::Database;
 use crate::discord::handler::DiscordHandler;
 use anyhow::Context;
+use once_cell::sync::OnceCell;
 use serenity::model::gateway::GatewayIntents;
 use serenity::Client;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use once_cell::sync::OnceCell;
 
 const DEFAULT_GATEWAY_URL: &str = "ws://localhost:3537/ws";
 
@@ -83,20 +83,28 @@ impl DiscordBot {
 
     pub async fn start(self) -> anyhow::Result<()> {
         // Read from env (.env file)
-        let token = std::env::var("DISCORD_BOT_TOKEN")
-            .context("DISCORD_BOT_TOKEN not set. Run 'praxis onboard --interactive' to configure.")?;
+        let token = std::env::var("DISCORD_BOT_TOKEN").context(
+            "DISCORD_BOT_TOKEN not set. Run 'praxis onboard --interactive' to configure.",
+        )?;
         let application_id = std::env::var("DISCORD_APPLICATION_ID")
             .context("DISCORD_APPLICATION_ID not set")?
             .parse::<u64>()
             .context("DISCORD_APPLICATION_ID must be a number")?;
 
-        tracing::info!("Discord bot starting with token: {}...", &token[..std::cmp::min(10, token.len())]);
+        tracing::info!(
+            "Discord bot starting with token: {}...",
+            &token[..std::cmp::min(10, token.len())]
+        );
         self.start_with_token(&token, application_id).await
     }
 
     pub async fn start_with_token(self, token: &str, application_id: u64) -> anyhow::Result<()> {
         let _voice_state = init_discord_voice_state();
-        let handler = DiscordHandler::new(self.db.clone(), self.ws_client.clone(), self.secrets.clone());
+        let handler = DiscordHandler::new(
+            self.db.clone(),
+            self.ws_client.clone(),
+            self.secrets.clone(),
+        );
 
         let mut client_builder = Client::builder(
             token,
@@ -113,10 +121,11 @@ impl DiscordBot {
         // Register songbird for voice support
         #[cfg(feature = "songbird")]
         {
+            use songbird::driver::{Channels, DecodeConfig, DecodeMode, SampleRate};
             use songbird::SerenityInit;
-            use songbird::driver::{DecodeMode, DecodeConfig, Channels, SampleRate};
-            let voice_config = songbird::Config::default()
-                .decode_mode(DecodeMode::Decode(DecodeConfig::new(Channels::Mono, SampleRate::Hz16000)));
+            let voice_config = songbird::Config::default().decode_mode(DecodeMode::Decode(
+                DecodeConfig::new(Channels::Mono, SampleRate::Hz16000),
+            ));
             client_builder = client_builder.register_songbird_from_config(voice_config);
         }
 
@@ -155,8 +164,18 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
     let mut rx = event_tx.subscribe();
     loop {
         match rx.recv().await {
-            Ok(crate::event_channel::GatewayEvent::FileUpload { user_id, file_name, file_path, channel_id }) => {
-                tracing::info!("File upload event for user {}: {} to channel {}", user_id, file_name, channel_id);
+            Ok(crate::event_channel::GatewayEvent::FileUpload {
+                user_id,
+                file_name,
+                file_path,
+                channel_id,
+            }) => {
+                tracing::info!(
+                    "File upload event for user {}: {} to channel {}",
+                    user_id,
+                    file_name,
+                    channel_id
+                );
                 let target_channel_id = if !channel_id.is_empty() {
                     channel_id.parse::<u64>().unwrap_or(0)
                 } else {
@@ -185,15 +204,14 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
 
                 let req = reqwest::Client::new();
                 let file_bytes = tokio::fs::read(&file_path).await.unwrap_or_default();
-                let part = reqwest::multipart::Part::bytes(file_bytes)
-                    .file_name(file_name.clone());
-                let form = reqwest::multipart::Form::new()
-                    .part("file", part);
+                let part = reqwest::multipart::Part::bytes(file_bytes).file_name(file_name.clone());
+                let form = reqwest::multipart::Form::new().part("file", part);
 
                 let bot_token = std::env::var("DISCORD_BOT_TOKEN").unwrap_or_default();
                 let url = format!("https://discord.com/api/v10/channels/{}/messages", send_to);
 
-                if let Ok(resp) = req.post(&url)
+                if let Ok(resp) = req
+                    .post(&url)
                     .header("Authorization", format!("Bot {}", bot_token))
                     .multipart(form)
                     .send()
@@ -202,7 +220,11 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
                     if resp.status().is_success() {
                         tracing::info!("File {} sent to channel {}", file_name, send_to);
                     } else {
-                        tracing::error!("Failed to send file: {} - {}", resp.status(), resp.text().await.unwrap_or_default());
+                        tracing::error!(
+                            "Failed to send file: {} - {}",
+                            resp.status(),
+                            resp.text().await.unwrap_or_default()
+                        );
                     }
                 }
             }
@@ -213,19 +235,33 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
                     if discord_user_id > 0 {
                         let user_id_obj = serenity::model::id::UserId::new(discord_user_id);
                         if let Ok(dm_channel) = user_id_obj.create_dm_channel(&http).await {
-                            let _ = dm_channel.send_message(&http, serenity::builder::CreateMessage::default().content(format!("[Feedback] {}", message))).await;
+                            let _ = dm_channel
+                                .send_message(
+                                    &http,
+                                    serenity::builder::CreateMessage::default()
+                                        .content(format!("[Feedback] {}", message)),
+                                )
+                                .await;
                         }
                     }
                 }
             }
-            Ok(crate::event_channel::GatewayEvent::ChannelMessage { user_id: _, channel_id, message }) => {
+            Ok(crate::event_channel::GatewayEvent::ChannelMessage {
+                user_id: _,
+                channel_id,
+                message,
+            }) => {
                 let channel_idparsed = channel_id.parse::<u64>().unwrap_or(0);
                 if channel_idparsed > 0 {
                     let channel = serenity::model::id::ChannelId::new(channel_idparsed);
                     let _ = channel.say(&http, &message).await;
                 }
             }
-            Ok(crate::event_channel::GatewayEvent::ChannelEmbed { user_id: _, channel_id, embed }) => {
+            Ok(crate::event_channel::GatewayEvent::ChannelEmbed {
+                user_id: _,
+                channel_id,
+                embed,
+            }) => {
                 let channel_idparsed = channel_id.parse::<u64>().unwrap_or(0);
                 if channel_idparsed > 0 {
                     let channel = serenity::model::id::ChannelId::new(channel_idparsed);
@@ -261,7 +297,10 @@ async fn listen_for_events(db: Database, http: Arc<serenity::http::Http>) {
                     let _ = channel.send_message(&http, msg).await;
                 }
             }
-            Ok(crate::event_channel::GatewayEvent::VoiceTts { user_id, audio_data }) => {
+            Ok(crate::event_channel::GatewayEvent::VoiceTts {
+                user_id,
+                audio_data,
+            }) => {
                 handle_voice_tts(user_id, audio_data).await;
             }
             Ok(_) => {}
@@ -283,11 +322,18 @@ async fn handle_voice_tts(user_id: String, audio_data: Vec<u8>) {
         if let Some(guild_id) = guard.guild_id {
             drop(guard);
             if let Some(manager) = get_songbird_manager() {
-                if let Some(handler) = manager.get(songbird::id::GuildId::from(std::num::NonZeroU64::new(guild_id).unwrap())) {
+                if let Some(handler) = manager.get(songbird::id::GuildId::from(
+                    std::num::NonZeroU64::new(guild_id).unwrap(),
+                )) {
                     match crate::voice::tts::audio_bytes_to_pcm(&audio_data) {
                         Ok((samples, original_sample_rate)) if !samples.is_empty() => {
-                            tracing::info!("TTS decoded: {} samples at {} Hz", samples.len(), original_sample_rate);
-                            let wav_data = crate::voice::pcm_to_wav(&samples, original_sample_rate, 1);
+                            tracing::info!(
+                                "TTS decoded: {} samples at {} Hz",
+                                samples.len(),
+                                original_sample_rate
+                            );
+                            let wav_data =
+                                crate::voice::pcm_to_wav(&samples, original_sample_rate, 1);
                             let mut call = handler.lock().await;
                             let source = songbird::input::Input::from(wav_data);
                             call.play_input(source);

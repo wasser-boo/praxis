@@ -1,4 +1,8 @@
-pub fn get_context(db: &crate::db::Database, user_id: &str, key: &str) -> anyhow::Result<Option<String>> {
+pub fn get_context(
+    db: &crate::db::Database,
+    user_id: &str,
+    key: &str,
+) -> anyhow::Result<Option<String>> {
     let ctx = db.load_context(user_id)?;
 
     let value = match key {
@@ -15,15 +19,13 @@ pub fn get_context(db: &crate::db::Database, user_id: &str, key: &str) -> anyhow
         "voice_auto_pause_enabled" => Some(ctx.settings.voice_auto_pause_enabled.to_string()),
         "max_llm_turns" => ctx.settings.max_llm_turns.map(|v| v.to_string()),
         "max_tool_calls" => ctx.settings.max_tool_calls.map(|v| v.to_string()),
-        _ => {
-            ctx.custom_data.get(key).and_then(|v| {
-                if v.is_string() {
-                    v.as_str().map(|s| s.to_string())
-                } else {
-                    Some(v.to_string())
-                }
-            })
-        }
+        _ => ctx.custom_data.get(key).and_then(|v| {
+            if v.is_string() {
+                v.as_str().map(|s| s.to_string())
+            } else {
+                Some(v.to_string())
+            }
+        }),
     };
 
     Ok(value)

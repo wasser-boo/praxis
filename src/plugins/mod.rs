@@ -50,28 +50,36 @@ impl PluginRegistry {
     }
 
     pub fn enabled_tools(&self) -> Vec<&PluginTool> {
-        self.plugins.values()
+        self.plugins
+            .values()
             .filter(|p| p.enabled)
             .flat_map(|p| &p.tools)
             .collect()
     }
 
     pub fn tool_definitions(&self) -> Vec<crate::gateway::llm::provider::ToolDefinition> {
-        self.enabled_tools().iter().map(|t| {
-            crate::gateway::llm::provider::ToolDefinition {
+        self.enabled_tools()
+            .iter()
+            .map(|t| crate::gateway::llm::provider::ToolDefinition {
                 tool_type: "function".to_string(),
                 function: crate::gateway::llm::provider::FunctionDefinition {
                     name: t.name.clone(),
                     description: t.description.clone(),
                     parameters: t.parameters.clone(),
                 },
-            }
-        }).collect()
+            })
+            .collect()
     }
 
-    pub async fn execute_tool(&self, tool_name: &str, args: &serde_json::Value) -> anyhow::Result<String> {
+    pub async fn execute_tool(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> anyhow::Result<String> {
         for plugin in self.plugins.values() {
-            if !plugin.enabled { continue; }
+            if !plugin.enabled {
+                continue;
+            }
             for tool in &plugin.tools {
                 if tool.name == tool_name {
                     return match &tool.handler {
@@ -89,11 +97,21 @@ impl PluginRegistry {
     }
 }
 
-async fn execute_http_tool(url: &str, method: &str, args: &serde_json::Value) -> anyhow::Result<String> {
+async fn execute_http_tool(
+    url: &str,
+    method: &str,
+    args: &serde_json::Value,
+) -> anyhow::Result<String> {
     let client = reqwest::Client::new();
     let resp = match method.to_uppercase().as_str() {
         "POST" => client.post(url).json(args).send().await?,
-        "GET" => client.get(url).query(&args.as_object().unwrap_or(&serde_json::Map::new())).send().await?,
+        "GET" => {
+            client
+                .get(url)
+                .query(&args.as_object().unwrap_or(&serde_json::Map::new()))
+                .send()
+                .await?
+        }
         _ => anyhow::bail!("Unsupported HTTP method: {}", method),
     };
 

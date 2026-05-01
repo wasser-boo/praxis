@@ -150,17 +150,21 @@ mod security_tests {
         tx.send(GatewayEvent::AgentComplete {
             user_id: "u".into(),
             response: "r".into(),
-        }).unwrap();
+        })
+        .unwrap();
         assert!(rx.try_recv().is_ok());
     }
 
     #[test]
     fn test_broadcast_agent_complete() {
         let tx = local_channel();
-        let event = send_and_recv(&tx, GatewayEvent::AgentComplete {
-            user_id: "user1".into(),
-            response: "hello".into(),
-        });
+        let event = send_and_recv(
+            &tx,
+            GatewayEvent::AgentComplete {
+                user_id: "user1".into(),
+                response: "hello".into(),
+            },
+        );
         match event {
             GatewayEvent::AgentComplete { user_id, response } => {
                 assert_eq!(user_id, "user1");
@@ -173,10 +177,13 @@ mod security_tests {
     #[test]
     fn test_broadcast_agent_feedback() {
         let tx = local_channel();
-        let event = send_and_recv(&tx, GatewayEvent::AgentFeedback {
-            user_id: "user1".into(),
-            message: "progress update".into(),
-        });
+        let event = send_and_recv(
+            &tx,
+            GatewayEvent::AgentFeedback {
+                user_id: "user1".into(),
+                message: "progress update".into(),
+            },
+        );
         match event {
             GatewayEvent::AgentFeedback { user_id, message } => {
                 assert_eq!(user_id, "user1");
@@ -189,14 +196,22 @@ mod security_tests {
     #[test]
     fn test_broadcast_file_upload() {
         let tx = local_channel();
-        let event = send_and_recv(&tx, GatewayEvent::FileUpload {
-            user_id: "user1".into(),
-            file_path: "/tmp/file.txt".into(),
-            file_name: "file.txt".into(),
-            channel_id: "ch123".into(),
-        });
+        let event = send_and_recv(
+            &tx,
+            GatewayEvent::FileUpload {
+                user_id: "user1".into(),
+                file_path: "/tmp/file.txt".into(),
+                file_name: "file.txt".into(),
+                channel_id: "ch123".into(),
+            },
+        );
         match event {
-            GatewayEvent::FileUpload { user_id, file_path, file_name, channel_id } => {
+            GatewayEvent::FileUpload {
+                user_id,
+                file_path,
+                file_name,
+                channel_id,
+            } => {
                 assert_eq!(user_id, "user1");
                 assert_eq!(file_path, "/tmp/file.txt");
                 assert_eq!(file_name, "file.txt");
@@ -209,12 +224,18 @@ mod security_tests {
     #[test]
     fn test_broadcast_voice_tts() {
         let tx = local_channel();
-        let event = send_and_recv(&tx, GatewayEvent::VoiceTts {
-            user_id: "user1".into(),
-            audio_data: vec![1, 2, 3],
-        });
+        let event = send_and_recv(
+            &tx,
+            GatewayEvent::VoiceTts {
+                user_id: "user1".into(),
+                audio_data: vec![1, 2, 3],
+            },
+        );
         match event {
-            GatewayEvent::VoiceTts { user_id, audio_data } => {
+            GatewayEvent::VoiceTts {
+                user_id,
+                audio_data,
+            } => {
                 assert_eq!(user_id, "user1");
                 assert_eq!(audio_data, vec![1, 2, 3]);
             }
@@ -225,13 +246,20 @@ mod security_tests {
     #[test]
     fn test_broadcast_channel_message() {
         let tx = local_channel();
-        let event = send_and_recv(&tx, GatewayEvent::ChannelMessage {
-            user_id: "user1".into(),
-            channel_id: "ch123".into(),
-            message: "hello world".into(),
-        });
+        let event = send_and_recv(
+            &tx,
+            GatewayEvent::ChannelMessage {
+                user_id: "user1".into(),
+                channel_id: "ch123".into(),
+                message: "hello world".into(),
+            },
+        );
         match event {
-            GatewayEvent::ChannelMessage { user_id, channel_id, message } => {
+            GatewayEvent::ChannelMessage {
+                user_id,
+                channel_id,
+                message,
+            } => {
                 assert_eq!(user_id, "user1");
                 assert_eq!(channel_id, "ch123");
                 assert_eq!(message, "hello world");
@@ -247,22 +275,27 @@ mod security_tests {
             title: Some("Test Title".into()),
             description: Some("Test Description".into()),
             color: Some(0x6C5CE7),
-            fields: vec![
-                EmbedField {
-                    name: "Field 1".into(),
-                    value: "Value 1".into(),
-                    inline: true,
-                },
-            ],
+            fields: vec![EmbedField {
+                name: "Field 1".into(),
+                value: "Value 1".into(),
+                inline: true,
+            }],
             ..Default::default()
         };
-        let event = send_and_recv(&tx, GatewayEvent::ChannelEmbed {
-            user_id: "user1".into(),
-            channel_id: "ch123".into(),
-            embed,
-        });
+        let event = send_and_recv(
+            &tx,
+            GatewayEvent::ChannelEmbed {
+                user_id: "user1".into(),
+                channel_id: "ch123".into(),
+                embed,
+            },
+        );
         match event {
-            GatewayEvent::ChannelEmbed { user_id, channel_id, embed } => {
+            GatewayEvent::ChannelEmbed {
+                user_id,
+                channel_id,
+                embed,
+            } => {
                 assert_eq!(user_id, "user1");
                 assert_eq!(channel_id, "ch123");
                 assert_eq!(embed.title, Some("Test Title".into()));

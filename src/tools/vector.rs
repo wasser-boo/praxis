@@ -85,7 +85,7 @@ pub async fn vector_search(
     let mut stmt = conn.prepare(
         "SELECT id, document_id, chunk_index, content, embedding, metadata, token_count 
          FROM document_chunks 
-         WHERE user_id = ?1 AND embedding IS NOT NULL"
+         WHERE user_id = ?1 AND embedding IS NOT NULL",
     )?;
 
     let mut results: Vec<VectorChunk> = stmt
@@ -103,7 +103,9 @@ pub async fn vector_search(
                 chunk_index: row.get::<_, i64>(2)? as usize,
                 content,
                 embedding,
-                metadata: row.get::<_, Option<String>>(5)?.and_then(|s| serde_json::from_str(&s).ok()),
+                metadata: row
+                    .get::<_, Option<String>>(5)?
+                    .and_then(|s| serde_json::from_str(&s).ok()),
                 token_count: row.get::<_, Option<i64>>(6)?.map(|v| v as usize),
                 similarity: 0.0,
             })
@@ -116,7 +118,11 @@ pub async fn vector_search(
     }
 
     // Sort by similarity (highest first)
-    results.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Return top N
     results.truncate(limit);

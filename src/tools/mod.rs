@@ -1,16 +1,16 @@
-pub mod execute_terminal;
-pub mod write_file;
-pub mod edit_file;
 pub mod agent_control;
 pub mod context_tools;
-pub mod get_context;
-pub mod discord_upload;
-pub mod discord_send_message;
 pub mod discord_send_embed;
-pub mod web_search;
-pub mod rag_query;
+pub mod discord_send_message;
+pub mod discord_upload;
+pub mod edit_file;
+pub mod execute_terminal;
+pub mod get_context;
 pub mod rag_ingest;
+pub mod rag_query;
 pub mod vector;
+pub mod web_search;
+pub mod write_file;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

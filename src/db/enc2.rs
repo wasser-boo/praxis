@@ -1,10 +1,10 @@
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use argon2::Argon2;
+use base64::Engine;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use base64::Engine;
 
 const ENCRYPTED_SECRETS_FILE: &str = "secrets.enc2";
 const SALT_FILE: &str = ".secrets_salt";
@@ -20,7 +20,8 @@ pub struct EncryptedSecrets {
 fn derive_key(password: &str, salt: &[u8]) -> anyhow::Result<[u8; 32]> {
     let mut key = [0u8; 32];
     let argon2 = Argon2::default();
-    argon2.hash_password_into(password.as_bytes(), salt, &mut key)
+    argon2
+        .hash_password_into(password.as_bytes(), salt, &mut key)
         .map_err(|e| anyhow::anyhow!("Key derivation failed: {}", e))?;
     Ok(key)
 }
@@ -59,7 +60,8 @@ pub fn encrypt(data: &str, password: &str) -> anyhow::Result<EncryptedSecrets> {
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    let ciphertext = cipher.encrypt(nonce, data.as_bytes())
+    let ciphertext = cipher
+        .encrypt(nonce, data.as_bytes())
         .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
     Ok(EncryptedSecrets {
@@ -75,18 +77,20 @@ pub fn decrypt(encrypted: &EncryptedSecrets, password: &str) -> anyhow::Result<S
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| anyhow::anyhow!("Cipher creation failed: {}", e))?;
 
-    let nonce_bytes = base64::engine::general_purpose::STANDARD.decode(&encrypted.nonce)
+    let nonce_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&encrypted.nonce)
         .map_err(|e| anyhow::anyhow!("Invalid nonce: {}", e))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    let ciphertext = base64::engine::general_purpose::STANDARD.decode(&encrypted.ciphertext)
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(&encrypted.ciphertext)
         .map_err(|e| anyhow::anyhow!("Invalid ciphertext: {}", e))?;
 
-    let plaintext = cipher.decrypt(nonce, ciphertext.as_ref())
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext.as_ref())
         .map_err(|e| anyhow::anyhow!("Decryption failed (wrong password?): {}", e))?;
 
-    String::from_utf8(plaintext)
-        .map_err(|e| anyhow::anyhow!("Invalid UTF-8: {}", e))
+    String::from_utf8(plaintext).map_err(|e| anyhow::anyhow!("Invalid UTF-8: {}", e))
 }
 
 pub fn save_encrypted_secrets(secrets_json: &str, password: &str) -> anyhow::Result<()> {
@@ -121,7 +125,8 @@ pub fn hash_master_key(password: &str) -> String {
     use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
-    let hash = argon2.hash_password(password.as_bytes(), &salt)
+    let hash = argon2
+        .hash_password(password.as_bytes(), &salt)
         .expect("Argon2 hashing failed");
     hash.to_string()
 }
@@ -132,7 +137,9 @@ pub fn verify_master_key_hash(password: &str, hash_str: &str) -> bool {
         Ok(h) => h,
         Err(_) => return false,
     };
-    Argon2::default().verify_password(password.as_bytes(), &hash).is_ok()
+    Argon2::default()
+        .verify_password(password.as_bytes(), &hash)
+        .is_ok()
 }
 
 pub fn migrate_plaintext_to_encrypted(password: &str) -> anyhow::Result<()> {
@@ -150,7 +157,10 @@ pub fn migrate_plaintext_to_encrypted(password: &str) -> anyhow::Result<()> {
 
     let backup_path = "secrets.json.migrated";
     std::fs::rename(plaintext_path, backup_path)?;
-    tracing::info!("Migrated secrets.json to encrypted format, backup at {}", backup_path);
+    tracing::info!(
+        "Migrated secrets.json to encrypted format, backup at {}",
+        backup_path
+    );
 
     Ok(())
 }
@@ -166,8 +176,8 @@ impl Encryption {
             .hash_password_into(password.as_bytes(), salt, &mut key)
             .map_err(|e| anyhow::anyhow!("Argon2 error: {}", e))?;
 
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| anyhow::anyhow!("Cipher error: {}", e))?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("Cipher error: {}", e))?;
 
         Ok(Self { cipher })
     }
@@ -258,9 +268,13 @@ mod security_tests {
         let key2 = derive_key("testpassword", &salt).unwrap();
         let cipher2 = Aes256Gcm::new_from_slice(&key2).unwrap();
 
-        let nonce_bytes2 = base64::engine::general_purpose::STANDARD.decode(&encrypted.nonce).unwrap();
+        let nonce_bytes2 = base64::engine::general_purpose::STANDARD
+            .decode(&encrypted.nonce)
+            .unwrap();
         let nonce2 = Nonce::from_slice(&nonce_bytes2);
-        let ct = base64::engine::general_purpose::STANDARD.decode(&encrypted.ciphertext).unwrap();
+        let ct = base64::engine::general_purpose::STANDARD
+            .decode(&encrypted.ciphertext)
+            .unwrap();
 
         let plaintext = cipher2.decrypt(nonce2, ct.as_ref()).unwrap();
         assert_eq!(String::from_utf8(plaintext).unwrap(), "Hello, World!");

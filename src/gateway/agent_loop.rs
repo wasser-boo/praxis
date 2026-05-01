@@ -1,7 +1,7 @@
-use crate::gateway::GatewayState;
-use crate::gateway::llm::provider::{ChatRequest, ChatMessage, ToolCall, ToolDefinition};
-use crate::tags::{self, TagExecution};
 use crate::cl;
+use crate::gateway::llm::provider::{ChatMessage, ChatRequest, ToolCall, ToolDefinition};
+use crate::gateway::GatewayState;
+use crate::tags::{self, TagExecution};
 
 #[derive(Debug)]
 pub struct AgentLoopResult {
@@ -53,7 +53,8 @@ pub async fn run_agent_loop(
             let mut ctx_val = serde_json::to_value(&ctx)?;
             let _secret_changes = cl::apply_to_context(&cl, &mut ctx_val);
             // Save updated context
-            if let Ok(updated_ctx) = serde_json::from_value::<crate::db::contexts::Context>(ctx_val) {
+            if let Ok(updated_ctx) = serde_json::from_value::<crate::db::contexts::Context>(ctx_val)
+            {
                 ctx = updated_ctx;
                 let _ = state.db.save_context(&ctx);
             }
@@ -61,11 +62,14 @@ pub async fn run_agent_loop(
     }
 
     // Store user message
-    state.db.add_message(user_id, &crate::db::messages::Message {
-        role: "user".to_string(),
-        content: user_message.to_string(),
-        tool_call_id: None,
-    })?;
+    state.db.add_message(
+        user_id,
+        &crate::db::messages::Message {
+            role: "user".to_string(),
+            content: user_message.to_string(),
+            tool_call_id: None,
+        },
+    )?;
 
     loop {
         if turn >= config.max_turns {
@@ -90,7 +94,10 @@ pub async fn run_agent_loop(
         if ctx.settings.compaction_enabled && !ctx.settings.compaction_summary.is_empty() {
             messages.push(ChatMessage {
                 role: "system".to_string(),
-                content: Some(format!("Previous conversation summary: {}", ctx.settings.compaction_summary)),
+                content: Some(format!(
+                    "Previous conversation summary: {}",
+                    ctx.settings.compaction_summary
+                )),
                 tool_calls: None,
                 tool_call_id: None,
             });
@@ -107,8 +114,7 @@ pub async fn run_agent_loop(
         }
 
         // Get tool definitions from database
-        let tools = crate::db::tools::to_tool_definitions(&state.db)
-            .unwrap_or_default();
+        let tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
 
         let request = ChatRequest {
             messages,
@@ -145,11 +151,14 @@ pub async fn run_agent_loop(
                 }
 
                 let result = execute_tool_call(&state.db, user_id, tc).await;
-                state.db.add_message(user_id, &crate::db::messages::Message {
-                    role: "tool".to_string(),
-                    content: result.clone(),
-                    tool_call_id: Some(tc.id.clone()),
-                })?;
+                state.db.add_message(
+                    user_id,
+                    &crate::db::messages::Message {
+                        role: "tool".to_string(),
+                        content: result.clone(),
+                        tool_call_id: Some(tc.id.clone()),
+                    },
+                )?;
                 tool_call_count += 1;
             }
             // Continue loop for next LLM turn
@@ -163,7 +172,8 @@ pub async fn run_agent_loop(
         let response_text = crate::gateway::poml::strip_think_tags(&raw_response);
 
         // Extract agent signals first
-        let (agent_signals, response_text) = crate::gateway::poml::extract_agent_signals(&response_text);
+        let (agent_signals, response_text) =
+            crate::gateway::poml::extract_agent_signals(&response_text);
 
         // Process agent signals
         for signal in &agent_signals {
@@ -220,7 +230,10 @@ pub async fn run_agent_loop(
             }
 
             // Save learned data
-            if !tag_exec.learned_facts.is_empty() || !tag_exec.learned_preferences.is_empty() || !tag_exec.learned_topics.is_empty() {
+            if !tag_exec.learned_facts.is_empty()
+                || !tag_exec.learned_preferences.is_empty()
+                || !tag_exec.learned_topics.is_empty()
+            {
                 let mut memory = crate::db::memory::load_memory(&state.db, user_id);
                 for fact in &tag_exec.learned_facts {
                     crate::db::memory::add_learned_fact(&mut memory, fact);
@@ -237,18 +250,24 @@ pub async fn run_agent_loop(
             last_tag_execution = Some(tag_exec);
 
             // Store cleaned response
-            state.db.add_message(user_id, &crate::db::messages::Message {
-                role: "assistant".to_string(),
-                content: tag_result.cleaned_response.clone(),
-                tool_call_id: None,
-            })?;
+            state.db.add_message(
+                user_id,
+                &crate::db::messages::Message {
+                    role: "assistant".to_string(),
+                    content: tag_result.cleaned_response.clone(),
+                    tool_call_id: None,
+                },
+            )?;
         } else {
             // Store raw response
-            state.db.add_message(user_id, &crate::db::messages::Message {
-                role: "assistant".to_string(),
-                content: response_text.clone(),
-                tool_call_id: None,
-            })?;
+            state.db.add_message(
+                user_id,
+                &crate::db::messages::Message {
+                    role: "assistant".to_string(),
+                    content: response_text.clone(),
+                    tool_call_id: None,
+                },
+            )?;
         }
 
         // Advance CL state if needed
@@ -287,7 +306,9 @@ pub async fn run_agent_loop(
         break;
     }
 
-    let final_response = state.db.get_messages(user_id, 1)?
+    let final_response = state
+        .db
+        .get_messages(user_id, 1)?
         .first()
         .map(|m| m.content.clone())
         .unwrap_or_default();
@@ -309,7 +330,8 @@ async fn generate_compaction_summary(
 ) -> anyhow::Result<String> {
     let messages = state.db.get_messages(user_id, 100)?;
 
-    let conversation_text = messages.iter()
+    let conversation_text = messages
+        .iter()
         .map(|m| format!("{}: {}", m.role, m.content))
         .collect::<Vec<_>>()
         .join("\n");
@@ -332,7 +354,9 @@ async fn generate_compaction_summary(
     };
 
     let response = state.llm.chat(request, None).await?;
-    let summary = response.content.unwrap_or_else(|| "Summary not available.".to_string());
+    let summary = response
+        .content
+        .unwrap_or_else(|| "Summary not available.".to_string());
 
     tracing::info!(user_id = %user_id, summary_len = summary.len(), "Compaction summary generated");
     Ok(summary)
@@ -406,7 +430,10 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
                             result.stdout
                         }
                     } else {
-                        format!("Exit code: {}\nStdout: {}\nStderr: {}", result.exit_code, result.stdout, result.stderr)
+                        format!(
+                            "Exit code: {}\nStdout: {}\nStderr: {}",
+                            result.exit_code, result.stdout, result.stderr
+                        )
                     }
                 }
                 Err(e) => format!("Error: {}", e),
@@ -422,10 +449,12 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
         }
         "edit_file" => {
             let path = args["path"].as_str().unwrap_or("");
-            let old_text = args["old_text"].as_str()
+            let old_text = args["old_text"]
+                .as_str()
                 .or_else(|| args["old_string"].as_str())
                 .unwrap_or("");
-            let new_text = args["new_text"].as_str()
+            let new_text = args["new_text"]
+                .as_str()
                 .or_else(|| args["new_string"].as_str())
                 .unwrap_or("");
             match crate::tools::edit_file::edit_file(path, old_text, new_text).await {
@@ -438,7 +467,11 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
             match std::fs::read_to_string(path) {
                 Ok(content) => {
                     if content.len() > 10000 {
-                        format!("{}...\n\n[File truncated - {} bytes total]", &content[..10000], content.len())
+                        format!(
+                            "{}...\n\n[File truncated - {} bytes total]",
+                            &content[..10000],
+                            content.len()
+                        )
                     } else {
                         content
                     }
@@ -455,7 +488,13 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
                     } else {
                         let mut output = String::new();
                         for (i, r) in results.iter().enumerate() {
-                            output.push_str(&format!("{}. {}\n   {}\n   {}\n\n", i + 1, r.title, r.snippet, r.url));
+                            output.push_str(&format!(
+                                "{}. {}\n   {}\n   {}\n\n",
+                                i + 1,
+                                r.title,
+                                r.snippet,
+                                r.url
+                            ));
                         }
                         output
                     }
@@ -463,15 +502,17 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
                 Err(e) => format!("Search error: {}", e),
             }
         }
-        "get_context" => {
-            match db.load_context(user_id) {
-                Ok(ctx) => serde_json::to_string_pretty(&ctx).unwrap_or_else(|_| "Failed to serialize".to_string()),
-                Err(e) => format!("Error: {}", e),
-            }
-        }
+        "get_context" => match db.load_context(user_id) {
+            Ok(ctx) => serde_json::to_string_pretty(&ctx)
+                .unwrap_or_else(|_| "Failed to serialize".to_string()),
+            Err(e) => format!("Error: {}", e),
+        },
         "set_context" => {
             let key = args["key"].as_str().unwrap_or("");
-            let value = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
+            let value = args
+                .get("value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             match db.merge_context(user_id, serde_json::json!({key: value})) {
                 Ok(_) => format!("Context key '{}' set", key),
                 Err(e) => format!("Error: {}", e),
@@ -497,7 +538,14 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
         "discord_upload_file" => {
             let filename = args["filename"].as_str().unwrap_or("");
             let base64_content = args["base64_content"].as_str().unwrap_or("");
-            match crate::tools::discord_upload::upload_file(user_id, filename, base64_content, Some("")).await {
+            match crate::tools::discord_upload::upload_file(
+                user_id,
+                filename,
+                base64_content,
+                Some(""),
+            )
+            .await
+            {
                 Ok(_) => format!("File '{}' uploaded", filename),
                 Err(e) => format!("Error: {}", e),
             }
@@ -515,13 +563,32 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
             let title = args.get("title").and_then(|v| v.as_str());
             let description = args.get("description").and_then(|v| v.as_str());
             let url = args.get("url").and_then(|v| v.as_str());
-            let color = args.get("color").and_then(|v| crate::tools::discord_send_embed::parse_color(v));
+            let color = args
+                .get("color")
+                .and_then(|v| crate::tools::discord_send_embed::parse_color(v));
             let footer = args.get("footer").and_then(|v| v.as_str());
             let author = args.get("author").and_then(|v| v.as_str());
             let thumbnail = args.get("thumbnail").and_then(|v| v.as_str());
             let image = args.get("image").and_then(|v| v.as_str());
-            let fields = args.get("fields").map(|v| crate::tools::discord_send_embed::parse_fields(v)).unwrap_or_default();
-            match crate::tools::discord_send_embed::send_embed(user_id, channel_id, title, description, url, color, footer, author, thumbnail, image, fields).await {
+            let fields = args
+                .get("fields")
+                .map(|v| crate::tools::discord_send_embed::parse_fields(v))
+                .unwrap_or_default();
+            match crate::tools::discord_send_embed::send_embed(
+                user_id,
+                channel_id,
+                title,
+                description,
+                url,
+                color,
+                footer,
+                author,
+                thumbnail,
+                image,
+                fields,
+            )
+            .await
+            {
                 Ok(_) => "Embed sent".to_string(),
                 Err(e) => format!("Error: {}", e),
             }
@@ -536,7 +603,10 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
         "learn_preference" => {
             let key = args["key"].as_str().unwrap_or("");
             let value = args["value"].as_str().unwrap_or("");
-            match db.merge_context(user_id, serde_json::json!({"custom_data": {format!("pref_{}", key): value}})) {
+            match db.merge_context(
+                user_id,
+                serde_json::json!({"custom_data": {format!("pref_{}", key): value}}),
+            ) {
                 Ok(_) => format!("Preference '{}' = '{}'", key, value),
                 Err(e) => format!("Error: {}", e),
             }

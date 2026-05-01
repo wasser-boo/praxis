@@ -1,5 +1,5 @@
+use crate::gateway::llm::provider::{ChatMessage, ChatRequest};
 use crate::gateway::GatewayState;
-use crate::gateway::llm::provider::{ChatRequest, ChatMessage};
 use crate::voice::tts;
 
 pub async fn handle_message(
@@ -13,7 +13,8 @@ pub async fn handle_message(
 
     // Use agent loop when max_turns > 1
     if max_turns > 1 {
-        return handle_message_agent_loop(state, user_id, content, channel_id, &ctx, max_turns).await;
+        return handle_message_agent_loop(state, user_id, content, channel_id, &ctx, max_turns)
+            .await;
     }
 
     // Legacy single-pass path (max_turns == 1)
@@ -48,12 +49,15 @@ pub async fn handle_message(
         });
     }
 
-    let tool_defs = crate::db::tools::to_tool_definitions(&state.db)
-        .unwrap_or_default();
+    let tool_defs = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
 
     let request = ChatRequest {
         messages,
-        tools: if tool_defs.is_empty() { None } else { Some(tool_defs) },
+        tools: if tool_defs.is_empty() {
+            None
+        } else {
+            Some(tool_defs)
+        },
         temperature: Some(0.7),
         max_tokens: Some(4096),
     };
@@ -116,7 +120,12 @@ pub async fn handle_message(
         state.db.save_context(&updated_ctx)?;
 
         if updated_ctx.settings.use_tts {
-            spawn_tts(reply.clone(), &updated_ctx.settings, &state.secrets, user_id);
+            spawn_tts(
+                reply.clone(),
+                &updated_ctx.settings,
+                &state.secrets,
+                user_id,
+            );
         }
 
         return Ok(reply);
@@ -138,7 +147,12 @@ pub async fn handle_message(
     state.db.save_context(&updated_ctx)?;
 
     if updated_ctx.settings.use_tts {
-        spawn_tts(reply.clone(), &updated_ctx.settings, &state.secrets, user_id);
+        spawn_tts(
+            reply.clone(),
+            &updated_ctx.settings,
+            &state.secrets,
+            user_id,
+        );
     }
 
     Ok(reply)
@@ -153,7 +167,11 @@ async fn handle_message_agent_loop(
     max_turns: i32,
 ) -> anyhow::Result<String> {
     let feedback_modes = &ctx.settings.feedback_mode;
-    let feedback_channel = ctx.settings.feedback_channel_id.clone().or_else(|| channel_id.map(|s| s.to_string()));
+    let feedback_channel = ctx
+        .settings
+        .feedback_channel_id
+        .clone()
+        .or_else(|| channel_id.map(|s| s.to_string()));
     let user_id_owned = user_id.to_string();
     let secrets = state.secrets.clone();
     let settings = ctx.settings.clone();
@@ -189,7 +207,9 @@ async fn handle_message_agent_loop(
                         "text" => {
                             let sent_to_channel = ch.as_ref().map_or(false, |ch_id| {
                                 if ch_id.parse::<u64>().ok().filter(|&id| id > 0).is_some() {
-                                    crate::event_channel::broadcast_channel_message(&uid, ch_id, &msg);
+                                    crate::event_channel::broadcast_channel_message(
+                                        &uid, ch_id, &msg,
+                                    );
                                     true
                                 } else {
                                     false
@@ -212,7 +232,8 @@ async fn handle_message_agent_loop(
         content,
         config,
         Some(feedback_tx),
-    ).await?;
+    )
+    .await?;
 
     let reply = result.response.clone();
 
@@ -223,7 +244,12 @@ async fn handle_message_agent_loop(
     // Final response TTS: always speak if use_tts is on, or if input came from voice
     let is_voice_input = channel_id.map_or(false, |ch| ch.starts_with("voice:"));
     if updated_ctx.settings.use_tts || is_voice_input {
-        spawn_tts(reply.clone(), &updated_ctx.settings, &state.secrets, user_id);
+        spawn_tts(
+            reply.clone(),
+            &updated_ctx.settings,
+            &state.secrets,
+            user_id,
+        );
     }
 
     Ok(reply)
@@ -244,13 +270,16 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
     // Get paired users
     let paired_users = state.db.list_all_pairings().unwrap_or_default();
     let paired_count = paired_users.len();
-    let paired_list: Vec<serde_json::Value> = paired_users.iter().map(|p| {
-        serde_json::json!({
-            "user_id": p.user_id,
-            "discord_user_id": p.discord_user_id,
-            "paired_at": p.paired_at,
+    let paired_list: Vec<serde_json::Value> = paired_users
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "user_id": p.user_id,
+                "discord_user_id": p.discord_user_id,
+                "paired_at": p.paired_at,
+            })
         })
-    }).collect();
+        .collect();
 
     let context = serde_json::json!({
         "user_name": ctx.user_name.as_deref().unwrap_or("User"),
@@ -288,11 +317,20 @@ fn format_uptime(secs: u64) -> String {
     } else if secs < 86400 {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     } else {
-        format!("{}d {}h {}m", secs / 86400, (secs % 86400) / 3600, (secs % 3600) / 60)
+        format!(
+            "{}d {}h {}m",
+            secs / 86400,
+            (secs % 86400) / 3600,
+            (secs % 3600) / 60
+        )
     }
 }
 
-async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &crate::gateway::llm::provider::ToolCall) -> String {
+async fn execute_tool_call(
+    db: &crate::db::Database,
+    user_id: &str,
+    tc: &crate::gateway::llm::provider::ToolCall,
+) -> String {
     let args: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
         Ok(v) => v,
         Err(e) => return format!("Error parsing arguments: {}", e),
@@ -310,7 +348,10 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &crate::
                             result.stdout
                         }
                     } else {
-                        format!("Exit code: {}\nStdout: {}\nStderr: {}", result.exit_code, result.stdout, result.stderr)
+                        format!(
+                            "Exit code: {}\nStdout: {}\nStderr: {}",
+                            result.exit_code, result.stdout, result.stderr
+                        )
                     }
                 }
                 Err(e) => format!("Error: {}", e),
@@ -326,10 +367,12 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &crate::
         }
         "edit_file" => {
             let path = args["path"].as_str().unwrap_or("");
-            let old_text = args["old_text"].as_str()
+            let old_text = args["old_text"]
+                .as_str()
                 .or_else(|| args["old_string"].as_str())
                 .unwrap_or("");
-            let new_text = args["new_text"].as_str()
+            let new_text = args["new_text"]
+                .as_str()
                 .or_else(|| args["new_string"].as_str())
                 .unwrap_or("");
             match crate::tools::edit_file::edit_file(path, old_text, new_text).await {
@@ -342,7 +385,11 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &crate::
             match std::fs::read_to_string(path) {
                 Ok(content) => {
                     if content.len() > 10000 {
-                        format!("{}...\n\n[File truncated - {} bytes total]", &content[..10000], content.len())
+                        format!(
+                            "{}...\n\n[File truncated - {} bytes total]",
+                            &content[..10000],
+                            content.len()
+                        )
                     } else {
                         content
                     }
@@ -359,7 +406,13 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &crate::
                     } else {
                         let mut output = String::new();
                         for (i, r) in results.iter().enumerate() {
-                            output.push_str(&format!("{}. {}\n   {}\n   {}\n\n", i + 1, r.title, r.snippet, r.url));
+                            output.push_str(&format!(
+                                "{}. {}\n   {}\n   {}\n\n",
+                                i + 1,
+                                r.title,
+                                r.snippet,
+                                r.url
+                            ));
                         }
                         output
                     }
@@ -367,15 +420,17 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &crate::
                 Err(e) => format!("Search error: {}", e),
             }
         }
-        "get_context" => {
-            match db.load_context(user_id) {
-                Ok(ctx) => serde_json::to_string_pretty(&ctx).unwrap_or_else(|_| "Failed to serialize context".to_string()),
-                Err(e) => format!("Error: {}", e),
-            }
-        }
+        "get_context" => match db.load_context(user_id) {
+            Ok(ctx) => serde_json::to_string_pretty(&ctx)
+                .unwrap_or_else(|_| "Failed to serialize context".to_string()),
+            Err(e) => format!("Error: {}", e),
+        },
         "set_context" => {
             let key = args["key"].as_str().unwrap_or("");
-            let value = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
+            let value = args
+                .get("value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             match db.merge_context(user_id, serde_json::json!({key: value})) {
                 Ok(_) => format!("Context key '{}' set", key),
                 Err(e) => format!("Error: {}", e),
@@ -401,7 +456,14 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &crate::
         "discord_upload_file" => {
             let filename = args["filename"].as_str().unwrap_or("");
             let base64_content = args["base64_content"].as_str().unwrap_or("");
-            match crate::tools::discord_upload::upload_file(user_id, filename, base64_content, Some("")).await {
+            match crate::tools::discord_upload::upload_file(
+                user_id,
+                filename,
+                base64_content,
+                Some(""),
+            )
+            .await
+            {
                 Ok(_) => format!("File '{}' uploaded", filename),
                 Err(e) => format!("Error: {}", e),
             }
@@ -419,13 +481,32 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &crate::
             let title = args.get("title").and_then(|v| v.as_str());
             let description = args.get("description").and_then(|v| v.as_str());
             let url = args.get("url").and_then(|v| v.as_str());
-            let color = args.get("color").and_then(|v| crate::tools::discord_send_embed::parse_color(v));
+            let color = args
+                .get("color")
+                .and_then(|v| crate::tools::discord_send_embed::parse_color(v));
             let footer = args.get("footer").and_then(|v| v.as_str());
             let author = args.get("author").and_then(|v| v.as_str());
             let thumbnail = args.get("thumbnail").and_then(|v| v.as_str());
             let image = args.get("image").and_then(|v| v.as_str());
-            let fields = args.get("fields").map(|v| crate::tools::discord_send_embed::parse_fields(v)).unwrap_or_default();
-            match crate::tools::discord_send_embed::send_embed(user_id, channel_id, title, description, url, color, footer, author, thumbnail, image, fields).await {
+            let fields = args
+                .get("fields")
+                .map(|v| crate::tools::discord_send_embed::parse_fields(v))
+                .unwrap_or_default();
+            match crate::tools::discord_send_embed::send_embed(
+                user_id,
+                channel_id,
+                title,
+                description,
+                url,
+                color,
+                footer,
+                author,
+                thumbnail,
+                image,
+                fields,
+            )
+            .await
+            {
                 Ok(_) => "Embed sent".to_string(),
                 Err(e) => format!("Error: {}", e),
             }
@@ -440,7 +521,10 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &crate::
         "learn_preference" => {
             let key = args["key"].as_str().unwrap_or("");
             let value = args["value"].as_str().unwrap_or("");
-            match db.merge_context(user_id, serde_json::json!({"custom_data": {format!("pref_{}", key): value}})) {
+            match db.merge_context(
+                user_id,
+                serde_json::json!({"custom_data": {format!("pref_{}", key): value}}),
+            ) {
                 Ok(_) => format!("Preference '{}' = '{}'", key, value),
                 Err(e) => format!("Error: {}", e),
             }
@@ -456,7 +540,12 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &crate::
     }
 }
 
-fn spawn_tts(text: String, settings: &crate::db::contexts::ContextSettings, secrets: &crate::db::secrets::Secrets, user_id: &str) {
+fn spawn_tts(
+    text: String,
+    settings: &crate::db::contexts::ContextSettings,
+    secrets: &crate::db::secrets::Secrets,
+    user_id: &str,
+) {
     let tts_type = settings.voice_tts_type.clone();
     let rvc_on = settings.rvc_on;
     let rvc_server = settings.rvc_server.clone();
@@ -472,9 +561,15 @@ fn spawn_tts(text: String, settings: &crate::db::contexts::ContextSettings, secr
     let elevenlabs_tts_language = settings.elevenlabs_tts_language.clone();
     let minimax_api_key = secrets.minimax_api_key.clone();
     let minimax_voice_id = settings.minimax_voice_id.clone();
-    let minimax_model = settings.minimax_tts_model.clone().unwrap_or_else(|| "speech-02-hd".to_string());
+    let minimax_model = settings
+        .minimax_tts_model
+        .clone()
+        .unwrap_or_else(|| "speech-02-hd".to_string());
     let mimo_api_key = secrets.mimo_api_key.clone();
-    let mimo_tts_type = settings.mimo_tts_type.clone().unwrap_or_else(|| "builtin".to_string());
+    let mimo_tts_type = settings
+        .mimo_tts_type
+        .clone()
+        .unwrap_or_else(|| "builtin".to_string());
     let mimo_voice = settings.mimo_voice_id.clone();
     let audio_output_path = settings.voice_audio_output_path.clone();
     let user_id = user_id.to_string();
@@ -487,7 +582,10 @@ fn spawn_tts(text: String, settings: &crate::db::contexts::ContextSettings, secr
                 let tts_engine = tts::windows_sapi::WindowsSAPI::new();
                 match tts_engine.speak_to_bytes(&text) {
                     Ok(bytes) => bytes,
-                    Err(e) => { tracing::warn!("TTS FAILED: windows_sapi: {}", e); return; }
+                    Err(e) => {
+                        tracing::warn!("TTS FAILED: windows_sapi: {}", e);
+                        return;
+                    }
                 }
             }
             "elevenlabs" => {
@@ -505,18 +603,28 @@ fn spawn_tts(text: String, settings: &crate::db::contexts::ContextSettings, secr
                     speed: elevenlabs_speed,
                     language: elevenlabs_tts_language,
                 };
-                match tts_engine.speak_with_settings(&text, &elevenlabs_tts_model, &voice_settings).await {
+                match tts_engine
+                    .speak_with_settings(&text, &elevenlabs_tts_model, &voice_settings)
+                    .await
+                {
                     Ok(bytes) => bytes,
-                    Err(e) => { tracing::warn!("TTS FAILED: elevenlabs: {}", e); return; }
+                    Err(e) => {
+                        tracing::warn!("TTS FAILED: elevenlabs: {}", e);
+                        return;
+                    }
                 }
             }
             "minimax" => {
                 let api_key = minimax_api_key.unwrap_or_default();
                 let voice_id = minimax_voice_id.unwrap_or_default();
-                let tts_engine = tts::minimax_tts::MiniMaxTTS::new(api_key, voice_id, minimax_model);
+                let tts_engine =
+                    tts::minimax_tts::MiniMaxTTS::new(api_key, voice_id, minimax_model);
                 match tts_engine.speak(&text).await {
                     Ok(bytes) => bytes,
-                    Err(e) => { tracing::warn!("TTS FAILED: minimax: {}", e); return; }
+                    Err(e) => {
+                        tracing::warn!("TTS FAILED: minimax: {}", e);
+                        return;
+                    }
                 }
             }
             "mimo_tts" => {
@@ -530,7 +638,10 @@ fn spawn_tts(text: String, settings: &crate::db::contexts::ContextSettings, secr
                 let voice = mimo_voice.as_deref().unwrap_or("mimo_default");
                 match tts_client.speak_builtin(&text, voice, None).await {
                     Ok(bytes) => bytes,
-                    Err(e) => { tracing::warn!("TTS FAILED: mimo_tts: {}", e); return; }
+                    Err(e) => {
+                        tracing::warn!("TTS FAILED: mimo_tts: {}", e);
+                        return;
+                    }
                 }
             }
             other => {
@@ -543,19 +654,32 @@ fn spawn_tts(text: String, settings: &crate::db::contexts::ContextSettings, secr
 
         if let Some(ref path) = audio_output_path {
             let folder = tts::ensure_audio_folder(path, "generated_tts");
-            let _ = tts::save_audio_file(&audio_bytes, folder.to_str().unwrap_or(path), "01_tts_original");
+            let _ = tts::save_audio_file(
+                &audio_bytes,
+                folder.to_str().unwrap_or(path),
+                "01_tts_original",
+            );
         }
 
         let final_audio = if rvc_on {
-            match tts::convert_through_rvc(audio_bytes, rvc_server, rvc_model_path, rvc_index_path).await {
+            match tts::convert_through_rvc(audio_bytes, rvc_server, rvc_model_path, rvc_index_path)
+                .await
+            {
                 Ok(converted) => {
                     if let Some(ref path) = audio_output_path {
                         let folder = tts::ensure_audio_folder(path, "rvc");
-                        let _ = tts::save_audio_file(&converted, folder.to_str().unwrap_or(path), "02_rvc_converted");
+                        let _ = tts::save_audio_file(
+                            &converted,
+                            folder.to_str().unwrap_or(path),
+                            "02_rvc_converted",
+                        );
                     }
                     converted
                 }
-                Err(e) => { tracing::warn!("TTS RVC FAILED: {}", e); return; }
+                Err(e) => {
+                    tracing::warn!("TTS RVC FAILED: {}", e);
+                    return;
+                }
             }
         } else {
             audio_bytes

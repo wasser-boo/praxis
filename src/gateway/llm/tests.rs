@@ -27,13 +27,22 @@ mod tests {
         let message = &data["choices"][0]["message"];
         let content = message["content"].as_str().map(|s| s.to_string());
         let tool_calls: Option<Vec<ToolCall>> = message["tool_calls"].as_array().map(|calls| {
-            calls.iter().map(|tc| ToolCall {
-                id: tc["id"].as_str().unwrap_or_default().to_string(),
-                function: FunctionCall {
-                    name: tc["function"]["name"].as_str().unwrap_or_default().to_string(),
-                    arguments: tc["function"]["arguments"].as_str().unwrap_or_default().to_string(),
-                },
-            }).collect()
+            calls
+                .iter()
+                .map(|tc| ToolCall {
+                    id: tc["id"].as_str().unwrap_or_default().to_string(),
+                    function: FunctionCall {
+                        name: tc["function"]["name"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                        arguments: tc["function"]["arguments"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    },
+                })
+                .collect()
         });
 
         assert!(content.is_none());
@@ -57,13 +66,22 @@ mod tests {
         let message = &data["choices"][0]["message"];
         let content = message["content"].as_str().map(|s| s.to_string());
         let tool_calls: Option<Vec<ToolCall>> = message["tool_calls"].as_array().map(|calls| {
-            calls.iter().map(|tc| ToolCall {
-                id: tc["id"].as_str().unwrap_or_default().to_string(),
-                function: FunctionCall {
-                    name: tc["function"]["name"].as_str().unwrap_or_default().to_string(),
-                    arguments: tc["function"]["arguments"].as_str().unwrap_or_default().to_string(),
-                },
-            }).collect()
+            calls
+                .iter()
+                .map(|tc| ToolCall {
+                    id: tc["id"].as_str().unwrap_or_default().to_string(),
+                    function: FunctionCall {
+                        name: tc["function"]["name"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                        arguments: tc["function"]["arguments"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    },
+                })
+                .collect()
         });
 
         assert_eq!(content.unwrap(), "Hello, world!");
@@ -86,15 +104,24 @@ mod tests {
             "usage": { "prompt_tokens": 50, "completion_tokens": 30, "total_tokens": 80 }
         });
 
-        let tool_calls: Vec<ToolCall> = data["choices"][0]["message"]["tool_calls"].as_array().unwrap().iter().map(|tc| {
-            ToolCall {
+        let tool_calls: Vec<ToolCall> = data["choices"][0]["message"]["tool_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tc| ToolCall {
                 id: tc["id"].as_str().unwrap_or_default().to_string(),
                 function: FunctionCall {
-                    name: tc["function"]["name"].as_str().unwrap_or_default().to_string(),
-                    arguments: tc["function"]["arguments"].as_str().unwrap_or_default().to_string(),
+                    name: tc["function"]["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    arguments: tc["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
                 },
-            }
-        }).collect();
+            })
+            .collect();
 
         assert_eq!(tool_calls.len(), 2);
         assert_eq!(tool_calls[0].function.name, "read_file");
@@ -119,7 +146,9 @@ mod tests {
 
         for block in data["content"].as_array().unwrap() {
             match block["type"].as_str() {
-                Some("text") => { text_content.push_str(block["text"].as_str().unwrap_or("")); }
+                Some("text") => {
+                    text_content.push_str(block["text"].as_str().unwrap_or(""));
+                }
                 Some("tool_use") => {
                     tool_calls.push(ToolCall {
                         id: block["id"].as_str().unwrap_or_default().to_string(),
@@ -137,7 +166,8 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].id, "toolu_abc123");
         assert_eq!(tool_calls[0].function.name, "execute_terminal");
-        let args: serde_json::Value = serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["command"], "echo hello");
     }
 
@@ -149,7 +179,10 @@ mod tests {
             "usage": { "input_tokens": 10, "output_tokens": 5 }
         });
 
-        let tool_calls: Vec<ToolCall> = data["content"].as_array().unwrap().iter()
+        let tool_calls: Vec<ToolCall> = data["content"]
+            .as_array()
+            .unwrap()
+            .iter()
             .filter(|b| b["type"].as_str() == Some("tool_use"))
             .map(|b| ToolCall {
                 id: b["id"].as_str().unwrap_or_default().to_string(),
@@ -175,7 +208,10 @@ mod tests {
             "usage": { "input_tokens": 50, "output_tokens": 30 }
         });
 
-        let tool_calls: Vec<ToolCall> = data["content"].as_array().unwrap().iter()
+        let tool_calls: Vec<ToolCall> = data["content"]
+            .as_array()
+            .unwrap()
+            .iter()
             .filter(|b| b["type"].as_str() == Some("tool_use"))
             .map(|b| ToolCall {
                 id: b["id"].as_str().unwrap_or_default().to_string(),
@@ -206,15 +242,21 @@ mod tests {
         let message = &data["message"];
         let content = message["content"].as_str().map(|s| s.to_string());
         let tool_calls: Option<Vec<ToolCall>> = message["tool_calls"].as_array().map(|calls| {
-            calls.iter().filter_map(|tc| {
-                let func = tc.get("function")?;
-                let name = func.get("name")?.as_str()?.to_string();
-                let args = func.get("arguments")?.clone();
-                Some(ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
-                    function: FunctionCall { name, arguments: args.to_string() },
+            calls
+                .iter()
+                .filter_map(|tc| {
+                    let func = tc.get("function")?;
+                    let name = func.get("name")?.as_str()?.to_string();
+                    let args = func.get("arguments")?.clone();
+                    Some(ToolCall {
+                        id: format!("call_{}", uuid::Uuid::new_v4()),
+                        function: FunctionCall {
+                            name,
+                            arguments: args.to_string(),
+                        },
+                    })
                 })
-            }).collect()
+                .collect()
         });
 
         assert!(content.is_none() || content.unwrap().is_empty());
@@ -257,15 +299,23 @@ mod tests {
         });
 
         let message = &data["choices"][0]["message"];
-        let tool_calls: Vec<ToolCall> = message["tool_calls"].as_array().unwrap().iter().filter_map(|tc| {
-            Some(ToolCall {
-                id: tc["id"].as_str().unwrap_or("call_0").to_string(),
-                function: FunctionCall {
-                    name: tc["function"]["name"].as_str()?.to_string(),
-                    arguments: tc["function"]["arguments"].as_str().unwrap_or("{}").to_string(),
-                },
+        let tool_calls: Vec<ToolCall> = message["tool_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tc| {
+                Some(ToolCall {
+                    id: tc["id"].as_str().unwrap_or("call_0").to_string(),
+                    function: FunctionCall {
+                        name: tc["function"]["name"].as_str()?.to_string(),
+                        arguments: tc["function"]["arguments"]
+                            .as_str()
+                            .unwrap_or("{}")
+                            .to_string(),
+                    },
+                })
             })
-        }).collect();
+            .collect();
 
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].id, "call_mm1");
@@ -310,13 +360,16 @@ mod tests {
             },
         }];
 
-        let anthropic_tools: Vec<serde_json::Value> = tools.iter().map(|t| {
-            serde_json::json!({
-                "name": t.function.name,
-                "description": t.function.description,
-                "input_schema": t.function.parameters
+        let anthropic_tools: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.function.name,
+                    "description": t.function.description,
+                    "input_schema": t.function.parameters
+                })
             })
-        }).collect();
+            .collect();
 
         assert_eq!(anthropic_tools.len(), 1);
         assert_eq!(anthropic_tools[0]["name"], "read_file");
@@ -365,7 +418,10 @@ mod tests {
     // ── API mode enum tests ───────────────────────────────────────────────────
 
     #[derive(Debug, Clone, PartialEq)]
-    enum ApiMode { OpenAI, Anthropic }
+    enum ApiMode {
+        OpenAI,
+        Anthropic,
+    }
 
     #[test]
     fn test_api_mode_selection() {

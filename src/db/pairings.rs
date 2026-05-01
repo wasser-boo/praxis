@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::Database;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pairing {
@@ -138,16 +138,17 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT user_id, discord_user_id, discord_guild_id, paired_at, last_seen_at FROM pairings ORDER BY paired_at DESC"
         )?;
-        let pairings = stmt.query_map([], |row| {
-            Ok(Pairing {
-                user_id: row.get(0)?,
-                discord_user_id: row.get(1)?,
-                discord_guild_id: row.get(2)?,
-                paired_at: row.get(3)?,
-                last_seen_at: row.get(4)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        let pairings = stmt
+            .query_map([], |row| {
+                Ok(Pairing {
+                    user_id: row.get(0)?,
+                    discord_user_id: row.get(1)?,
+                    discord_guild_id: row.get(2)?,
+                    paired_at: row.get(3)?,
+                    last_seen_at: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(pairings)
     }
 
@@ -156,15 +157,16 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT code, discord_user_id, expires_at, created_at FROM pending_pairings ORDER BY created_at DESC"
         )?;
-        let pending = stmt.query_map([], |row| {
-            Ok(PendingPairing {
-                code: row.get(0)?,
-                discord_user_id: row.get(1)?,
-                expires_at: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        let pending = stmt
+            .query_map([], |row| {
+                Ok(PendingPairing {
+                    code: row.get(0)?,
+                    discord_user_id: row.get(1)?,
+                    expires_at: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(pending)
     }
 }
@@ -183,7 +185,8 @@ mod db_tests {
     #[test]
     fn test_create_and_get_pairing() {
         let (db, _dir) = test_db();
-        db.create_pairing("user1", "discord1", Some("guild1")).unwrap();
+        db.create_pairing("user1", "discord1", Some("guild1"))
+            .unwrap();
         let pairing = db.get_pairing_by_discord("discord1").unwrap().unwrap();
         assert_eq!(pairing.user_id, "user1");
         assert_eq!(pairing.discord_user_id, "discord1");
@@ -199,7 +202,8 @@ mod db_tests {
     #[test]
     fn test_pending_pairing() {
         let (db, _dir) = test_db();
-        db.create_pending_pairing("ABCD-1234", "discord1", "2025-01-01").unwrap();
+        db.create_pending_pairing("ABCD-1234", "discord1", "2025-01-01")
+            .unwrap();
         let pending = db.get_pending_pairing("ABCD-1234").unwrap().unwrap();
         assert_eq!(pending.discord_user_id, "discord1");
         db.delete_pending_pairing("ABCD-1234").unwrap();

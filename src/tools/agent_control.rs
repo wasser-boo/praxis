@@ -17,7 +17,8 @@ pub async fn run(
     user_id: &str,
     signal: AgentControlSignal,
 ) -> Result<String, String> {
-    let mut ctx = db.load_context(user_id)
+    let mut ctx = db
+        .load_context(user_id)
         .map_err(|e| format!("Failed to load context: {}", e))?;
 
     let signal_name = format!("{:?}", signal);
@@ -25,9 +26,15 @@ pub async fn run(
     match signal {
         AgentControlSignal::Next => {
             // Advance to next template in queue
-            if let Some(current) = ctx.settings.active_templates.iter().position(|t| t == &ctx.settings.current_template) {
+            if let Some(current) = ctx
+                .settings
+                .active_templates
+                .iter()
+                .position(|t| t == &ctx.settings.current_template)
+            {
                 if current + 1 < ctx.settings.active_templates.len() {
-                    ctx.settings.current_template = ctx.settings.active_templates[current + 1].clone();
+                    ctx.settings.current_template =
+                        ctx.settings.active_templates[current + 1].clone();
                 }
             }
             ctx.settings.llm_turn += 1;
@@ -115,7 +122,12 @@ mod tool_tests {
     #[tokio::test]
     async fn test_run_path() {
         let (db, _dir) = test_setup();
-        let result = run(&db, "user1", AgentControlSignal::Path("/home/user".to_string())).await;
+        let result = run(
+            &db,
+            "user1",
+            AgentControlSignal::Path("/home/user".to_string()),
+        )
+        .await;
         assert!(result.is_ok());
 
         let ctx = db.load_context("user1").unwrap();
@@ -126,8 +138,12 @@ mod tool_tests {
     async fn test_run_push_pop() {
         let (db, _dir) = test_setup();
 
-        run(&db, "user1", AgentControlSignal::Push("t1".to_string())).await.unwrap();
-        run(&db, "user1", AgentControlSignal::Push("t2".to_string())).await.unwrap();
+        run(&db, "user1", AgentControlSignal::Push("t1".to_string()))
+            .await
+            .unwrap();
+        run(&db, "user1", AgentControlSignal::Push("t2".to_string()))
+            .await
+            .unwrap();
 
         let ctx = db.load_context("user1").unwrap();
         assert_eq!(ctx.settings.active_templates, vec!["t1", "t2"]);
@@ -141,8 +157,12 @@ mod tool_tests {
     async fn test_run_next() {
         let (db, _dir) = test_setup();
 
-        run(&db, "user1", AgentControlSignal::Push("t1".to_string())).await.unwrap();
-        run(&db, "user1", AgentControlSignal::Push("t2".to_string())).await.unwrap();
+        run(&db, "user1", AgentControlSignal::Push("t1".to_string()))
+            .await
+            .unwrap();
+        run(&db, "user1", AgentControlSignal::Push("t2".to_string()))
+            .await
+            .unwrap();
         run(&db, "user1", AgentControlSignal::Next).await.unwrap();
 
         let ctx = db.load_context("user1").unwrap();
@@ -152,7 +172,13 @@ mod tool_tests {
     #[tokio::test]
     async fn test_run_set_mode() {
         let (db, _dir) = test_setup();
-        run(&db, "user1", AgentControlSignal::SetMode("code".to_string())).await.unwrap();
+        run(
+            &db,
+            "user1",
+            AgentControlSignal::SetMode("code".to_string()),
+        )
+        .await
+        .unwrap();
 
         let ctx = db.load_context("user1").unwrap();
         assert_eq!(ctx.custom_data["mode"], "code");
@@ -161,7 +187,13 @@ mod tool_tests {
     #[tokio::test]
     async fn test_run_set_variable() {
         let (db, _dir) = test_setup();
-        run(&db, "user1", AgentControlSignal::SetVariable("language".to_string(), "rust".to_string())).await.unwrap();
+        run(
+            &db,
+            "user1",
+            AgentControlSignal::SetVariable("language".to_string(), "rust".to_string()),
+        )
+        .await
+        .unwrap();
 
         let ctx = db.load_context("user1").unwrap();
         assert_eq!(ctx.custom_data["language"], "rust");
@@ -170,7 +202,12 @@ mod tool_tests {
     #[tokio::test]
     async fn test_run_feedback() {
         let (db, _dir) = test_setup();
-        let result = run(&db, "user1", AgentControlSignal::Feedback("progress update".to_string())).await;
+        let result = run(
+            &db,
+            "user1",
+            AgentControlSignal::Feedback("progress update".to_string()),
+        )
+        .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("Feedback sent"));
     }

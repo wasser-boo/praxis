@@ -20,7 +20,10 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
 
     // POML CLI
     println!("--- POML CLI ---");
-    let poml_cli = prompt_with_default("POML CLI Path", &get_existing(&existing, "POML_CLI", "./poml/js/cli.cjs"));
+    let poml_cli = prompt_with_default(
+        "POML CLI Path",
+        &get_existing(&existing, "POML_CLI", "./poml/js/cli.cjs"),
+    );
     env_lines.push(format!("POML_CLI={}", poml_cli));
     println!();
 
@@ -44,11 +47,16 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
             // Keep all existing provider config
             env_lines.push(format!("USE_PROVIDER={}", existing_provider));
             for (key, val) in &existing {
-                if key.starts_with("OPENAI_") || key.starts_with("ANTHROPIC_")
-                    || key.starts_with("OLLAMA_") || key.starts_with("MINIMAX_")
+                if key.starts_with("OPENAI_")
+                    || key.starts_with("ANTHROPIC_")
+                    || key.starts_with("OLLAMA_")
+                    || key.starts_with("MINIMAX_")
                     || key.starts_with("MIMO_")
                 {
-                    if !env_lines.iter().any(|l| l.starts_with(&format!("{}=", key))) {
+                    if !env_lines
+                        .iter()
+                        .any(|l| l.starts_with(&format!("{}=", key)))
+                    {
                         env_lines.push(format!("{}={}", key, val));
                     }
                 }
@@ -57,7 +65,11 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
             existing_provider.clone()
         } else {
             let real_choice = match skip_choice.as_str() {
-                "2" => "1", "3" => "2", "4" => "3", "5" => "4", "6" => "5",
+                "2" => "1",
+                "3" => "2",
+                "4" => "3",
+                "5" => "4",
+                "6" => "5",
                 _ => "1",
             };
             select_provider(real_choice, &existing, &mut env_lines)?
@@ -80,17 +92,30 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     println!("--- Discord Bot (Optional) ---");
     let has_discord = existing.contains_key("DISCORD_BOT_TOKEN");
     let discord_default = if has_discord { true } else { false };
-    let discord_label = if has_discord { "Update Discord config?" } else { "Setup Discord?" };
+    let discord_label = if has_discord {
+        "Update Discord config?"
+    } else {
+        "Setup Discord?"
+    };
     let setup_discord = prompt_yes_no(discord_label, discord_default)?;
 
     if setup_discord {
-        let bot_token = prompt_required_with_existing("Discord Bot Token", &get_existing(&existing, "DISCORD_BOT_TOKEN", ""));
-        let app_id = prompt_required_with_existing("Discord Application ID", &get_existing(&existing, "DISCORD_APPLICATION_ID", ""));
+        let bot_token = prompt_required_with_existing(
+            "Discord Bot Token",
+            &get_existing(&existing, "DISCORD_BOT_TOKEN", ""),
+        );
+        let app_id = prompt_required_with_existing(
+            "Discord Application ID",
+            &get_existing(&existing, "DISCORD_APPLICATION_ID", ""),
+        );
         env_lines.push(format!("DISCORD_BOT_TOKEN={}", bot_token));
         env_lines.push(format!("DISCORD_APPLICATION_ID={}", app_id));
     } else if has_discord {
         // Keep existing values
-        env_lines.push(format!("DISCORD_BOT_TOKEN={}", existing["DISCORD_BOT_TOKEN"]));
+        env_lines.push(format!(
+            "DISCORD_BOT_TOKEN={}",
+            existing["DISCORD_BOT_TOKEN"]
+        ));
         if let Some(app_id) = existing.get("DISCORD_APPLICATION_ID") {
             env_lines.push(format!("DISCORD_APPLICATION_ID={}", app_id));
         }
@@ -99,16 +124,29 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
 
     // Gateway
     println!("--- Gateway ---");
-    let gateway_port = prompt_with_default("Gateway Port", &get_existing(&existing, "GATEWAY_PORT", "3537"));
-    let gateway_api_key = prompt_with_default_or_generate("Gateway API Key", 32, &get_existing(&existing, "GATEWAY_API_KEY", ""));
+    let gateway_port = prompt_with_default(
+        "Gateway Port",
+        &get_existing(&existing, "GATEWAY_PORT", "3537"),
+    );
+    let gateway_api_key = prompt_with_default_or_generate(
+        "Gateway API Key",
+        32,
+        &get_existing(&existing, "GATEWAY_API_KEY", ""),
+    );
     env_lines.push(format!("GATEWAY_PORT={}", gateway_port));
     env_lines.push(format!("GATEWAY_API_KEY={}", gateway_api_key));
     println!();
 
     // Dashboard
     println!("--- Dashboard ---");
-    let dashboard_port = prompt_with_default("Dashboard Port", &get_existing(&existing, "DASHBOARD_PORT", "1337"));
-    let admin_password = prompt_password_with_existing("Dashboard Admin Password", &get_existing(&existing, "DASHBOARD_ADMIN_PASSWORD", ""))?;
+    let dashboard_port = prompt_with_default(
+        "Dashboard Port",
+        &get_existing(&existing, "DASHBOARD_PORT", "1337"),
+    );
+    let admin_password = prompt_password_with_existing(
+        "Dashboard Admin Password",
+        &get_existing(&existing, "DASHBOARD_ADMIN_PASSWORD", ""),
+    )?;
     env_lines.push(format!("DASHBOARD_PORT={}", dashboard_port));
     env_lines.push(format!("DASHBOARD_ADMIN_PASSWORD={}", admin_password));
     println!();
@@ -122,7 +160,9 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
         if re_encrypt {
             prompt_password_with_existing("Set MASTER_KEY password", "")?
         } else {
-            let pw = rpassword::prompt_password("Enter existing MASTER_KEY (required to save secrets): ")?;
+            let pw = rpassword::prompt_password(
+                "Enter existing MASTER_KEY (required to save secrets): ",
+            )?;
             pw
         }
     } else {
@@ -133,7 +173,10 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
 
     // Data directory
     println!("--- Data Storage ---");
-    let data_dir = prompt_with_default("Data Directory", &get_existing(&existing, "DATA_DIR", "./data"));
+    let data_dir = prompt_with_default(
+        "Data Directory",
+        &get_existing(&existing, "DATA_DIR", "./data"),
+    );
     env_lines.push(format!("DATA_DIR={}", data_dir));
     println!();
 
@@ -146,8 +189,13 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
 
     // Voice (optional)
     println!("--- Voice (Optional) ---");
-    let has_voice = existing.contains_key("VOICE_STT_TYPE") || existing.contains_key("VOICE_TTS_TYPE");
-    let voice_label = if has_voice { "Update voice config?" } else { "Setup Voice?" };
+    let has_voice =
+        existing.contains_key("VOICE_STT_TYPE") || existing.contains_key("VOICE_TTS_TYPE");
+    let voice_label = if has_voice {
+        "Update voice config?"
+    } else {
+        "Setup Voice?"
+    };
     let setup_voice = prompt_yes_no(voice_label, has_voice)?;
 
     if setup_voice {
@@ -171,13 +219,22 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
         env_lines.push(format!("VOICE_STT_TYPE={}", stt_type));
 
         if stt_type == "vosk" {
-            let model_path = prompt_with_default("Vosk Model Path", &get_existing(&existing, "VOSK_MODEL_PATH", "./models/vosk-model-small-de"));
+            let model_path = prompt_with_default(
+                "Vosk Model Path",
+                &get_existing(&existing, "VOSK_MODEL_PATH", "./models/vosk-model-small-de"),
+            );
             env_lines.push(format!("VOSK_MODEL_PATH={}", model_path));
         } else if stt_type == "whisper" {
-            let model_path = prompt_with_default("Whisper Model Path", &get_existing(&existing, "WHISPER_MODEL_PATH", "./models/ggml-tiny.en.bin"));
+            let model_path = prompt_with_default(
+                "Whisper Model Path",
+                &get_existing(&existing, "WHISPER_MODEL_PATH", "./models/ggml-tiny.en.bin"),
+            );
             env_lines.push(format!("WHISPER_MODEL_PATH={}", model_path));
         } else if stt_type == "elevenlabs" {
-            let api_key = prompt_required_with_existing("ElevenLabs API Key", &get_existing(&existing, "ELEVENLABS_API_KEY", ""));
+            let api_key = prompt_required_with_existing(
+                "ElevenLabs API Key",
+                &get_existing(&existing, "ELEVENLABS_API_KEY", ""),
+            );
             env_lines.push(format!("ELEVENLABS_API_KEY={}", api_key));
         }
 
@@ -202,19 +259,39 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
         env_lines.push(format!("VOICE_TTS_TYPE={}", tts_type));
 
         if tts_type == "elevenlabs" {
-            if !env_lines.iter().any(|l| l.starts_with("ELEVENLABS_API_KEY=")) {
-                let api_key = prompt_required_with_existing("ElevenLabs API Key", &get_existing(&existing, "ELEVENLABS_API_KEY", ""));
+            if !env_lines
+                .iter()
+                .any(|l| l.starts_with("ELEVENLABS_API_KEY="))
+            {
+                let api_key = prompt_required_with_existing(
+                    "ElevenLabs API Key",
+                    &get_existing(&existing, "ELEVENLABS_API_KEY", ""),
+                );
                 env_lines.push(format!("ELEVENLABS_API_KEY={}", api_key));
             }
-            let voice_id = prompt_with_default("ElevenLabs Voice ID", &get_existing(&existing, "ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"));
+            let voice_id = prompt_with_default(
+                "ElevenLabs Voice ID",
+                &get_existing(&existing, "ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
+            );
             env_lines.push(format!("ELEVENLABS_VOICE_ID={}", voice_id));
         } else if tts_type == "qwen_tts" {
-            let server = prompt_with_default("Qwen TTS Server URL", &get_existing(&existing, "QWEN_TTS_SERVER", "http://localhost:8001"));
+            let server = prompt_with_default(
+                "Qwen TTS Server URL",
+                &get_existing(&existing, "QWEN_TTS_SERVER", "http://localhost:8001"),
+            );
             env_lines.push(format!("QWEN_TTS_SERVER={}", server));
         }
     } else {
         // Keep existing voice config
-        for key in &["VOICE_STT_TYPE", "VOICE_TTS_TYPE", "VOSK_MODEL_PATH", "WHISPER_MODEL_PATH", "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "QWEN_TTS_SERVER"] {
+        for key in &[
+            "VOICE_STT_TYPE",
+            "VOICE_TTS_TYPE",
+            "VOSK_MODEL_PATH",
+            "WHISPER_MODEL_PATH",
+            "ELEVENLABS_API_KEY",
+            "ELEVENLABS_VOICE_ID",
+            "QWEN_TTS_SERVER",
+        ] {
             if let Some(val) = existing.get(*key) {
                 env_lines.push(format!("{}={}", key, val));
             }
@@ -315,7 +392,9 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     std::fs::create_dir_all("skills")?;
     std::fs::create_dir_all("plugins")?;
     std::fs::create_dir_all("static")?;
-    println!("Created directories: templates/, contextlanguage/, data/, skills/, plugins/, static/");
+    println!(
+        "Created directories: templates/, contextlanguage/, data/, skills/, plugins/, static/"
+    );
 
     // Create static dashboard files
     std::fs::write("static/index.html", include_str!("../static/index.html"))?;
@@ -337,7 +416,8 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     }
 
     // Create database
-    let data_dir = env_lines.iter()
+    let data_dir = env_lines
+        .iter()
         .find(|l| l.starts_with("DATA_DIR="))
         .map(|l| l.strip_prefix("DATA_DIR=").unwrap_or("./data"))
         .unwrap_or("./data");
@@ -346,24 +426,42 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
 
     // Save all secrets to encrypted storage (enc2)
     let secrets = crate::db::secrets::Secrets {
-        discord_bot_token: env_lines.iter()
+        discord_bot_token: env_lines
+            .iter()
             .find(|l| l.starts_with("DISCORD_BOT_TOKEN="))
-            .map(|l| l.strip_prefix("DISCORD_BOT_TOKEN=").unwrap_or("").to_string()),
-        openai_api_key: env_lines.iter()
+            .map(|l| {
+                l.strip_prefix("DISCORD_BOT_TOKEN=")
+                    .unwrap_or("")
+                    .to_string()
+            }),
+        openai_api_key: env_lines
+            .iter()
             .find(|l| l.starts_with("OPENAI_API_KEY="))
             .map(|l| l.strip_prefix("OPENAI_API_KEY=").unwrap_or("").to_string()),
-        anthropic_api_key: env_lines.iter()
+        anthropic_api_key: env_lines
+            .iter()
             .find(|l| l.starts_with("ANTHROPIC_API_KEY="))
-            .map(|l| l.strip_prefix("ANTHROPIC_API_KEY=").unwrap_or("").to_string()),
-        minimax_api_key: env_lines.iter()
+            .map(|l| {
+                l.strip_prefix("ANTHROPIC_API_KEY=")
+                    .unwrap_or("")
+                    .to_string()
+            }),
+        minimax_api_key: env_lines
+            .iter()
             .find(|l| l.starts_with("MINIMAX_API_KEY="))
             .map(|l| l.strip_prefix("MINIMAX_API_KEY=").unwrap_or("").to_string()),
-        mimo_api_key: env_lines.iter()
+        mimo_api_key: env_lines
+            .iter()
             .find(|l| l.starts_with("MIMO_API_KEY="))
             .map(|l| l.strip_prefix("MIMO_API_KEY=").unwrap_or("").to_string()),
-        elevenlabs_api_key: env_lines.iter()
+        elevenlabs_api_key: env_lines
+            .iter()
             .find(|l| l.starts_with("ELEVENLABS_API_KEY="))
-            .map(|l| l.strip_prefix("ELEVENLABS_API_KEY=").unwrap_or("").to_string()),
+            .map(|l| {
+                l.strip_prefix("ELEVENLABS_API_KEY=")
+                    .unwrap_or("")
+                    .to_string()
+            }),
         gateway_api_key: Some(gateway_api_key.clone()),
         dashboard_admin_password: Some(admin_password.clone()),
         ..Default::default()
@@ -374,7 +472,8 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     // Remove sensitive values from .env since they are now in enc2
     let env_path = ".env";
     let env_content = std::fs::read_to_string(env_path)?;
-    let filtered: String = env_content.lines()
+    let filtered: String = env_content
+        .lines()
         .filter(|line| {
             !line.starts_with("OPENAI_API_KEY=")
                 && !line.starts_with("ANTHROPIC_API_KEY=")
@@ -564,48 +663,100 @@ fn load_existing_env() -> std::collections::HashMap<String, String> {
     map
 }
 
-fn get_existing(existing: &std::collections::HashMap<String, String>, key: &str, fallback: &str) -> String {
-    existing.get(key).cloned().unwrap_or_else(|| fallback.to_string())
+fn get_existing(
+    existing: &std::collections::HashMap<String, String>,
+    key: &str,
+    fallback: &str,
+) -> String {
+    existing
+        .get(key)
+        .cloned()
+        .unwrap_or_else(|| fallback.to_string())
 }
 
-fn select_provider(choice: &str, existing: &std::collections::HashMap<String, String>, env_lines: &mut Vec<String>) -> anyhow::Result<String> {
+fn select_provider(
+    choice: &str,
+    existing: &std::collections::HashMap<String, String>,
+    env_lines: &mut Vec<String>,
+) -> anyhow::Result<String> {
     match choice {
         "1" => {
-            let api_key = prompt_required_with_existing("OpenAI API Key", &get_existing(existing, "OPENAI_API_KEY", ""));
-            let model = prompt_with_default("OpenAI Model", &get_existing(existing, "OPENAI_MODEL", "gpt-4o"));
-            let base_url = prompt_with_default("OpenAI API Base URL", &get_existing(existing, "OPENAI_API_BASE", "https://api.openai.com/v1"));
+            let api_key = prompt_required_with_existing(
+                "OpenAI API Key",
+                &get_existing(existing, "OPENAI_API_KEY", ""),
+            );
+            let model = prompt_with_default(
+                "OpenAI Model",
+                &get_existing(existing, "OPENAI_MODEL", "gpt-4o"),
+            );
+            let base_url = prompt_with_default(
+                "OpenAI API Base URL",
+                &get_existing(existing, "OPENAI_API_BASE", "https://api.openai.com/v1"),
+            );
             env_lines.push(format!("OPENAI_API_KEY={}", api_key));
             env_lines.push(format!("OPENAI_MODEL={}", model));
             env_lines.push(format!("OPENAI_API_BASE={}", base_url));
             Ok("openai".to_string())
         }
         "2" => {
-            let api_key = prompt_required_with_existing("Anthropic API Key", &get_existing(existing, "ANTHROPIC_API_KEY", ""));
-            let model = prompt_with_default("Anthropic Model", &get_existing(existing, "ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"));
-            let base_url = prompt_with_default("Anthropic API Base URL", &get_existing(existing, "ANTHROPIC_API_BASE", "https://api.anthropic.com"));
+            let api_key = prompt_required_with_existing(
+                "Anthropic API Key",
+                &get_existing(existing, "ANTHROPIC_API_KEY", ""),
+            );
+            let model = prompt_with_default(
+                "Anthropic Model",
+                &get_existing(existing, "ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
+            );
+            let base_url = prompt_with_default(
+                "Anthropic API Base URL",
+                &get_existing(existing, "ANTHROPIC_API_BASE", "https://api.anthropic.com"),
+            );
             env_lines.push(format!("ANTHROPIC_API_KEY={}", api_key));
             env_lines.push(format!("ANTHROPIC_MODEL={}", model));
             env_lines.push(format!("ANTHROPIC_API_BASE={}", base_url));
             Ok("anthropic".to_string())
         }
         "3" => {
-            let base_url = prompt_with_default("Ollama API Base URL", &get_existing(existing, "OLLAMA_API_BASE", "http://localhost:11434"));
-            let model = prompt_with_default("Ollama Model", &get_existing(existing, "OLLAMA_MODEL", "llama3"));
+            let base_url = prompt_with_default(
+                "Ollama API Base URL",
+                &get_existing(existing, "OLLAMA_API_BASE", "http://localhost:11434"),
+            );
+            let model = prompt_with_default(
+                "Ollama Model",
+                &get_existing(existing, "OLLAMA_MODEL", "llama3"),
+            );
             env_lines.push(format!("OLLAMA_API_BASE={}", base_url));
             env_lines.push(format!("OLLAMA_MODEL={}", model));
             Ok("ollama".to_string())
         }
         "4" => {
-            let api_key = prompt_required_with_existing("MiniMax API Key", &get_existing(existing, "MINIMAX_API_KEY", ""));
-            let model = prompt_with_default("MiniMax Model", &get_existing(existing, "MINIMAX_MODEL", "MiniMax-Text-01"));
-            let base_url = prompt_with_default("MiniMax API Base URL", &get_existing(existing, "MINIMAX_API_BASE", "https://api.minimax.chat/v1"));
+            let api_key = prompt_required_with_existing(
+                "MiniMax API Key",
+                &get_existing(existing, "MINIMAX_API_KEY", ""),
+            );
+            let model = prompt_with_default(
+                "MiniMax Model",
+                &get_existing(existing, "MINIMAX_MODEL", "MiniMax-Text-01"),
+            );
+            let base_url = prompt_with_default(
+                "MiniMax API Base URL",
+                &get_existing(existing, "MINIMAX_API_BASE", "https://api.minimax.chat/v1"),
+            );
             let existing_mode = get_existing(existing, "MINIMAX_API_MODE", "openai");
             println!("  API compatibility mode:");
             println!("    1) OpenAI-compatible (default)");
             println!("    2) Anthropic-compatible");
-            let mode_default = if existing_mode == "anthropic" { "2" } else { "1" };
+            let mode_default = if existing_mode == "anthropic" {
+                "2"
+            } else {
+                "1"
+            };
             let api_mode = prompt_choice("Select API mode", &["1", "2"], mode_default)?;
-            let mode_str = if api_mode == "2" { "anthropic" } else { "openai" };
+            let mode_str = if api_mode == "2" {
+                "anthropic"
+            } else {
+                "openai"
+            };
             env_lines.push(format!("MINIMAX_API_KEY={}", api_key));
             env_lines.push(format!("MINIMAX_MODEL={}", model));
             env_lines.push(format!("MINIMAX_API_BASE={}", base_url));
@@ -613,16 +764,33 @@ fn select_provider(choice: &str, existing: &std::collections::HashMap<String, St
             Ok("minimax".to_string())
         }
         "5" => {
-            let api_key = prompt_required_with_existing("MiMo API Key", &get_existing(existing, "MIMO_API_KEY", ""));
-            let model = prompt_with_default("MiMo Model", &get_existing(existing, "MIMO_MODEL", "mimo-v2.5-pro"));
-            let base_url = prompt_with_default("MiMo API Base URL", &get_existing(existing, "MIMO_API_BASE", "https://api.xiaomimimo.com/v1"));
+            let api_key = prompt_required_with_existing(
+                "MiMo API Key",
+                &get_existing(existing, "MIMO_API_KEY", ""),
+            );
+            let model = prompt_with_default(
+                "MiMo Model",
+                &get_existing(existing, "MIMO_MODEL", "mimo-v2.5-pro"),
+            );
+            let base_url = prompt_with_default(
+                "MiMo API Base URL",
+                &get_existing(existing, "MIMO_API_BASE", "https://api.xiaomimimo.com/v1"),
+            );
             let existing_mode = get_existing(existing, "MIMO_API_MODE", "openai");
             println!("  API compatibility mode:");
             println!("    1) OpenAI-compatible (default)");
             println!("    2) Anthropic-compatible");
-            let mode_default = if existing_mode == "anthropic" { "2" } else { "1" };
+            let mode_default = if existing_mode == "anthropic" {
+                "2"
+            } else {
+                "1"
+            };
             let api_mode = prompt_choice("Select API mode", &["1", "2"], mode_default)?;
-            let mode_str = if api_mode == "2" { "anthropic" } else { "openai" };
+            let mode_str = if api_mode == "2" {
+                "anthropic"
+            } else {
+                "openai"
+            };
             env_lines.push(format!("MIMO_API_KEY={}", api_key));
             env_lines.push(format!("MIMO_MODEL={}", model));
             env_lines.push(format!("MIMO_API_BASE={}", base_url));

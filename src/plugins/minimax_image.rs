@@ -1,4 +1,4 @@
-use super::{Plugin, PluginTool, PluginHandler};
+use super::{Plugin, PluginHandler, PluginTool};
 use serde::{Deserialize, Serialize};
 
 pub fn create_plugin() -> Plugin {
@@ -34,7 +34,8 @@ pub fn create_plugin() -> Plugin {
             },
             PluginTool {
                 name: "image_analyze".to_string(),
-                description: "Analyze an image and describe its contents using MiniMax vision".to_string(),
+                description: "Analyze an image and describe its contents using MiniMax vision"
+                    .to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -126,10 +127,11 @@ pub async fn execute_builtin(name: &str, args: &serde_json::Value) -> anyhow::Re
 }
 
 async fn generate_image(args: &serde_json::Value) -> anyhow::Result<String> {
-    let api_key = std::env::var("MINIMAX_API_KEY")
-        .map_err(|_| anyhow::anyhow!("MINIMAX_API_KEY not set"))?;
+    let api_key =
+        std::env::var("MINIMAX_API_KEY").map_err(|_| anyhow::anyhow!("MINIMAX_API_KEY not set"))?;
 
-    let prompt = args["prompt"].as_str()
+    let prompt = args["prompt"]
+        .as_str()
         .ok_or_else(|| anyhow::anyhow!("prompt is required"))?;
     let width = args["width"].as_u64().unwrap_or(1024) as u32;
     let height = args["height"].as_u64().unwrap_or(1024) as u32;
@@ -144,7 +146,8 @@ async fn generate_image(args: &serde_json::Value) -> anyhow::Result<String> {
         "height": height,
     });
 
-    let resp = client.post(url)
+    let resp = client
+        .post(url)
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&request)
         .send()
@@ -159,10 +162,14 @@ async fn generate_image(args: &serde_json::Value) -> anyhow::Result<String> {
     let data: serde_json::Value = resp.json().await?;
 
     if let Some(err) = data.get("error") {
-        anyhow::bail!("MiniMax error: {}", err["message"].as_str().unwrap_or("unknown"));
+        anyhow::bail!(
+            "MiniMax error: {}",
+            err["message"].as_str().unwrap_or("unknown")
+        );
     }
 
-    let image_data = data["data"].as_array()
+    let image_data = data["data"]
+        .as_array()
         .and_then(|arr| arr.first())
         .ok_or_else(|| anyhow::anyhow!("No image data in response"))?;
 
@@ -181,12 +188,14 @@ async fn generate_image(args: &serde_json::Value) -> anyhow::Result<String> {
 }
 
 async fn analyze_image(args: &serde_json::Value) -> anyhow::Result<String> {
-    let api_key = std::env::var("MINIMAX_API_KEY")
-        .map_err(|_| anyhow::anyhow!("MINIMAX_API_KEY not set"))?;
+    let api_key =
+        std::env::var("MINIMAX_API_KEY").map_err(|_| anyhow::anyhow!("MINIMAX_API_KEY not set"))?;
 
-    let image_url = args["image_url"].as_str()
+    let image_url = args["image_url"]
+        .as_str()
         .ok_or_else(|| anyhow::anyhow!("image_url is required"))?;
-    let question = args["question"].as_str()
+    let question = args["question"]
+        .as_str()
         .unwrap_or("Describe this image in detail");
 
     let client = reqwest::Client::new();
@@ -203,7 +212,8 @@ async fn analyze_image(args: &serde_json::Value) -> anyhow::Result<String> {
         }]
     });
 
-    let resp = client.post(url)
+    let resp = client
+        .post(url)
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&request)
         .send()

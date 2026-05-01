@@ -66,14 +66,14 @@ impl Config {
             minimax_api_base: env::var("MINIMAX_API_BASE")
                 .unwrap_or_else(|_| "https://api.minimax.chat/v1".to_string()),
             minimax_api_mode: ApiMode::from_str(
-                &env::var("MINIMAX_API_MODE").unwrap_or_else(|_| "openai".to_string())
+                &env::var("MINIMAX_API_MODE").unwrap_or_else(|_| "openai".to_string()),
             ),
             mimo_api_key: env::var("MIMO_API_KEY").ok(),
             mimo_model: env::var("MIMO_MODEL").unwrap_or_else(|_| "mimo".to_string()),
             mimo_api_base: env::var("MIMO_API_BASE")
                 .unwrap_or_else(|_| "https://api.mimo.com/v1".to_string()),
             mimo_api_mode: ApiMode::from_str(
-                &env::var("MIMO_API_MODE").unwrap_or_else(|_| "openai".to_string())
+                &env::var("MIMO_API_MODE").unwrap_or_else(|_| "openai".to_string()),
             ),
             gateway_port: env::var("GATEWAY_PORT")
                 .unwrap_or_else(|_| "3537".to_string())

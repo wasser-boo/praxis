@@ -30,12 +30,24 @@ pub fn matches_wake_word(text: &str, wake_words: &[String]) -> WakeWordMatch {
     let text_lower = text.to_lowercase();
     for word in wake_words {
         if text_lower.contains(&word.to_lowercase()) {
-            let remaining = text_lower.replace(&word.to_lowercase(), "").trim().to_string();
-            tracing::info!("WAKE_WORD: Matched wake word '{}' in '{}', remaining: '{}'", word, text, remaining);
+            let remaining = text_lower
+                .replace(&word.to_lowercase(), "")
+                .trim()
+                .to_string();
+            tracing::info!(
+                "WAKE_WORD: Matched wake word '{}' in '{}', remaining: '{}'",
+                word,
+                text,
+                remaining
+            );
             return WakeWordMatch {
                 matched: true,
                 wake_word: Some(word.clone()),
-                remaining_text: if remaining.is_empty() { text.to_string() } else { remaining },
+                remaining_text: if remaining.is_empty() {
+                    text.to_string()
+                } else {
+                    remaining
+                },
             };
         }
     }

@@ -169,8 +169,9 @@ pub async fn handle_pair_command(
             command
                 .edit_response(
                     &ctx.http,
-                    serenity::builder::EditInteractionResponse::default()
-                        .content("Could not send DM. Please enable DMs from server members and try again."),
+                    serenity::builder::EditInteractionResponse::default().content(
+                        "Could not send DM. Please enable DMs from server members and try again.",
+                    ),
                 )
                 .await
                 .ok();

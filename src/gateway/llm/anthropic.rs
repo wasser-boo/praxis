@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use super::provider::*;
+use async_trait::async_trait;
 
 pub struct AnthropicProvider {
     api_key: String,
@@ -91,7 +91,8 @@ pub fn build_anthropic_messages(messages: &[ChatMessage]) -> (String, Vec<serde_
                     }
                 }
                 for tc in tool_calls {
-                    let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                    let args: serde_json::Value =
+                        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
                     blocks.push(serde_json::json!({
                         "type": "tool_use",
                         "id": tc.id,
@@ -113,13 +114,16 @@ pub fn build_anthropic_messages(messages: &[ChatMessage]) -> (String, Vec<serde_
 }
 
 pub fn build_anthropic_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
-    tools.iter().map(|t| {
-        serde_json::json!({
-            "name": t.function.name,
-            "description": t.function.description,
-            "input_schema": t.function.parameters
+    tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.function.name,
+                "description": t.function.description,
+                "input_schema": t.function.parameters
+            })
         })
-    }).collect()
+        .collect()
 }
 
 pub fn parse_anthropic_response(data: &serde_json::Value) -> anyhow::Result<ChatResponse> {
@@ -131,7 +135,9 @@ pub fn parse_anthropic_response(data: &serde_json::Value) -> anyhow::Result<Chat
             match block["type"].as_str() {
                 Some("text") => {
                     if let Some(text) = block["text"].as_str() {
-                        if !text_content.is_empty() { text_content.push('\n'); }
+                        if !text_content.is_empty() {
+                            text_content.push('\n');
+                        }
                         text_content.push_str(text);
                     }
                 }
@@ -149,8 +155,16 @@ pub fn parse_anthropic_response(data: &serde_json::Value) -> anyhow::Result<Chat
         }
     }
 
-    let content = if text_content.is_empty() { None } else { Some(text_content) };
-    let tool_calls = if tool_calls.is_empty() { None } else { Some(tool_calls) };
+    let content = if text_content.is_empty() {
+        None
+    } else {
+        Some(text_content)
+    };
+    let tool_calls = if tool_calls.is_empty() {
+        None
+    } else {
+        Some(tool_calls)
+    };
 
     Ok(ChatResponse {
         content,

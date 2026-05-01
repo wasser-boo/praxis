@@ -1,9 +1,9 @@
+use crate::gateway::GatewayState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use crate::gateway::GatewayState;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -35,10 +35,7 @@ enum WsOutgoing {
     VoiceInputStarted { user_id: String },
 }
 
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<GatewayState>,
-) -> Response {
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<GatewayState>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
@@ -65,26 +62,45 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                         let err = WsOutgoing::Error {
                             message: format!("Invalid message format: {}", e),
                         };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&err).unwrap())).await;
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&err).unwrap()))
+                            .await;
                         continue;
                     }
                 };
 
                 match incoming {
-                    WsIncoming::Message { user_id, content, channel_id } => {
+                    WsIncoming::Message {
+                        user_id,
+                        content,
+                        channel_id,
+                    } => {
                         let feedback = WsOutgoing::Feedback {
                             user_id: user_id.clone(),
                             content: "Thinking...".to_string(),
                         };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&feedback).unwrap())).await;
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&feedback).unwrap()))
+                            .await;
 
-                        match crate::gateway::message_handler::handle_message(&state, &user_id, &content, channel_id.as_deref()).await {
+                        match crate::gateway::message_handler::handle_message(
+                            &state,
+                            &user_id,
+                            &content,
+                            channel_id.as_deref(),
+                        )
+                        .await
+                        {
                             Ok(reply) => {
                                 let response = WsOutgoing::Response {
                                     user_id,
                                     content: reply,
                                 };
-                                if sender.send(Message::Text(serde_json::to_string(&response).unwrap())).await.is_err() {
+                                if sender
+                                    .send(Message::Text(serde_json::to_string(&response).unwrap()))
+                                    .await
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }
@@ -93,13 +109,17 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                                 let err = WsOutgoing::Error {
                                     message: format!("Error: {}", e),
                                 };
-                                let _ = sender.send(Message::Text(serde_json::to_string(&err).unwrap())).await;
+                                let _ = sender
+                                    .send(Message::Text(serde_json::to_string(&err).unwrap()))
+                                    .await;
                             }
                         }
                     }
                     WsIncoming::Ping => {
                         let pong = WsOutgoing::Pong;
-                        let _ = sender.send(Message::Text(serde_json::to_string(&pong).unwrap())).await;
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&pong).unwrap()))
+                            .await;
                     }
                 }
             }

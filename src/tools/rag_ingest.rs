@@ -56,7 +56,7 @@ pub async fn list_documents(
     let conn = db.conn();
     let mut stmt = conn.prepare(
         "SELECT id, filename, file_type, file_size, chunk_count, status, created_at 
-         FROM documents WHERE user_id = ?1 ORDER BY created_at DESC"
+         FROM documents WHERE user_id = ?1 ORDER BY created_at DESC",
     )?;
 
     let docs = stmt
@@ -112,9 +112,15 @@ mod rag_tests {
     #[tokio::test]
     async fn test_rag_ingest() {
         let (db, _dir) = test_db();
-        let doc_id = rag_ingest(&db, "user1", "test.txt", "Hello world this is a test", "txt")
-            .await
-            .unwrap();
+        let doc_id = rag_ingest(
+            &db,
+            "user1",
+            "test.txt",
+            "Hello world this is a test",
+            "txt",
+        )
+        .await
+        .unwrap();
         assert!(!doc_id.is_empty());
 
         let docs = list_documents(&db, "user1").await.unwrap();
@@ -125,9 +131,15 @@ mod rag_tests {
     #[tokio::test]
     async fn test_rag_query() {
         let (db, _dir) = test_db();
-        rag_ingest(&db, "user1", "test.txt", "Rust is a systems programming language", "txt")
-            .await
-            .unwrap();
+        rag_ingest(
+            &db,
+            "user1",
+            "test.txt",
+            "Rust is a systems programming language",
+            "txt",
+        )
+        .await
+        .unwrap();
 
         let results = crate::tools::rag_query::rag_query(&db, "user1", "Rust", 10)
             .await

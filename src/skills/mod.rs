@@ -56,20 +56,21 @@ impl SkillRegistry {
 
     /// Return skills as JSON array for POML context
     pub fn to_context_array(&self) -> serde_json::Value {
-        let skills: Vec<serde_json::Value> = self.skills.values().map(|s| {
-            serde_json::json!({
-                "name": s.name,
-                "description": s.description
+        let skills: Vec<serde_json::Value> = self
+            .skills
+            .values()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "description": s.description
+                })
             })
-        }).collect();
+            .collect();
         serde_json::json!(skills)
     }
 }
 
-pub async fn execute_skill(
-    skill: &Skill,
-    context: &serde_json::Value,
-) -> anyhow::Result<String> {
+pub async fn execute_skill(skill: &Skill, context: &serde_json::Value) -> anyhow::Result<String> {
     let poml_path = format!("{}/skill.poml", skill.folder);
     tracing::info!("Executing skill: {} from {}", skill.name, poml_path);
     crate::gateway::poml::render(&poml_path, context).await
@@ -89,8 +90,8 @@ pub async fn execute_skill_by_name(
 #[cfg(test)]
 mod skill_tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     fn create_test_skill(dir: &Path, name: &str) {
         let skill_dir = dir.join(name);
@@ -98,11 +99,13 @@ mod skill_tests {
         fs::write(
             skill_dir.join("skill.json"),
             format!(r#"{{"name": "{}", "description": "Test skill"}}"#, name),
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(
             skill_dir.join("skill.poml"),
             "<poml><p>Hello {{name}}</p></poml>",
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]
@@ -119,7 +122,11 @@ mod skill_tests {
         let dir = TempDir::new().unwrap();
         let skill_dir = dir.path().join("bad");
         fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("skill.json"), r#"{"name":"bad","description":"x"}"#).unwrap();
+        fs::write(
+            skill_dir.join("skill.json"),
+            r#"{"name":"bad","description":"x"}"#,
+        )
+        .unwrap();
         let mut registry = SkillRegistry::new();
         registry.load_from_dir(dir.path()).unwrap();
         assert!(registry.get("bad").is_none());

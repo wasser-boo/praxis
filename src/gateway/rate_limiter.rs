@@ -1,4 +1,4 @@
-use governor::{Quota, RateLimiter, state::keyed::DefaultKeyedStateStore, clock::DefaultClock};
+use governor::{clock::DefaultClock, state::keyed::DefaultKeyedStateStore, Quota, RateLimiter};
 use std::num::NonZeroU32;
 
 pub struct UserRateLimiter {

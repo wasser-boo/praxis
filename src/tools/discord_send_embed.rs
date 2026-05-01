@@ -54,10 +54,7 @@ pub fn parse_fields(value: &serde_json::Value) -> Vec<EmbedField> {
                 Some(EmbedField {
                     name: obj.get("name")?.as_str()?.to_string(),
                     value: obj.get("value")?.as_str()?.to_string(),
-                    inline: obj
-                        .get("inline")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
+                    inline: obj.get("inline").and_then(|v| v.as_bool()).unwrap_or(false),
                 })
             })
             .collect(),
@@ -72,16 +69,41 @@ mod tool_tests {
     #[tokio::test]
     async fn test_send_embed_basic() {
         let _tx = crate::event_channel::init();
-        let result = send_embed("user1", "123456", Some("Title"), Some("Desc"), None, None, None, None, None, None, vec![])
-            .await
-            .unwrap();
+        let result = send_embed(
+            "user1",
+            "123456",
+            Some("Title"),
+            Some("Desc"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .await
+        .unwrap();
         assert!(result.contains("123456"));
     }
 
     #[tokio::test]
     async fn test_send_embed_no_channel() {
         let _tx = crate::event_channel::init();
-        let result = send_embed("user1", "", Some("Title"), None, None, None, None, None, None, None, vec![]).await;
+        let result = send_embed(
+            "user1",
+            "",
+            Some("Title"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .await;
         assert!(result.is_err());
     }
 

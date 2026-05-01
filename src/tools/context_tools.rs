@@ -1,4 +1,9 @@
-pub fn set_context_value(db: &crate::db::Database, user_id: &str, key: &str, value: &str) -> anyhow::Result<()> {
+pub fn set_context_value(
+    db: &crate::db::Database,
+    user_id: &str,
+    key: &str,
+    value: &str,
+) -> anyhow::Result<()> {
     let mut ctx = db.load_context(user_id)?;
 
     match key {
@@ -11,7 +16,9 @@ pub fn set_context_value(db: &crate::db::Database, user_id: &str, key: &str, val
         "use_tts" => ctx.settings.use_tts = value.parse().unwrap_or(false),
         "voice_muted" => ctx.settings.voice_muted = value.parse().unwrap_or(false),
         "voice_deafened" => ctx.settings.voice_deafened = value.parse().unwrap_or(true),
-        "voice_auto_pause_enabled" => ctx.settings.voice_auto_pause_enabled = value.parse().unwrap_or(false),
+        "voice_auto_pause_enabled" => {
+            ctx.settings.voice_auto_pause_enabled = value.parse().unwrap_or(false)
+        }
         "max_llm_turns" => ctx.settings.max_llm_turns = value.parse().ok(),
         "max_tool_calls" => ctx.settings.max_tool_calls = value.parse().ok(),
         _ => {
@@ -19,7 +26,10 @@ pub fn set_context_value(db: &crate::db::Database, user_id: &str, key: &str, val
                 ctx.custom_data = serde_json::json!({});
             }
             if let Some(obj) = ctx.custom_data.as_object_mut() {
-                obj.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+                obj.insert(
+                    key.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
             }
         }
     }
@@ -28,7 +38,11 @@ pub fn set_context_value(db: &crate::db::Database, user_id: &str, key: &str, val
     Ok(())
 }
 
-pub fn delete_context_value(db: &crate::db::Database, user_id: &str, key: &str) -> anyhow::Result<()> {
+pub fn delete_context_value(
+    db: &crate::db::Database,
+    user_id: &str,
+    key: &str,
+) -> anyhow::Result<()> {
     let mut ctx = db.load_context(user_id)?;
 
     match key {

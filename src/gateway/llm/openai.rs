@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use super::provider::*;
+use async_trait::async_trait;
 
 pub struct OpenAIProvider {
     api_key: String,
@@ -73,9 +73,7 @@ impl LLMProvider for OpenAIProvider {
         Ok(ChatResponse {
             content,
             tool_calls,
-            finish_reason: choice["finish_reason"]
-                .as_str()
-                .map(|s| s.to_string()),
+            finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),
             usage: data["usage"].as_object().map(|u| Usage {
                 prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
                 completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,

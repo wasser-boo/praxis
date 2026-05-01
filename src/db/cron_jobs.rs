@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::Database;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronJob {
@@ -95,7 +95,7 @@ impl Database {
             "SELECT id, name, description, schedule, timezone, user_id, channel_id, 
              template, prompt, context_overrides, enabled, trigger_type, webhook_secret, 
              event_type, last_run, next_run, run_count, last_error 
-             FROM cron_jobs WHERE user_id = ?1 ORDER BY name"
+             FROM cron_jobs WHERE user_id = ?1 ORDER BY name",
         )?;
 
         let jobs = stmt
@@ -126,7 +126,12 @@ impl Database {
         Ok(jobs)
     }
 
-    pub fn update_cron_job_run(&self, id: &str, success: bool, error: Option<&str>) -> anyhow::Result<()> {
+    pub fn update_cron_job_run(
+        &self,
+        id: &str,
+        success: bool,
+        error: Option<&str>,
+    ) -> anyhow::Result<()> {
         let conn = self.conn();
         if success {
             conn.execute(
@@ -247,7 +252,8 @@ mod cron_tests {
     fn test_update_cron_job_run_with_error() {
         let (db, _dir) = test_db();
         db.create_cron_job(&test_job("j1")).unwrap();
-        db.update_cron_job_run("j1", false, Some("timeout")).unwrap();
+        db.update_cron_job_run("j1", false, Some("timeout"))
+            .unwrap();
         let job = db.get_cron_job("j1").unwrap().unwrap();
         assert_eq!(job.run_count, 1);
         assert_eq!(job.last_error, Some("timeout".to_string()));

@@ -82,8 +82,7 @@ async fn run() -> anyhow::Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stdout);
+    let stdout_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
 
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(file_writer)
@@ -98,7 +97,11 @@ async fn run() -> anyhow::Result<()> {
         .init();
 
     match cli {
-        Cli::Run { password, no_discord, no_dashboard } => run_services(password, !no_discord, !no_dashboard).await,
+        Cli::Run {
+            password,
+            no_discord,
+            no_dashboard,
+        } => run_services(password, !no_discord, !no_dashboard).await,
         Cli::Pair { code } => pair_command(&code).await,
         Cli::Onboard { interactive: true } => praxis::onboard::run_interactive_onboard(),
         Cli::Onboard { interactive: false } => {
@@ -108,12 +111,17 @@ async fn run() -> anyhow::Result<()> {
     }
 }
 
-async fn run_services(cli_password: Option<String>, enable_discord: bool, enable_dashboard: bool) -> anyhow::Result<()> {
+async fn run_services(
+    cli_password: Option<String>,
+    enable_discord: bool,
+    enable_dashboard: bool,
+) -> anyhow::Result<()> {
     // Check if we need master key for encrypted secrets
     let master_password = if praxis::db::secrets::has_secrets() {
         let stored_hash = std::env::var("PRAXIS_MASTER_KEY_HASH").ok();
 
-        let password = if let Some(pass) = cli_password.or_else(|| std::env::var("MASTER_KEY").ok()) {
+        let password = if let Some(pass) = cli_password.or_else(|| std::env::var("MASTER_KEY").ok())
+        {
             pass
         } else {
             rpassword::prompt_password("Enter MASTER_KEY to unlock secrets: ")
@@ -137,8 +145,7 @@ async fn run_services(cli_password: Option<String>, enable_discord: bool, enable
         None
     };
 
-    let data_dir = std::env::var("DATA_DIR")
-        .unwrap_or_else(|_| "./data".to_string());
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
     let db = praxis::db::Database::new(Path::new(&data_dir))?;
 
     tracing::info!("Starting Praxis v{}...", env!("CARGO_PKG_VERSION"));
@@ -356,7 +363,11 @@ mod tests {
         let args = vec!["praxis", "run", "--no-discord", "--no-dashboard"];
         let cli = Cli::try_parse_from(args).unwrap();
         match cli {
-            Cli::Run { no_discord, no_dashboard, .. } => {
+            Cli::Run {
+                no_discord,
+                no_dashboard,
+                ..
+            } => {
                 assert!(no_discord);
                 assert!(no_dashboard);
             }
@@ -458,4 +469,3 @@ mod tests {
         }
     }
 }
-

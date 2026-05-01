@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use super::provider::*;
 use crate::config::ApiMode;
+use async_trait::async_trait;
 
 pub struct MiMoProvider {
     api_key: String,
@@ -40,26 +40,30 @@ impl MiMoProvider {
     async fn chat_openai(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let url = format!("{}/chat/completions", self.base_url);
 
-        let messages: Vec<serde_json::Value> = request.messages.iter().map(|m| {
-            let mut msg = serde_json::json!({
-                "role": m.role,
-                "content": m.content.as_deref().unwrap_or("")
-            });
-            if let Some(ref tool_calls) = m.tool_calls {
-                let calls: Vec<serde_json::Value> = tool_calls.iter().map(|tc| {
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(|m| {
+                let mut msg = serde_json::json!({
+                    "role": m.role,
+                    "content": m.content.as_deref().unwrap_or("")
+                });
+                if let Some(ref tool_calls) = m.tool_calls {
+                    let calls: Vec<serde_json::Value> = tool_calls.iter().map(|tc| {
                     serde_json::json!({
                         "id": tc.id,
                         "type": "function",
                         "function": { "name": tc.function.name, "arguments": tc.function.arguments }
                     })
                 }).collect();
-                msg["tool_calls"] = serde_json::json!(calls);
-            }
-            if let Some(ref tcid) = m.tool_call_id {
-                msg["tool_call_id"] = serde_json::json!(tcid);
-            }
-            msg
-        }).collect();
+                    msg["tool_calls"] = serde_json::json!(calls);
+                }
+                if let Some(ref tcid) = m.tool_call_id {
+                    msg["tool_call_id"] = serde_json::json!(tcid);
+                }
+                msg
+            })
+            .collect();
 
         let mut body = serde_json::json!({
             "model": self.model,
@@ -70,10 +74,13 @@ impl MiMoProvider {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let resp = self.client.post(&url)
+        let resp = self
+            .client
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
-            .send().await?;
+            .send()
+            .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -103,7 +110,8 @@ impl MiMoProvider {
     async fn chat_anthropic(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let url = format!("{}/v1/messages", self.base_url);
 
-        let (system_prompt, messages) = super::anthropic::build_anthropic_messages(&request.messages);
+        let (system_prompt, messages) =
+            super::anthropic::build_anthropic_messages(&request.messages);
 
         let mut body = serde_json::json!({
             "model": self.model,
@@ -119,11 +127,14 @@ impl MiMoProvider {
             body["tools"] = serde_json::json!(super::anthropic::build_anthropic_tools(tools));
         }
 
-        let resp = self.client.post(&url)
+        let resp = self
+            .client
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .json(&body)
-            .send().await?;
+            .send()
+            .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -138,14 +149,20 @@ impl MiMoProvider {
 
 fn parse_openai_tool_calls(message: &serde_json::Value) -> Option<Vec<ToolCall>> {
     message["tool_calls"].as_array().map(|calls| {
-        calls.iter().filter_map(|tc| {
-            Some(ToolCall {
-                id: tc["id"].as_str().unwrap_or("call_0").to_string(),
-                function: FunctionCall {
-                    name: tc["function"]["name"].as_str()?.to_string(),
-                    arguments: tc["function"]["arguments"].as_str().unwrap_or("{}").to_string(),
-                },
+        calls
+            .iter()
+            .filter_map(|tc| {
+                Some(ToolCall {
+                    id: tc["id"].as_str().unwrap_or("call_0").to_string(),
+                    function: FunctionCall {
+                        name: tc["function"]["name"].as_str()?.to_string(),
+                        arguments: tc["function"]["arguments"]
+                            .as_str()
+                            .unwrap_or("{}")
+                            .to_string(),
+                    },
+                })
             })
-        }).collect()
+            .collect()
     })
 }

@@ -98,9 +98,8 @@ async fn rate_limit_middleware(
 
 async fn run_due_cron_jobs(db: &crate::db::Database) -> anyhow::Result<()> {
     let conn = db.conn();
-    let mut stmt = conn.prepare(
-        "SELECT id, name, user_id, template, prompt FROM cron_jobs WHERE enabled = 1"
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, user_id, template, prompt FROM cron_jobs WHERE enabled = 1")?;
 
     let jobs: Vec<(String, String, String, String, String)> = stmt
         .query_map([], |row| {

@@ -1,5 +1,5 @@
-use praxis::voice::tts;
 use praxis::voice;
+use praxis::voice::tts;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -112,7 +112,11 @@ async fn test_tts() -> anyhow::Result<()> {
     if let Ok(server) = std::env::var("QWEN_TTS_SERVER") {
         println!("Testing Qwen TTS...");
         let language = std::env::var("QWEN_TTS_LANGUAGE").unwrap_or_else(|_| "English".to_string());
-        let qwen = tts::qwen_tts::QwenTTSClient::new(server, language, std::env::var("QWEN_TTS_SPEAKER").ok());
+        let qwen = tts::qwen_tts::QwenTTSClient::new(
+            server,
+            language,
+            std::env::var("QWEN_TTS_SPEAKER").ok(),
+        );
         match qwen.speak(text).await {
             Ok(bytes) => {
                 println!("  Qwen: {} bytes", bytes.len());
@@ -143,8 +147,13 @@ async fn test_stt() -> anyhow::Result<()> {
         .collect();
 
     let wav_data = voice::pcm_to_wav(&samples, sample_rate, 1);
-    println!("Generated test WAV: {} bytes ({} samples, {}Hz, {:.1}s)",
-        wav_data.len(), samples.len(), sample_rate, duration_secs);
+    println!(
+        "Generated test WAV: {} bytes ({} samples, {}Hz, {:.1}s)",
+        wav_data.len(),
+        samples.len(),
+        sample_rate,
+        duration_secs
+    );
 
     // Test ElevenLabs STT
     if let Ok(api_key) = std::env::var("ELEVENLABS_API_KEY") {
@@ -204,24 +213,47 @@ async fn test_stt() -> anyhow::Result<()> {
 
     // Test the unified transcribe_audio function
     println!("\nTesting unified transcribe_audio...");
-    match voice::transcribe_audio(&wav_data, "elevenlabs", std::env::var("ELEVENLABS_API_KEY").ok().as_deref(), None).await {
+    match voice::transcribe_audio(
+        &wav_data,
+        "elevenlabs",
+        std::env::var("ELEVENLABS_API_KEY").ok().as_deref(),
+        None,
+    )
+    .await
+    {
         Ok(text) => println!("  transcribe_audio result: '{}'", text),
         Err(e) => println!("  transcribe_audio failed: {}", e),
     }
 
     // Test audio conversion utilities
     println!("\n=== Audio Utilities ===");
-    println!("pcm_to_wav: {} samples -> {} bytes WAV", samples.len(), wav_data.len());
-    println!("get_wav_sample_rate: {:?}", voice::get_wav_sample_rate(&wav_data));
+    println!(
+        "pcm_to_wav: {} samples -> {} bytes WAV",
+        samples.len(),
+        wav_data.len()
+    );
+    println!(
+        "get_wav_sample_rate: {:?}",
+        voice::get_wav_sample_rate(&wav_data)
+    );
 
     let downsampled = voice::downsample_48k_to_16k(&samples);
-    println!("downsample_48k_to_16k: {} -> {} samples", samples.len(), downsampled.len());
+    println!(
+        "downsample_48k_to_16k: {} -> {} samples",
+        samples.len(),
+        downsampled.len()
+    );
 
     let gated = voice::apply_noise_gate(&samples, 100);
     let non_zero_original = samples.iter().filter(|&&s| s != 0).count();
     let non_zero_gated = gated.iter().filter(|&&s| s != 0).count();
-    println!("apply_noise_gate: {}/{} -> {}/{} non-zero samples",
-        non_zero_original, samples.len(), non_zero_gated, gated.len());
+    println!(
+        "apply_noise_gate: {}/{} -> {}/{} non-zero samples",
+        non_zero_original,
+        samples.len(),
+        non_zero_gated,
+        gated.len()
+    );
 
     println!("\nSTT test complete.");
     Ok(())

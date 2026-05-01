@@ -22,21 +22,26 @@ pub async fn rag_query(
          FROM document_chunks 
          WHERE user_id = ?1 AND content LIKE ?2 
          ORDER BY chunk_index 
-         LIMIT ?3"
+         LIMIT ?3",
     )?;
 
     let query_pattern = format!("%{}%", query);
     let chunks = stmt
-        .query_map(rusqlite::params![user_id, query_pattern, limit as i64], |row| {
-            Ok(DocumentChunk {
-                id: row.get(0)?,
-                document_id: row.get(1)?,
-                chunk_index: row.get::<_, i64>(2)? as usize,
-                content: row.get(3)?,
-                metadata: row.get::<_, Option<String>>(4)?.and_then(|s| serde_json::from_str(&s).ok()),
-                token_count: row.get::<_, Option<i64>>(5)?.map(|v| v as usize),
-            })
-        })?
+        .query_map(
+            rusqlite::params![user_id, query_pattern, limit as i64],
+            |row| {
+                Ok(DocumentChunk {
+                    id: row.get(0)?,
+                    document_id: row.get(1)?,
+                    chunk_index: row.get::<_, i64>(2)? as usize,
+                    content: row.get(3)?,
+                    metadata: row
+                        .get::<_, Option<String>>(4)?
+                        .and_then(|s| serde_json::from_str(&s).ok()),
+                    token_count: row.get::<_, Option<i64>>(5)?.map(|v| v as usize),
+                })
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(chunks)

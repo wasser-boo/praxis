@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::Database;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Template {
@@ -52,7 +52,7 @@ impl Database {
     pub fn list_templates(&self) -> anyhow::Result<Vec<Template>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT name, content, description, is_system, updated_at FROM templates ORDER BY name"
+            "SELECT name, content, description, is_system, updated_at FROM templates ORDER BY name",
         )?;
 
         let templates = stmt
@@ -72,7 +72,10 @@ impl Database {
 
     pub fn delete_template(&self, name: &str) -> anyhow::Result<()> {
         let conn = self.conn();
-        conn.execute("DELETE FROM templates WHERE name = ?1", rusqlite::params![name])?;
+        conn.execute(
+            "DELETE FROM templates WHERE name = ?1",
+            rusqlite::params![name],
+        )?;
         Ok(())
     }
 }
@@ -91,7 +94,8 @@ mod db_tests {
     #[test]
     fn test_save_and_get_template() {
         let (db, _dir) = test_db();
-        db.save_template("test", "Hello {{name}}", Some("Test template"), false).unwrap();
+        db.save_template("test", "Hello {{name}}", Some("Test template"), false)
+            .unwrap();
         let tmpl = db.get_template("test").unwrap().unwrap();
         assert_eq!(tmpl.content, "Hello {{name}}");
         assert_eq!(tmpl.description, Some("Test template".to_string()));

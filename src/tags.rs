@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagAction {
@@ -59,9 +59,7 @@ pub fn parse_tags(response: &str) -> TagResult {
     let mut context_updates = HashMap::new();
     let mut cleaned = response.to_string();
 
-    let tag_regex = regex::Regex::new(
-        r#"§(\w+)(?:="([^"]*)")?(?::"([^"]*)")?"#
-    ).unwrap();
+    let tag_regex = regex::Regex::new(r#"§(\w+)(?:="([^"]*)")?(?::"([^"]*)")?"#).unwrap();
 
     let mut found_tags = Vec::new();
     for cap in tag_regex.captures_iter(response) {
@@ -77,7 +75,11 @@ pub fn parse_tags(response: &str) -> TagResult {
             (None, None) => None,
         };
 
-        found_tags.push((full_match.as_str().to_string(), tag_name.clone(), value.clone()));
+        found_tags.push((
+            full_match.as_str().to_string(),
+            tag_name.clone(),
+            value.clone(),
+        ));
 
         actions.push(TagAction {
             tag: tag_name.clone(),
@@ -162,10 +164,7 @@ pub fn parse_tags(response: &str) -> TagResult {
 }
 
 /// Execute tag actions and return execution result.
-pub fn execute_tags(
-    result: &TagResult,
-    ctx: &mut crate::db::contexts::Context,
-) -> TagExecution {
+pub fn execute_tags(result: &TagResult, ctx: &mut crate::db::contexts::Context) -> TagExecution {
     let mut execution = TagExecution::default();
 
     // Ensure custom_data is an object
@@ -239,7 +238,7 @@ pub fn execute_tags(
                                 if let Some((key, val)) = content.split_once('=') {
                                     execution.learned_preferences.insert(
                                         key.trim().to_string(),
-                                        serde_json::json!(val.trim())
+                                        serde_json::json!(val.trim()),
                                     );
                                     tracing::info!(key = %key.trim(), val = %val.trim(), "Tag §learn: learned preference");
                                 }
@@ -344,7 +343,10 @@ mod tag_tests {
     fn test_parse_path() {
         let result = parse_tags(r#"§path="/home/user/project""#);
         assert_eq!(result.actions[0].tag, "path");
-        assert_eq!(result.actions[0].value, Some("/home/user/project".to_string()));
+        assert_eq!(
+            result.actions[0].value,
+            Some("/home/user/project".to_string())
+        );
     }
 
     #[test]
@@ -358,7 +360,10 @@ mod tag_tests {
     fn test_parse_learn_fact() {
         let result = parse_tags(r#"§learn="fact: Rust is great""#);
         assert_eq!(result.actions[0].tag, "learn");
-        assert_eq!(result.actions[0].value, Some("fact: Rust is great".to_string()));
+        assert_eq!(
+            result.actions[0].value,
+            Some("fact: Rust is great".to_string())
+        );
     }
 
     #[test]

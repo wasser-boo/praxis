@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::Database;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -11,7 +11,12 @@ pub struct LogEntry {
 }
 
 impl Database {
-    pub fn add_log(&self, level: &str, message: &str, context: Option<&str>) -> anyhow::Result<i64> {
+    pub fn add_log(
+        &self,
+        level: &str,
+        message: &str,
+        context: Option<&str>,
+    ) -> anyhow::Result<i64> {
         let conn = self.conn();
         let id = conn.execute(
             "INSERT INTO logs (level, message, context) VALUES (?1, ?2, ?3)",
@@ -23,7 +28,7 @@ impl Database {
     pub fn get_logs(&self, limit: i32) -> anyhow::Result<Vec<LogEntry>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, level, message, context, created_at FROM logs ORDER BY id DESC LIMIT ?1"
+            "SELECT id, level, message, context, created_at FROM logs ORDER BY id DESC LIMIT ?1",
         )?;
 
         let entries = stmt

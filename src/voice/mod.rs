@@ -55,7 +55,9 @@ pub mod vosk_stt {
         }
 
         pub async fn load_model(&self) -> Result<(), STTError> {
-            let path = self.model_path.as_ref()
+            let path = self
+                .model_path
+                .as_ref()
                 .ok_or_else(|| STTError::ModelNotLoaded("No model path configured".to_string()))?;
 
             if !Path::new(path).exists() {
@@ -76,15 +78,17 @@ pub mod vosk_stt {
             let model = vosk::Model::new(path)
                 .ok_or_else(|| STTError::ModelNotLoaded("Failed to load Vosk model".to_string()))?;
 
-            VOSK_MODEL.set(model).map_err(|_| {
-                STTError::ModelNotLoaded("Failed to set Vosk model".to_string())
-            })?;
+            VOSK_MODEL
+                .set(model)
+                .map_err(|_| STTError::ModelNotLoaded("Failed to set Vosk model".to_string()))?;
             tracing::info!("Vosk model loaded successfully");
             Ok(())
         }
 
         pub async fn transcribe(&self, audio_data: &[i16]) -> Result<String, STTError> {
-            let path = self.model_path.as_ref()
+            let path = self
+                .model_path
+                .as_ref()
                 .ok_or_else(|| STTError::ModelNotLoaded("No model path configured".to_string()))?;
 
             if VOSK_MODEL.get().is_none() {
@@ -98,15 +102,23 @@ pub mod vosk_stt {
             let cleaned_audio = super::apply_noise_gate(audio_data, noise_threshold);
 
             let sample_rate = 16000.0f32;
-            tracing::info!("VOSK: Creating recognizer with {} audio samples", cleaned_audio.len());
-            let mut recognizer = vosk::Recognizer::new(model, sample_rate)
-                .ok_or_else(|| STTError::TranscriptionFailed("Failed to create recognizer".to_string()))?;
+            tracing::info!(
+                "VOSK: Creating recognizer with {} audio samples",
+                cleaned_audio.len()
+            );
+            let mut recognizer = vosk::Recognizer::new(model, sample_rate).ok_or_else(|| {
+                STTError::TranscriptionFailed("Failed to create recognizer".to_string())
+            })?;
 
             let mut all_text = String::new();
             let chunk_size = 4096;
             let chunks_count = cleaned_audio.chunks(chunk_size).count();
 
-            tracing::info!("VOSK: Processing {} samples in {} chunks", cleaned_audio.len(), chunks_count);
+            tracing::info!(
+                "VOSK: Processing {} samples in {} chunks",
+                cleaned_audio.len(),
+                chunks_count
+            );
 
             for (i, chunk) in cleaned_audio.chunks(chunk_size).enumerate() {
                 let chunk_vec: Vec<i16> = chunk.to_vec();
@@ -117,7 +129,12 @@ pub mod vosk_stt {
                         if let Some(single) = result.single() {
                             let trimmed = single.text.trim();
                             if !trimmed.is_empty() {
-                                tracing::info!("VOSK: Chunk {}/{} partial: '{}'", i + 1, chunks_count, trimmed);
+                                tracing::info!(
+                                    "VOSK: Chunk {}/{} partial: '{}'",
+                                    i + 1,
+                                    chunks_count,
+                                    trimmed
+                                );
                                 all_text.push_str(trimmed);
                                 all_text.push(' ');
                             }
@@ -160,19 +177,27 @@ pub mod vosk_stt {
 
     impl VoskSTT {
         pub fn new(_model_path: Option<String>) -> Self {
-            Self { _phantom: std::marker::PhantomData }
+            Self {
+                _phantom: std::marker::PhantomData,
+            }
         }
 
         pub async fn load_model(&self) -> Result<(), STTError> {
-            Err(STTError::NotReady("Vosk support not compiled. Build with --features voice_vosk".to_string()))
+            Err(STTError::NotReady(
+                "Vosk support not compiled. Build with --features voice_vosk".to_string(),
+            ))
         }
 
         pub async fn transcribe(&self, _audio_data: &[i16]) -> Result<String, STTError> {
             Err(STTError::NotReady("Vosk support not compiled".to_string()))
         }
 
-        pub fn is_ready(&self) -> bool { false }
-        pub fn name(&self) -> &'static str { "vosk" }
+        pub fn is_ready(&self) -> bool {
+            false
+        }
+        pub fn name(&self) -> &'static str {
+            "vosk"
+        }
     }
 }
 
@@ -193,12 +218,15 @@ pub mod whisper_stt {
         }
 
         pub async fn load_model(&self) -> Result<(), STTError> {
-            let path = self.model_path.as_ref()
+            let path = self
+                .model_path
+                .as_ref()
                 .ok_or_else(|| STTError::ModelNotLoaded("No model path configured".to_string()))?;
 
             if !Path::new(path).exists() {
                 return Err(STTError::ModelNotLoaded(format!(
-                    "Model path does not exist: {}. Download a whisper model.", path
+                    "Model path does not exist: {}. Download a whisper model.",
+                    path
                 )));
             }
 
@@ -208,12 +236,17 @@ pub mod whisper_stt {
 
         pub async fn transcribe(&self, _audio_data: &[u8]) -> Result<String, STTError> {
             Err(STTError::TranscriptionFailed(
-                "Voice transcription requires songbird and audio decoding. This is a stub.".to_string()
+                "Voice transcription requires songbird and audio decoding. This is a stub."
+                    .to_string(),
             ))
         }
 
-        pub fn is_ready(&self) -> bool { false }
-        pub fn name(&self) -> &'static str { "whisper" }
+        pub fn is_ready(&self) -> bool {
+            false
+        }
+        pub fn name(&self) -> &'static str {
+            "whisper"
+        }
     }
 }
 
@@ -227,19 +260,29 @@ pub mod whisper_stt {
 
     impl WhisperSTT {
         pub fn new(_model_path: Option<String>) -> Self {
-            Self { _phantom: std::marker::PhantomData }
+            Self {
+                _phantom: std::marker::PhantomData,
+            }
         }
 
         pub async fn load_model(&self) -> Result<(), STTError> {
-            Err(STTError::NotReady("Whisper support not compiled. Build with --features voice_whisper".to_string()))
+            Err(STTError::NotReady(
+                "Whisper support not compiled. Build with --features voice_whisper".to_string(),
+            ))
         }
 
         pub async fn transcribe(&self, _audio_data: &[u8]) -> Result<String, STTError> {
-            Err(STTError::NotReady("Whisper support not compiled".to_string()))
+            Err(STTError::NotReady(
+                "Whisper support not compiled".to_string(),
+            ))
         }
 
-        pub fn is_ready(&self) -> bool { false }
-        pub fn name(&self) -> &'static str { "whisper" }
+        pub fn is_ready(&self) -> bool {
+            false
+        }
+        pub fn name(&self) -> &'static str {
+            "whisper"
+        }
     }
 }
 
@@ -264,20 +307,33 @@ pub mod elevenlabs_stt {
 
     impl ElevenLabsSTT {
         pub fn new(api_key: String) -> Self {
-            Self { api_key, client: Client::new() }
+            Self {
+                api_key,
+                client: Client::new(),
+            }
         }
 
         pub async fn transcribe(&self, audio_data: &[u8]) -> Result<String, STTError> {
-            self.transcribe_with_config(audio_data, "scribe_v2", None, false, true).await
+            self.transcribe_with_config(audio_data, "scribe_v2", None, false, true)
+                .await
         }
 
-        pub async fn transcribe_with_config(&self, audio_data: &[u8], model: &str, language: Option<&str>, tag_audio_events: bool, no_verbatim: bool) -> Result<String, STTError> {
+        pub async fn transcribe_with_config(
+            &self,
+            audio_data: &[u8],
+            model: &str,
+            language: Option<&str>,
+            tag_audio_events: bool,
+            no_verbatim: bool,
+        ) -> Result<String, STTError> {
             let url = "https://api.elevenlabs.io/v1/speech-to-text";
 
             let file_part = reqwest::multipart::Part::bytes(audio_data.to_vec())
                 .file_name("audio.wav")
                 .mime_str("audio/wav")
-                .map_err(|e| STTError::TranscriptionFailed(format!("Failed to create multipart part: {}", e)))?;
+                .map_err(|e| {
+                    STTError::TranscriptionFailed(format!("Failed to create multipart part: {}", e))
+                })?;
 
             let mut form = reqwest::multipart::Form::new()
                 .part("file", file_part)
@@ -291,34 +347,48 @@ pub mod elevenlabs_stt {
                 }
             }
 
-            let response = self.client
+            let response = self
+                .client
                 .post(url)
                 .header("xi-api-key", &self.api_key)
                 .multipart(form)
                 .send()
                 .await
-                .map_err(|e| STTError::TranscriptionFailed(format!("HTTP request failed: {}", e)))?;
+                .map_err(|e| {
+                    STTError::TranscriptionFailed(format!("HTTP request failed: {}", e))
+                })?;
 
             if !response.status().is_success() {
                 let status = response.status();
                 let error_text = response.text().await.unwrap_or_default();
                 return Err(STTError::TranscriptionFailed(format!(
-                    "ElevenLabs STT API error: {} - {}", status, error_text
+                    "ElevenLabs STT API error: {} - {}",
+                    status, error_text
                 )));
             }
 
-            let stt_response: STTResponse = response.json().await
-                .map_err(|e| STTError::TranscriptionFailed(format!("Failed to parse response: {}", e)))?;
+            let stt_response: STTResponse = response.json().await.map_err(|e| {
+                STTError::TranscriptionFailed(format!("Failed to parse response: {}", e))
+            })?;
 
             if let Some(error) = stt_response.error {
-                return Err(STTError::TranscriptionFailed(format!("ElevenLabs error: {}", error)));
+                return Err(STTError::TranscriptionFailed(format!(
+                    "ElevenLabs error: {}",
+                    error
+                )));
             }
 
-            stt_response.text.ok_or_else(|| STTError::TranscriptionFailed("No text in response".to_string()))
+            stt_response
+                .text
+                .ok_or_else(|| STTError::TranscriptionFailed("No text in response".to_string()))
         }
 
-        pub fn is_ready(&self) -> bool { !self.api_key.is_empty() }
-        pub fn name(&self) -> &'static str { "elevenlabs_stt" }
+        pub fn is_ready(&self) -> bool {
+            !self.api_key.is_empty()
+        }
+        pub fn name(&self) -> &'static str {
+            "elevenlabs_stt"
+        }
     }
 }
 
@@ -340,14 +410,16 @@ pub mod tts {
     #[cfg(target_os = "windows")]
     pub mod windows_sapi {
         use super::TTSError;
-        use std::process::Command;
-        use std::fs;
         use std::env;
+        use std::fs;
+        use std::process::Command;
 
         pub struct WindowsSAPI;
 
         impl WindowsSAPI {
-            pub fn new() -> Self { Self }
+            pub fn new() -> Self {
+                Self
+            }
 
             pub fn speak(&self, text: &str) -> Result<(), TTSError> {
                 let escaped = text.replace("'", "''");
@@ -358,7 +430,9 @@ pub mod tts {
                 Command::new("powershell")
                     .args(["-Command", &ps])
                     .output()
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to run PowerShell: {}", e)))?;
+                    .map_err(|e| {
+                        TTSError::SynthesisFailed(format!("Failed to run PowerShell: {}", e))
+                    })?;
                 Ok(())
             }
 
@@ -376,19 +450,28 @@ pub mod tts {
                 Command::new("powershell")
                     .args(["-Command", &ps])
                     .output()
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to run PowerShell: {}", e)))?;
+                    .map_err(|e| {
+                        TTSError::SynthesisFailed(format!("Failed to run PowerShell: {}", e))
+                    })?;
 
                 if !wav_path.exists() {
-                    return Err(TTSError::SynthesisFailed("TTS WAV file not created".to_string()));
+                    return Err(TTSError::SynthesisFailed(
+                        "TTS WAV file not created".to_string(),
+                    ));
                 }
 
-                let bytes = fs::read(&wav_path).map_err(|e| TTSError::SynthesisFailed(format!("Failed to read WAV: {}", e)))?;
+                let bytes = fs::read(&wav_path)
+                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to read WAV: {}", e)))?;
                 let _ = fs::remove_file(&wav_path);
                 Ok(bytes)
             }
 
-            pub fn is_ready(&self) -> bool { true }
-            pub fn name(&self) -> &'static str { "windows_sapi" }
+            pub fn is_ready(&self) -> bool {
+                true
+            }
+            pub fn name(&self) -> &'static str {
+                "windows_sapi"
+            }
         }
     }
 
@@ -399,15 +482,25 @@ pub mod tts {
         pub struct WindowsSAPI;
 
         impl WindowsSAPI {
-            pub fn new() -> Self { Self }
+            pub fn new() -> Self {
+                Self
+            }
             pub fn speak(&self, _text: &str) -> Result<(), TTSError> {
-                Err(TTSError::NotReady("Windows SAPI only available on Windows".to_string()))
+                Err(TTSError::NotReady(
+                    "Windows SAPI only available on Windows".to_string(),
+                ))
             }
             pub fn speak_to_bytes(&self, _text: &str) -> Result<Vec<u8>, TTSError> {
-                Err(TTSError::NotReady("Windows SAPI only available on Windows".to_string()))
+                Err(TTSError::NotReady(
+                    "Windows SAPI only available on Windows".to_string(),
+                ))
             }
-            pub fn is_ready(&self) -> bool { false }
-            pub fn name(&self) -> &'static str { "windows_sapi" }
+            pub fn is_ready(&self) -> bool {
+                false
+            }
+            pub fn name(&self) -> &'static str {
+                "windows_sapi"
+            }
         }
     }
 
@@ -434,22 +527,47 @@ pub mod tts {
 
         impl ElevenLabsTTS {
             pub fn new(api_key: String, voice_id: String) -> Self {
-                Self { api_key, voice_id, client: Client::new() }
+                Self {
+                    api_key,
+                    voice_id,
+                    client: Client::new(),
+                }
             }
 
             pub async fn speak(&self, text: &str) -> Result<Vec<u8>, TTSError> {
                 self.speak_with_model(text, "eleven_multilingual_v2").await
             }
 
-            pub async fn speak_with_model(&self, text: &str, model: &str) -> Result<Vec<u8>, TTSError> {
-                self.speak_with_settings(text, model, &ElevenLabsVoiceSettings::default()).await
+            pub async fn speak_with_model(
+                &self,
+                text: &str,
+                model: &str,
+            ) -> Result<Vec<u8>, TTSError> {
+                self.speak_with_settings(text, model, &ElevenLabsVoiceSettings::default())
+                    .await
             }
 
-            pub async fn speak_with_settings(&self, text: &str, model: &str, settings: &ElevenLabsVoiceSettings) -> Result<Vec<u8>, TTSError> {
-                let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{}/stream", self.voice_id);
+            pub async fn speak_with_settings(
+                &self,
+                text: &str,
+                model: &str,
+                settings: &ElevenLabsVoiceSettings,
+            ) -> Result<Vec<u8>, TTSError> {
+                let url = format!(
+                    "https://api.elevenlabs.io/v1/text-to-speech/{}/stream",
+                    self.voice_id
+                );
 
-                let stability = if settings.stability > 0.0 { settings.stability } else { 0.5 };
-                let similarity_boost = if settings.similarity_boost > 0.0 { settings.similarity_boost } else { 0.75 };
+                let stability = if settings.stability > 0.0 {
+                    settings.stability
+                } else {
+                    0.5
+                };
+                let similarity_boost = if settings.similarity_boost > 0.0 {
+                    settings.similarity_boost
+                } else {
+                    0.75
+                };
 
                 let mut voice_settings = serde_json::json!({
                     "stability": stability,
@@ -473,7 +591,8 @@ pub mod tts {
                     }
                 }
 
-                let response = self.client
+                let response = self
+                    .client
                     .post(&url)
                     .header("xi-api-key", &self.api_key)
                     .header("Content-Type", "application/json")
@@ -481,21 +600,31 @@ pub mod tts {
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|e| TTSError::SynthesisFailed(format!("HTTP request failed: {}", e)))?;
+                    .map_err(|e| {
+                        TTSError::SynthesisFailed(format!("HTTP request failed: {}", e))
+                    })?;
 
                 if !response.status().is_success() {
                     let status = response.status();
                     let error_text = response.text().await.unwrap_or_default();
-                    return Err(TTSError::SynthesisFailed(format!("ElevenLabs API error: {} - {}", status, error_text)));
+                    return Err(TTSError::SynthesisFailed(format!(
+                        "ElevenLabs API error: {} - {}",
+                        status, error_text
+                    )));
                 }
 
-                let bytes = response.bytes().await
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to read audio bytes: {}", e)))?;
+                let bytes = response.bytes().await.map_err(|e| {
+                    TTSError::SynthesisFailed(format!("Failed to read audio bytes: {}", e))
+                })?;
                 Ok(bytes.to_vec())
             }
 
-            pub fn is_ready(&self) -> bool { !self.api_key.is_empty() && !self.voice_id.is_empty() }
-            pub fn name(&self) -> &'static str { "elevenlabs" }
+            pub fn is_ready(&self) -> bool {
+                !self.api_key.is_empty() && !self.voice_id.is_empty()
+            }
+            pub fn name(&self) -> &'static str {
+                "elevenlabs"
+            }
         }
     }
 
@@ -548,7 +677,12 @@ pub mod tts {
 
         impl MiniMaxTTS {
             pub fn new(api_key: String, voice_id: String, model: String) -> Self {
-                Self { api_key, voice_id, model, client: Client::new() }
+                Self {
+                    api_key,
+                    voice_id,
+                    model,
+                    client: Client::new(),
+                }
             }
 
             pub async fn speak(&self, text: &str) -> Result<Vec<u8>, TTSError> {
@@ -560,53 +694,75 @@ pub mod tts {
                     stream: false,
                     voice_setting: VoiceSetting {
                         voice_id: self.voice_id.clone(),
-                        speed: 1.0, vol: 1.0, pitch: 0.0,
+                        speed: 1.0,
+                        vol: 1.0,
+                        pitch: 0.0,
                     },
                 };
 
                 tracing::info!(voice_id = %self.voice_id, model = %self.model, text_preview = %text.chars().take(30).collect::<String>(), "MiniMax T2A: calling API");
 
-                let response = self.client
+                let response = self
+                    .client
                     .post(url)
                     .header("Authorization", format!("Bearer {}", self.api_key))
                     .header("Content-Type", "application/json")
                     .json(&request)
                     .send()
                     .await
-                    .map_err(|e| TTSError::SynthesisFailed(format!("MiniMax T2A request failed: {}", e)))?;
+                    .map_err(|e| {
+                        TTSError::SynthesisFailed(format!("MiniMax T2A request failed: {}", e))
+                    })?;
 
                 if !response.status().is_success() {
                     let status = response.status();
                     let error_text = response.text().await.unwrap_or_default();
-                    return Err(TTSError::SynthesisFailed(format!("MiniMax API error: {} - {}", status, error_text)));
+                    return Err(TTSError::SynthesisFailed(format!(
+                        "MiniMax API error: {} - {}",
+                        status, error_text
+                    )));
                 }
 
-                let resp: T2AResponse = response.json().await
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to parse MiniMax response: {}", e)))?;
+                let resp: T2AResponse = response.json().await.map_err(|e| {
+                    TTSError::SynthesisFailed(format!("Failed to parse MiniMax response: {}", e))
+                })?;
 
                 if let Some(base_resp) = resp.base_resp {
                     if let Some(status_code) = base_resp.status_code {
                         if status_code != 0 {
-                            return Err(TTSError::SynthesisFailed(format!("MiniMax API error: {}", base_resp.status_msg.unwrap_or_default())));
+                            return Err(TTSError::SynthesisFailed(format!(
+                                "MiniMax API error: {}",
+                                base_resp.status_msg.unwrap_or_default()
+                            )));
                         }
                     }
                 }
 
-                let audio_b64 = resp.data
-                    .and_then(|d| d.audio)
-                    .ok_or_else(|| TTSError::SynthesisFailed("No audio in MiniMax response".to_string()))?;
+                let audio_b64 = resp.data.and_then(|d| d.audio).ok_or_else(|| {
+                    TTSError::SynthesisFailed("No audio in MiniMax response".to_string())
+                })?;
 
                 use base64::Engine;
                 let audio_bytes = base64::engine::general_purpose::STANDARD
                     .decode(&audio_b64)
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to decode MiniMax audio: {}", e)))?;
+                    .map_err(|e| {
+                        TTSError::SynthesisFailed(format!("Failed to decode MiniMax audio: {}", e))
+                    })?;
 
-                tracing::info!(bytes_len = audio_bytes.len(), "MiniMax T2A: received {} bytes", audio_bytes.len());
+                tracing::info!(
+                    bytes_len = audio_bytes.len(),
+                    "MiniMax T2A: received {} bytes",
+                    audio_bytes.len()
+                );
                 Ok(audio_bytes)
             }
 
-            pub fn is_ready(&self) -> bool { !self.api_key.is_empty() && !self.voice_id.is_empty() }
-            pub fn name(&self) -> &'static str { "minimax" }
+            pub fn is_ready(&self) -> bool {
+                !self.api_key.is_empty() && !self.voice_id.is_empty()
+            }
+            pub fn name(&self) -> &'static str {
+                "minimax"
+            }
         }
     }
 
@@ -651,7 +807,12 @@ pub mod tts {
 
         impl QwenTTSClient {
             pub fn new(server_url: String, language: String, speaker: Option<String>) -> Self {
-                Self { server_url, language, speaker, client: Client::new() }
+                Self {
+                    server_url,
+                    language,
+                    speaker,
+                    client: Client::new(),
+                }
             }
 
             pub async fn speak(&self, text: &str) -> Result<Vec<u8>, TTSError> {
@@ -662,68 +823,135 @@ pub mod tts {
                     text: text.to_string(),
                     language: self.language.clone(),
                     speaker: self.speaker.clone(),
-                    instruct: None, ref_audio: None, ref_text: None,
-                    clone: Some(false), raw: Some(true),
+                    instruct: None,
+                    ref_audio: None,
+                    ref_text: None,
+                    clone: Some(false),
+                    raw: Some(true),
                 };
 
                 tracing::info!(text_preview = %text.chars().take(50).collect::<String>(), "Sending TTS request to {}", url);
-                let response = self.client.post(&url).json(&request).send().await
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Qwen3-TTS request failed: {}", e)))?;
+                let response = self
+                    .client
+                    .post(&url)
+                    .json(&request)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        TTSError::SynthesisFailed(format!("Qwen3-TTS request failed: {}", e))
+                    })?;
 
                 if !response.status().is_success() {
                     let status = response.status();
                     let error_text = response.text().await.unwrap_or_default();
-                    return Err(TTSError::SynthesisFailed(format!("Qwen3-TTS server error: {} - {}", status, error_text)));
+                    return Err(TTSError::SynthesisFailed(format!(
+                        "Qwen3-TTS server error: {} - {}",
+                        status, error_text
+                    )));
                 }
 
-                let audio_bytes = response.bytes().await
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to read Qwen3-TTS raw audio: {}", e)))?
+                let audio_bytes = response
+                    .bytes()
+                    .await
+                    .map_err(|e| {
+                        TTSError::SynthesisFailed(format!(
+                            "Failed to read Qwen3-TTS raw audio: {}",
+                            e
+                        ))
+                    })?
                     .to_vec();
 
-                tracing::info!(response_size = audio_bytes.len(), "TTS response received from {} ({} bytes)", url, audio_bytes.len());
+                tracing::info!(
+                    response_size = audio_bytes.len(),
+                    "TTS response received from {} ({} bytes)",
+                    url,
+                    audio_bytes.len()
+                );
                 Ok(audio_bytes)
             }
 
-            pub async fn speak_voice_clone(&self, text: &str, ref_audio_path: &str, ref_text: Option<&str>) -> Result<Vec<u8>, TTSError> {
+            pub async fn speak_voice_clone(
+                &self,
+                text: &str,
+                ref_audio_path: &str,
+                ref_text: Option<&str>,
+            ) -> Result<Vec<u8>, TTSError> {
                 let url = format!("{}/tts", self.server_url);
                 tracing::info!(server_url = %self.server_url, ref_audio_path = %ref_audio_path, "QwenTTS voice clone: fetching from {} with ref_audio={}", url, ref_audio_path);
 
-                let ref_audio_bytes = std::fs::read(ref_audio_path)
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to read ref audio file: {}", e)))?;
-                tracing::info!(ref_audio_size = ref_audio_bytes.len(), "Reference audio loaded from {}", ref_audio_path);
+                let ref_audio_bytes = std::fs::read(ref_audio_path).map_err(|e| {
+                    TTSError::SynthesisFailed(format!("Failed to read ref audio file: {}", e))
+                })?;
+                tracing::info!(
+                    ref_audio_size = ref_audio_bytes.len(),
+                    "Reference audio loaded from {}",
+                    ref_audio_path
+                );
 
                 use base64::Engine;
-                let ref_audio_b64 = base64::engine::general_purpose::STANDARD.encode(&ref_audio_bytes);
+                let ref_audio_b64 =
+                    base64::engine::general_purpose::STANDARD.encode(&ref_audio_bytes);
 
                 let request = TTSRequest {
                     text: text.to_string(),
                     language: self.language.clone(),
-                    speaker: None, instruct: None,
+                    speaker: None,
+                    instruct: None,
                     ref_audio: Some(ref_audio_b64),
                     ref_text: ref_text.map(String::from),
-                    clone: Some(true), raw: Some(true),
+                    clone: Some(true),
+                    raw: Some(true),
                 };
 
                 tracing::info!(text_preview = %text.chars().take(50).collect::<String>(), "Sending voice clone request to {}", url);
-                let response = self.client.post(&url).json(&request).send().await
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Qwen3-TTS voice clone request failed: {}", e)))?;
+                let response = self
+                    .client
+                    .post(&url)
+                    .json(&request)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        TTSError::SynthesisFailed(format!(
+                            "Qwen3-TTS voice clone request failed: {}",
+                            e
+                        ))
+                    })?;
 
                 if !response.status().is_success() {
                     let status = response.status();
                     let error_text = response.text().await.unwrap_or_default();
-                    return Err(TTSError::SynthesisFailed(format!("Qwen3-TTS server error: {} - {}", status, error_text)));
+                    return Err(TTSError::SynthesisFailed(format!(
+                        "Qwen3-TTS server error: {} - {}",
+                        status, error_text
+                    )));
                 }
 
-                let audio_bytes = response.bytes().await
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to read Qwen3-TTS raw audio: {}", e)))?
+                let audio_bytes = response
+                    .bytes()
+                    .await
+                    .map_err(|e| {
+                        TTSError::SynthesisFailed(format!(
+                            "Failed to read Qwen3-TTS raw audio: {}",
+                            e
+                        ))
+                    })?
                     .to_vec();
 
-                tracing::info!(response_size = audio_bytes.len(), "Voice clone response received from {} ({} bytes)", url, audio_bytes.len());
+                tracing::info!(
+                    response_size = audio_bytes.len(),
+                    "Voice clone response received from {} ({} bytes)",
+                    url,
+                    audio_bytes.len()
+                );
                 Ok(audio_bytes)
             }
 
-            pub fn is_ready(&self) -> bool { !self.server_url.is_empty() }
-            pub fn name(&self) -> &'static str { "qwen_tts" }
+            pub fn is_ready(&self) -> bool {
+                !self.server_url.is_empty()
+            }
+            pub fn name(&self) -> &'static str {
+                "qwen_tts"
+            }
         }
     }
 
@@ -790,95 +1018,159 @@ pub mod tts {
         impl MiMoTTS {
             pub fn new(api_key: String, model: String, base_url: Option<String>) -> Self {
                 Self {
-                    api_key, model,
-                    base_url: base_url.unwrap_or_else(|| "https://api.xiaomimimo.com/v1".to_string()),
+                    api_key,
+                    model,
+                    base_url: base_url
+                        .unwrap_or_else(|| "https://api.xiaomimimo.com/v1".to_string()),
                     client: Client::new(),
                 }
             }
 
-            pub async fn speak_builtin(&self, text: &str, voice: &str, style_instruction: Option<&str>) -> Result<Vec<u8>, TTSError> {
+            pub async fn speak_builtin(
+                &self,
+                text: &str,
+                voice: &str,
+                style_instruction: Option<&str>,
+            ) -> Result<Vec<u8>, TTSError> {
                 let messages = self.build_messages(text, style_instruction, None);
                 self.call_api(messages, Some(voice.to_string())).await
             }
 
-            pub async fn speak_voice_design(&self, text: &str, voice_description: &str) -> Result<Vec<u8>, TTSError> {
+            pub async fn speak_voice_design(
+                &self,
+                text: &str,
+                voice_description: &str,
+            ) -> Result<Vec<u8>, TTSError> {
                 if voice_description.is_empty() {
-                    return Err(TTSError::SynthesisFailed("Voice description is required for voice design mode".to_string()));
+                    return Err(TTSError::SynthesisFailed(
+                        "Voice description is required for voice design mode".to_string(),
+                    ));
                 }
                 let messages = self.build_messages(text, None, Some(voice_description));
                 self.call_api(messages, None).await
             }
 
-            pub async fn speak_voice_clone(&self, text: &str, voice_audio_base64: &str, mime_type: &str, style_instruction: Option<&str>) -> Result<Vec<u8>, TTSError> {
+            pub async fn speak_voice_clone(
+                &self,
+                text: &str,
+                voice_audio_base64: &str,
+                mime_type: &str,
+                style_instruction: Option<&str>,
+            ) -> Result<Vec<u8>, TTSError> {
                 if voice_audio_base64.is_empty() {
-                    return Err(TTSError::SynthesisFailed("Voice audio base64 is required for voice clone mode".to_string()));
+                    return Err(TTSError::SynthesisFailed(
+                        "Voice audio base64 is required for voice clone mode".to_string(),
+                    ));
                 }
                 let voice_data = format!("data:{};base64,{}", mime_type, voice_audio_base64);
                 let messages = self.build_messages(text, style_instruction, None);
                 self.call_api(messages, Some(voice_data)).await
             }
 
-            fn build_messages(&self, text: &str, style_instruction: Option<&str>, voice_description: Option<&str>) -> Vec<ChatMessage> {
+            fn build_messages(
+                &self,
+                text: &str,
+                style_instruction: Option<&str>,
+                voice_description: Option<&str>,
+            ) -> Vec<ChatMessage> {
                 let mut messages = Vec::new();
                 let user_content = if let Some(desc) = voice_description {
                     desc.to_string()
                 } else {
                     style_instruction.unwrap_or("").to_string()
                 };
-                messages.push(ChatMessage { role: "user".to_string(), content: user_content });
-                messages.push(ChatMessage { role: "assistant".to_string(), content: text.to_string() });
+                messages.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: user_content,
+                });
+                messages.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: text.to_string(),
+                });
                 messages
             }
 
-            async fn call_api(&self, messages: Vec<ChatMessage>, voice: Option<String>) -> Result<Vec<u8>, TTSError> {
+            async fn call_api(
+                &self,
+                messages: Vec<ChatMessage>,
+                voice: Option<String>,
+            ) -> Result<Vec<u8>, TTSError> {
                 let url = format!("{}/chat/completions", self.base_url);
 
                 let request = ChatCompletionRequest {
                     model: self.model.clone(),
                     messages,
-                    audio: AudioConfig { format: "wav".to_string(), voice },
+                    audio: AudioConfig {
+                        format: "wav".to_string(),
+                        voice,
+                    },
                 };
 
                 tracing::info!(model = %self.model, "MiMo TTS: calling API");
 
-                let response = self.client.post(url)
+                let response = self
+                    .client
+                    .post(url)
                     .header("api-key", &self.api_key)
                     .header("Content-Type", "application/json")
                     .json(&request)
-                    .send().await
-                    .map_err(|e| TTSError::SynthesisFailed(format!("MiMo TTS request failed: {}", e)))?;
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        TTSError::SynthesisFailed(format!("MiMo TTS request failed: {}", e))
+                    })?;
 
                 if !response.status().is_success() {
                     let status = response.status();
                     let error_text = response.text().await.unwrap_or_default();
-                    return Err(TTSError::SynthesisFailed(format!("MiMo TTS API error: {} - {}", status, error_text)));
+                    return Err(TTSError::SynthesisFailed(format!(
+                        "MiMo TTS API error: {} - {}",
+                        status, error_text
+                    )));
                 }
 
-                let resp: ChatCompletionResponse = response.json().await
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to parse MiMo TTS response: {}", e)))?;
+                let resp: ChatCompletionResponse = response.json().await.map_err(|e| {
+                    TTSError::SynthesisFailed(format!("Failed to parse MiMo TTS response: {}", e))
+                })?;
 
                 if let Some(err) = resp.error {
-                    return Err(TTSError::SynthesisFailed(format!("MiMo TTS API error: {}", err.message.unwrap_or_default())));
+                    return Err(TTSError::SynthesisFailed(format!(
+                        "MiMo TTS API error: {}",
+                        err.message.unwrap_or_default()
+                    )));
                 }
 
-                let audio_b64 = resp.choices
+                let audio_b64 = resp
+                    .choices
                     .and_then(|c| c.into_iter().next())
                     .and_then(|c| c.message)
                     .and_then(|m| m.audio)
                     .and_then(|a| a.data)
-                    .ok_or_else(|| TTSError::SynthesisFailed("No audio data in MiMo TTS response".to_string()))?;
+                    .ok_or_else(|| {
+                        TTSError::SynthesisFailed("No audio data in MiMo TTS response".to_string())
+                    })?;
 
                 use base64::Engine;
                 let audio_bytes = base64::engine::general_purpose::STANDARD
                     .decode(&audio_b64)
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to decode MiMo TTS audio: {}", e)))?;
+                    .map_err(|e| {
+                        TTSError::SynthesisFailed(format!("Failed to decode MiMo TTS audio: {}", e))
+                    })?;
 
-                tracing::info!(bytes_len = audio_bytes.len(), "MiMo TTS: received {} bytes", audio_bytes.len());
+                tracing::info!(
+                    bytes_len = audio_bytes.len(),
+                    "MiMo TTS: received {} bytes",
+                    audio_bytes.len()
+                );
                 Ok(audio_bytes)
             }
 
-            pub fn is_ready(&self) -> bool { !self.api_key.is_empty() }
-            pub fn name(&self) -> &'static str { "mimo_tts" }
+            pub fn is_ready(&self) -> bool {
+                !self.api_key.is_empty()
+            }
+            pub fn name(&self) -> &'static str {
+                "mimo_tts"
+            }
         }
     }
 
@@ -905,15 +1197,26 @@ pub mod tts {
 
         impl RVCClient {
             pub fn new(server_url: String, model_path: String, index_path: String) -> Self {
-                Self { server_url, model_path, index_path, client: Client::new() }
+                Self {
+                    server_url,
+                    model_path,
+                    index_path,
+                    client: Client::new(),
+                }
             }
 
-            pub async fn convert(&self, audio_data: &[u8], sample_rate: u32, channels: u16) -> Result<Vec<u8>, TTSError> {
+            pub async fn convert(
+                &self,
+                audio_data: &[u8],
+                sample_rate: u32,
+                channels: u16,
+            ) -> Result<Vec<u8>, TTSError> {
                 let url = format!("{}/convert", self.server_url);
 
                 tracing::info!(server_url = %self.server_url, model_path = %self.model_path, index_path = %self.index_path, input_size = audio_data.len(), sample_rate = %sample_rate, channels = %channels, "RVC convert API call to {} with model={}, index={}", url, self.model_path, self.index_path);
 
-                let wav_base64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, audio_data);
+                let wav_base64 =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, audio_data);
 
                 let request = RVCConvertRequest {
                     audio: wav_base64,
@@ -921,30 +1224,57 @@ pub mod tts {
                     index_path: self.index_path.clone(),
                 };
 
-                let response = self.client.post(&url).json(&request).send().await
+                let response = self
+                    .client
+                    .post(&url)
+                    .json(&request)
+                    .send()
+                    .await
                     .map_err(|e| TTSError::SynthesisFailed(format!("RVC request failed: {}", e)))?;
 
                 if !response.status().is_success() {
-                    return Err(TTSError::SynthesisFailed(format!("RVC server error: {}", response.status())));
+                    return Err(TTSError::SynthesisFailed(format!(
+                        "RVC server error: {}",
+                        response.status()
+                    )));
                 }
 
-                let converted: serde_json::Value = response.json().await
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to parse RVC response: {}", e)))?;
+                let converted: serde_json::Value = response.json().await.map_err(|e| {
+                    TTSError::SynthesisFailed(format!("Failed to parse RVC response: {}", e))
+                })?;
 
-                let audio_base64 = converted.get("audio").and_then(|v| v.as_str())
-                    .ok_or_else(|| TTSError::SynthesisFailed("No audio in RVC response".to_string()))?;
+                let audio_base64 =
+                    converted
+                        .get("audio")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            TTSError::SynthesisFailed("No audio in RVC response".to_string())
+                        })?;
 
                 use base64::Engine;
                 let audio_bytes = base64::engine::general_purpose::STANDARD
                     .decode(audio_base64)
-                    .map_err(|e| TTSError::SynthesisFailed(format!("Failed to decode RVC audio: {}", e)))?;
+                    .map_err(|e| {
+                        TTSError::SynthesisFailed(format!("Failed to decode RVC audio: {}", e))
+                    })?;
 
-                tracing::info!(output_size = audio_bytes.len(), "RVC conversion complete: {} -> {} bytes", audio_data.len(), audio_bytes.len());
+                tracing::info!(
+                    output_size = audio_bytes.len(),
+                    "RVC conversion complete: {} -> {} bytes",
+                    audio_data.len(),
+                    audio_bytes.len()
+                );
                 Ok(audio_bytes)
             }
 
-            pub fn is_ready(&self) -> bool { !self.server_url.is_empty() && !self.model_path.is_empty() && !self.index_path.is_empty() }
-            pub fn name(&self) -> &'static str { "rvc" }
+            pub fn is_ready(&self) -> bool {
+                !self.server_url.is_empty()
+                    && !self.model_path.is_empty()
+                    && !self.index_path.is_empty()
+            }
+            pub fn name(&self) -> &'static str {
+                "rvc"
+            }
         }
     }
 
@@ -974,8 +1304,8 @@ pub mod tts {
     }
 
     pub fn play_audio_locally(audio_bytes: &[u8]) -> Result<(), TTSError> {
-        use std::fs;
         use std::env;
+        use std::fs;
 
         let temp_dir = env::temp_dir();
         let wav_path = temp_dir.join(format!("tts_playback_{}.wav", std::process::id()));
@@ -1005,7 +1335,11 @@ pub mod tts {
         path
     }
 
-    pub fn save_audio_file(audio_bytes: &[u8], base_path: &str, prefix: &str) -> Result<std::path::PathBuf, TTSError> {
+    pub fn save_audio_file(
+        audio_bytes: &[u8],
+        base_path: &str,
+        prefix: &str,
+    ) -> Result<std::path::PathBuf, TTSError> {
         let folder = ensure_audio_folder(base_path, "tts_output");
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1022,12 +1356,19 @@ pub mod tts {
     }
 
     pub fn get_wav_sample_rate(audio_bytes: &[u8]) -> Option<u32> {
-        if audio_bytes.len() < 28 { return None; }
-        Some(u32::from_le_bytes([audio_bytes[24], audio_bytes[25], audio_bytes[26], audio_bytes[27]]))
+        if audio_bytes.len() < 28 {
+            return None;
+        }
+        Some(u32::from_le_bytes([
+            audio_bytes[24],
+            audio_bytes[25],
+            audio_bytes[26],
+            audio_bytes[27],
+        ]))
     }
 
     pub fn wav_bytes_to_pcm(audio_bytes: &[u8]) -> Result<Vec<i16>, TTSError> {
-        use hound::{WavReader, SampleFormat};
+        use hound::{SampleFormat, WavReader};
 
         let cursor = std::io::Cursor::new(audio_bytes);
         let mut reader = WavReader::new(cursor)
@@ -1035,13 +1376,19 @@ pub mod tts {
 
         let spec = reader.spec();
         if spec.sample_format != SampleFormat::Int || spec.bits_per_sample != 16 {
-            return Err(TTSError::SynthesisFailed(format!("Unsupported WAV format: {} bit {}",
+            return Err(TTSError::SynthesisFailed(format!(
+                "Unsupported WAV format: {} bit {}",
                 spec.bits_per_sample,
-                if spec.sample_format == SampleFormat::Float { "float" } else { "int" }
+                if spec.sample_format == SampleFormat::Float {
+                    "float"
+                } else {
+                    "int"
+                }
             )));
         }
 
-        let samples: Vec<i16> = reader.samples::<i16>()
+        let samples: Vec<i16> = reader
+            .samples::<i16>()
             .map(|s| s.map_err(|e| TTSError::SynthesisFailed(format!("Sample error: {}", e))))
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -1070,7 +1417,12 @@ pub mod tts {
 
         loop {
             match decoder.next_frame() {
-                Ok(Frame { data, channels, sample_rate, .. }) => {
+                Ok(Frame {
+                    data,
+                    channels,
+                    sample_rate,
+                    ..
+                }) => {
                     detected_sample_rate = sample_rate as u32;
                     if channels == 2 {
                         for chunk in data.chunks(2) {
@@ -1084,7 +1436,12 @@ pub mod tts {
                     }
                 }
                 Err(minimp3::Error::Eof) => break,
-                Err(e) => return Err(TTSError::SynthesisFailed(format!("MP3 decode error: {:?}", e))),
+                Err(e) => {
+                    return Err(TTSError::SynthesisFailed(format!(
+                        "MP3 decode error: {:?}",
+                        e
+                    )))
+                }
             }
         }
 
@@ -1093,27 +1450,48 @@ pub mod tts {
 
     pub fn audio_bytes_to_pcm(audio_bytes: &[u8]) -> Result<(Vec<i16>, u32), TTSError> {
         if audio_bytes.len() < 4 {
-            return Err(TTSError::SynthesisFailed("Audio data too short".to_string()));
+            return Err(TTSError::SynthesisFailed(
+                "Audio data too short".to_string(),
+            ));
         }
 
-        let header_hex: String = audio_bytes.iter().take(8)
+        let header_hex: String = audio_bytes
+            .iter()
+            .take(8)
             .map(|b| format!("{:02x}", b))
             .collect::<Vec<_>>()
             .join(" ");
-        let is_wav = audio_bytes[0] == b'R' && audio_bytes[1] == b'I' &&
-                     audio_bytes[2] == b'F' && audio_bytes[3] == b'F';
-        let is_mp3 = audio_bytes[0] == 0xFF || (audio_bytes[0] == 0x49 && audio_bytes[1] == 0x44 && audio_bytes[2] == 0x33);
+        let is_wav = audio_bytes[0] == b'R'
+            && audio_bytes[1] == b'I'
+            && audio_bytes[2] == b'F'
+            && audio_bytes[3] == b'F';
+        let is_mp3 = audio_bytes[0] == 0xFF
+            || (audio_bytes[0] == 0x49 && audio_bytes[1] == 0x44 && audio_bytes[2] == 0x33);
 
-        tracing::info!("audio_bytes_to_pcm: size={}, header_hex=[{}], is_wav={}, is_mp3={}", audio_bytes.len(), header_hex, is_wav, is_mp3);
+        tracing::info!(
+            "audio_bytes_to_pcm: size={}, header_hex=[{}], is_wav={}, is_mp3={}",
+            audio_bytes.len(),
+            header_hex,
+            is_wav,
+            is_mp3
+        );
 
         if is_wav {
             let sample_rate = get_wav_sample_rate(audio_bytes).unwrap_or(48000);
             let result = wav_bytes_to_pcm(audio_bytes);
-            tracing::info!("wav_bytes_to_pcm result: {} samples, sample_rate={}", result.as_ref().map(|v| v.len()).unwrap_or(0), sample_rate);
+            tracing::info!(
+                "wav_bytes_to_pcm result: {} samples, sample_rate={}",
+                result.as_ref().map(|v| v.len()).unwrap_or(0),
+                sample_rate
+            );
             result.map(|samples| (samples, sample_rate))
         } else {
             let result = mp3_bytes_to_pcm(audio_bytes);
-            tracing::info!("mp3_bytes_to_pcm result: {} samples, sample_rate={}", result.as_ref().map(|v| v.0.len()).unwrap_or(0), result.as_ref().map(|v| v.1).unwrap_or(0));
+            tracing::info!(
+                "mp3_bytes_to_pcm result: {} samples, sample_rate={}",
+                result.as_ref().map(|v| v.0.len()).unwrap_or(0),
+                result.as_ref().map(|v| v.1).unwrap_or(0)
+            );
             result
         }
     }
@@ -1153,9 +1531,18 @@ pub fn pcm_to_wav(pcm_data: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> 
 }
 
 pub fn get_wav_sample_rate(audio_bytes: &[u8]) -> Option<u32> {
-    if audio_bytes.len() < 28 { return None; }
-    if &audio_bytes[0..4] != b"RIFF" || &audio_bytes[8..12] != b"WAVE" { return None; }
-    Some(u32::from_le_bytes([audio_bytes[24], audio_bytes[25], audio_bytes[26], audio_bytes[27]]))
+    if audio_bytes.len() < 28 {
+        return None;
+    }
+    if &audio_bytes[0..4] != b"RIFF" || &audio_bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    Some(u32::from_le_bytes([
+        audio_bytes[24],
+        audio_bytes[25],
+        audio_bytes[26],
+        audio_bytes[27],
+    ]))
 }
 
 pub fn downsample_48k_to_16k(samples: &[i16]) -> Vec<i16> {
@@ -1189,28 +1576,51 @@ pub async fn transcribe_audio(
     wav_data: &[u8],
     config: &STTConfig,
 ) -> Result<String, stt::STTError> {
-    tracing::info!("STT: Starting transcription with engine '{}', audio size {} bytes", config.engine, wav_data.len());
+    tracing::info!(
+        "STT: Starting transcription with engine '{}', audio size {} bytes",
+        config.engine,
+        wav_data.len()
+    );
     let result = match config.engine.as_str() {
         "elevenlabs" => {
-            let api_key = config.api_key.as_deref().ok_or_else(|| stt::STTError::NotReady("ElevenLabs API key not set".to_string()))?;
+            let api_key = config
+                .api_key
+                .as_deref()
+                .ok_or_else(|| stt::STTError::NotReady("ElevenLabs API key not set".to_string()))?;
             let stt = ElevenLabsSTT::new(api_key.to_string());
-            stt.transcribe_with_config(wav_data, &config.elevenlabs_model, config.elevenlabs_language.as_deref(), config.elevenlabs_tag_audio_events, config.elevenlabs_no_verbatim).await
+            stt.transcribe_with_config(
+                wav_data,
+                &config.elevenlabs_model,
+                config.elevenlabs_language.as_deref(),
+                config.elevenlabs_tag_audio_events,
+                config.elevenlabs_no_verbatim,
+            )
+            .await
         }
         "vosk" => {
-            let model_path = config.model_path.as_deref().ok_or_else(|| stt::STTError::NotReady("Vosk model path not configured".to_string()))?;
+            let model_path = config.model_path.as_deref().ok_or_else(|| {
+                stt::STTError::NotReady("Vosk model path not configured".to_string())
+            })?;
             let stt = VoskSTT::new(Some(model_path.to_string()));
             let pcm_data = wav_to_pcm(wav_data)?;
             stt.transcribe(&pcm_data).await
         }
         "whisper" => {
-            let model_path = config.model_path.as_deref().ok_or_else(|| stt::STTError::NotReady("Whisper model path not configured".to_string()))?;
+            let model_path = config.model_path.as_deref().ok_or_else(|| {
+                stt::STTError::NotReady("Whisper model path not configured".to_string())
+            })?;
             let stt = WhisperSTT::new(Some(model_path.to_string()));
             if !stt.is_ready() {
-                return Err(stt::STTError::NotReady("Whisper model not loaded".to_string()));
+                return Err(stt::STTError::NotReady(
+                    "Whisper model not loaded".to_string(),
+                ));
             }
             stt.transcribe(wav_data).await
         }
-        _ => Err(stt::STTError::NotReady(format!("Unknown STT type: {}", config.engine))),
+        _ => Err(stt::STTError::NotReady(format!(
+            "Unknown STT type: {}",
+            config.engine
+        ))),
     };
 
     match &result {
@@ -1232,7 +1642,9 @@ pub async fn transcribe_audio(
 
 fn wav_to_pcm(wav_data: &[u8]) -> Result<Vec<i16>, stt::STTError> {
     if wav_data.len() < 44 {
-        return Err(stt::STTError::TranscriptionFailed("WAV data too short".to_string()));
+        return Err(stt::STTError::TranscriptionFailed(
+            "WAV data too short".to_string(),
+        ));
     }
 
     let channels = u16::from_le_bytes([wav_data[22], wav_data[23]]);
@@ -1257,11 +1669,11 @@ fn wav_to_pcm(wav_data: &[u8]) -> Result<Vec<i16>, stt::STTError> {
     }
 }
 
+pub use elevenlabs_stt::ElevenLabsSTT;
 pub use stt::*;
+pub use tts::windows_sapi::WindowsSAPI;
 pub use vosk_stt::VoskSTT;
 pub use whisper_stt::WhisperSTT;
-pub use tts::windows_sapi::WindowsSAPI;
-pub use elevenlabs_stt::ElevenLabsSTT;
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -1407,7 +1819,7 @@ mod voice_tests {
         let pcm = wav_to_pcm(&wav).unwrap();
         assert_eq!(pcm.len(), 2);
         assert_eq!(pcm[0], 1500); // (1000+2000)/2
-        assert_eq!(pcm[1], 500);  // (-3000+4000)/2
+        assert_eq!(pcm[1], 500); // (-3000+4000)/2
     }
 
     #[test]
@@ -1431,14 +1843,20 @@ mod voice_tests {
     #[test]
     fn test_transcribe_audio_unknown_type() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(transcribe_audio(&[0u8; 100], &make_stt_config("unknown_engine")));
+        let result = rt.block_on(transcribe_audio(
+            &[0u8; 100],
+            &make_stt_config("unknown_engine"),
+        ));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_transcribe_audio_elevenlabs_no_key() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(transcribe_audio(&[0u8; 100], &make_stt_config("elevenlabs")));
+        let result = rt.block_on(transcribe_audio(
+            &[0u8; 100],
+            &make_stt_config("elevenlabs"),
+        ));
         assert!(result.is_err());
     }
 

@@ -1,10 +1,10 @@
 use anyhow::Result;
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
-use futures_util::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = futures_util::stream::SplitSink<WsStream, Message>;
@@ -22,16 +22,27 @@ pub enum IncomingMessage {
     #[serde(rename = "pong")]
     Pong,
     #[serde(rename = "discord.file.upload")]
-    DiscordFileUpload { user_id: String, filename: String, file_path: String },
+    DiscordFileUpload {
+        user_id: String,
+        filename: String,
+        file_path: String,
+    },
     #[serde(rename = "event")]
-    Event { event: String, payload: serde_json::Value },
+    Event {
+        event: String,
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum OutgoingMessage {
     #[serde(rename = "message")]
-    Message { user_id: String, content: String, channel_id: String },
+    Message {
+        user_id: String,
+        content: String,
+        channel_id: String,
+    },
     #[serde(rename = "voice_input_started")]
     VoiceInputStarted { user_id: String },
 }
@@ -47,7 +58,11 @@ impl WsClient {
         Self::connect_with_retries(url, 10, std::time::Duration::from_millis(500)).await
     }
 
-    pub async fn connect_with_retries(url: &str, max_retries: u32, base_delay: std::time::Duration) -> Result<Self> {
+    pub async fn connect_with_retries(
+        url: &str,
+        max_retries: u32,
+        base_delay: std::time::Duration,
+    ) -> Result<Self> {
         let mut last_err = None;
         for attempt in 0..max_retries {
             match connect_async(url).await {
@@ -71,7 +86,10 @@ impl WsClient {
         }
         match last_err {
             Some(e) => Err(e.into()),
-            None => Err(anyhow::anyhow!("Connection failed after {} retries", max_retries)),
+            None => Err(anyhow::anyhow!(
+                "Connection failed after {} retries",
+                max_retries
+            )),
         }
     }
 

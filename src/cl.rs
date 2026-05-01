@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContextLang {
@@ -99,9 +99,15 @@ pub fn parse(content: &str) -> Result<ContextLang, ClError> {
 
             match parts[0] {
                 "state" => {
-                    let name = parts.get(1).ok_or_else(|| {
-                        ClError::ParseError(format!("Line {}: [state] requires a name", line_num + 1))
-                    })?.to_string();
+                    let name = parts
+                        .get(1)
+                        .ok_or_else(|| {
+                            ClError::ParseError(format!(
+                                "Line {}: [state] requires a name",
+                                line_num + 1
+                            ))
+                        })?
+                        .to_string();
                     current_state_name = Some(name.clone());
                     cl.states.entry(name).or_default();
                     current_section = Some("state".to_string());
@@ -124,7 +130,9 @@ pub fn parse(content: &str) -> Result<ContextLang, ClError> {
                 }
                 other => {
                     return Err(ClError::ParseError(format!(
-                        "Line {}: Unknown section [{}]", line_num + 1, other
+                        "Line {}: Unknown section [{}]",
+                        line_num + 1,
+                        other
                     )));
                 }
             }
@@ -219,7 +227,9 @@ fn parse_assignment(line: &str, line_num: usize) -> Result<(String, String), ClE
     let parts: Vec<&str> = line.splitn(2, '=').collect();
     if parts.len() != 2 {
         return Err(ClError::ParseError(format!(
-            "Line {}: Expected 'key = value', got '{}'", line_num + 1, line
+            "Line {}: Expected 'key = value', got '{}'",
+            line_num + 1,
+            line
         )));
     }
 
@@ -240,7 +250,9 @@ fn parse_transition(line: &str, line_num: usize) -> Result<ClTransition, ClError
     let parts: Vec<&str> = line.splitn(2, "->").collect();
     if parts.len() != 2 {
         return Err(ClError::ParseError(format!(
-            "Line {}: Expected 'from -> to : when condition', got '{}'", line_num + 1, line
+            "Line {}: Expected 'from -> to : when condition', got '{}'",
+            line_num + 1,
+            line
         )));
     }
 
@@ -256,7 +268,11 @@ fn parse_transition(line: &str, line_num: usize) -> Result<ClTransition, ClError
         String::new()
     };
 
-    Ok(ClTransition { from, to, condition })
+    Ok(ClTransition {
+        from,
+        to,
+        condition,
+    })
 }
 
 fn parse_auto_rule(line: &str, line_num: usize) -> Result<ClAutoRule, ClError> {
@@ -264,17 +280,15 @@ fn parse_auto_rule(line: &str, line_num: usize) -> Result<ClAutoRule, ClError> {
     let parts: Vec<&str> = line.splitn(2, "->").collect();
     if parts.len() != 2 {
         return Err(ClError::ParseError(format!(
-            "Line {}: Expected 'condition -> use state', got '{}'", line_num + 1, line
+            "Line {}: Expected 'condition -> use state', got '{}'",
+            line_num + 1,
+            line
         )));
     }
 
     let condition = parts[0].trim().to_string();
     let rest = parts[1].trim();
-    let target_state = rest
-        .strip_prefix("use ")
-        .unwrap_or(rest)
-        .trim()
-        .to_string();
+    let target_state = rest.strip_prefix("use ").unwrap_or(rest).trim().to_string();
 
     Ok(ClAutoRule {
         condition,
@@ -287,18 +301,26 @@ fn parse_override(line: &str, line_num: usize) -> Result<ClOverride, ClError> {
     let parts: Vec<&str> = line.splitn(2, "->").collect();
     if parts.len() != 2 {
         return Err(ClError::ParseError(format!(
-            "Line {}: Expected 'if condition -> key = value', got '{}'", line_num + 1, line
+            "Line {}: Expected 'if condition -> key = value', got '{}'",
+            line_num + 1,
+            line
         )));
     }
 
     let condition = parts[0].trim();
-    let condition = condition.strip_prefix("if ").unwrap_or(condition).trim().to_string();
+    let condition = condition
+        .strip_prefix("if ")
+        .unwrap_or(condition)
+        .trim()
+        .to_string();
 
     let kv = parts[1].trim();
     let kv_parts: Vec<&str> = kv.splitn(2, '=').collect();
     if kv_parts.len() != 2 {
         return Err(ClError::ParseError(format!(
-            "Line {}: Expected 'key = value' after ->, got '{}'", line_num + 1, kv
+            "Line {}: Expected 'key = value' after ->, got '{}'",
+            line_num + 1,
+            kv
         )));
     }
 
@@ -322,18 +344,26 @@ fn parse_secret_override(line: &str, line_num: usize) -> Result<ClSecretOverride
     let parts: Vec<&str> = line.splitn(2, "->").collect();
     if parts.len() != 2 {
         return Err(ClError::ParseError(format!(
-            "Line {}: Expected 'if condition -> key = value', got '{}'", line_num + 1, line
+            "Line {}: Expected 'if condition -> key = value', got '{}'",
+            line_num + 1,
+            line
         )));
     }
 
     let condition = parts[0].trim();
-    let condition = condition.strip_prefix("if ").unwrap_or(condition).trim().to_string();
+    let condition = condition
+        .strip_prefix("if ")
+        .unwrap_or(condition)
+        .trim()
+        .to_string();
 
     let kv = parts[1].trim();
     let kv_parts: Vec<&str> = kv.splitn(2, '=').collect();
     if kv_parts.len() != 2 {
         return Err(ClError::ParseError(format!(
-            "Line {}: Expected 'key = value' after ->, got '{}'", line_num + 1, kv
+            "Line {}: Expected 'key = value' after ->, got '{}'",
+            line_num + 1,
+            kv
         )));
     }
 
@@ -348,7 +378,9 @@ fn parse_secret_override(line: &str, line_num: usize) -> Result<ClSecretOverride
     if !ALLOWED_SECRET_FIELDS.contains(&key.as_str()) {
         return Err(ClError::ParseError(format!(
             "Line {}: Secret field '{}' is not allowed. Allowed: {:?}",
-            line_num + 1, key, ALLOWED_SECRET_FIELDS
+            line_num + 1,
+            key,
+            ALLOWED_SECRET_FIELDS
         )));
     }
 
@@ -440,7 +472,10 @@ fn resolve_auto_state(
 }
 
 /// Evaluate a condition against context. Supports ==, !=, >, <, >=, <=, &&, ||.
-pub fn evaluate_condition(condition: &str, context: &serde_json::Map<String, serde_json::Value>) -> bool {
+pub fn evaluate_condition(
+    condition: &str,
+    context: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
     let condition = condition.trim();
 
     if condition.contains("&&") {
@@ -545,18 +580,15 @@ pub fn load_file(path: &str) -> Result<ContextLang, ClError> {
     if let Ok(content) = std::fs::read_to_string(path) {
         return parse(&content);
     }
-    let cl_dir = std::env::var("CONTEXTLANGUAGE_DIR")
-        .unwrap_or_else(|_| "contextlanguage".to_string());
+    let cl_dir =
+        std::env::var("CONTEXTLANGUAGE_DIR").unwrap_or_else(|_| "contextlanguage".to_string());
     let cl_path = format!("{}/{}", cl_dir, path);
     let content = std::fs::read_to_string(&cl_path)?;
     parse(&content)
 }
 
 /// Evaluate transitions and advance to next state if condition is met.
-pub fn advance_state(
-    cl: &ContextLang,
-    context: &serde_json::Value,
-) -> Option<String> {
+pub fn advance_state(cl: &ContextLang, context: &serde_json::Value) -> Option<String> {
     let obj = match context.as_object() {
         Some(o) => o,
         None => return None,
@@ -602,10 +634,7 @@ pub fn transition_to(
 }
 
 /// Get the next state in the @steps sequence.
-pub fn next_step_state(
-    cl: &ContextLang,
-    context: &serde_json::Value,
-) -> Option<String> {
+pub fn next_step_state(cl: &ContextLang, context: &serde_json::Value) -> Option<String> {
     let obj = match context.as_object() {
         Some(o) => o,
         None => return None,

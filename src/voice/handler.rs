@@ -1,6 +1,6 @@
-use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
 use dashmap::DashMap;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 
 pub struct VoiceState {
     pub guild_id: u64,
@@ -73,15 +73,29 @@ impl VoiceHandler {
                 let dropped = buf.len();
                 buf.clear();
                 if dropped > 0 {
-                    tracing::info!("SSRC {} -> user {} (NOT allowed, dropped {} buffered samples)", ssrc, user_id, dropped);
+                    tracing::info!(
+                        "SSRC {} -> user {} (NOT allowed, dropped {} buffered samples)",
+                        ssrc,
+                        user_id,
+                        dropped
+                    );
                 }
             }
-            tracing::info!("SSRC {} -> user {} (not in allowed list, audio discarded)", ssrc, user_id);
+            tracing::info!(
+                "SSRC {} -> user {} (not in allowed list, audio discarded)",
+                ssrc,
+                user_id
+            );
             return;
         }
 
         let buffered = self.user_buffers.get(&ssrc).map(|b| b.len()).unwrap_or(0);
-        tracing::info!("SSRC {} -> user {} ({} buffered samples pending)", ssrc, user_id, buffered);
+        tracing::info!(
+            "SSRC {} -> user {} ({} buffered samples pending)",
+            ssrc,
+            user_id,
+            buffered
+        );
     }
 
     pub fn get_user_from_ssrc(&self, ssrc: u32) -> Option<u64> {
@@ -107,7 +121,11 @@ impl VoiceHandler {
                 if current_len >= MAX_UNMAPPED_SAMPLES {
                     return;
                 }
-                tracing::debug!("VOICE_HANDLER: No SSRC mapping for {}, buffering anyway ({} samples)", ssrc, current_len);
+                tracing::debug!(
+                    "VOICE_HANDLER: No SSRC mapping for {}, buffering anyway ({} samples)",
+                    ssrc,
+                    current_len
+                );
             }
         }
 
@@ -115,12 +133,20 @@ impl VoiceHandler {
         let has_content = max_amp > 10;
 
         if !has_content {
-            tracing::trace!("VOICE_HANDLER: Noise filtered ssrc={} max_amp={}", ssrc, max_amp);
+            tracing::trace!(
+                "VOICE_HANDLER: Noise filtered ssrc={} max_amp={}",
+                ssrc,
+                max_amp
+            );
             return;
         }
 
-        self.user_buffers.entry(ssrc).or_insert_with(Vec::new).extend_from_slice(audio);
-        self.user_last_speech.insert(ssrc, std::time::Instant::now());
+        self.user_buffers
+            .entry(ssrc)
+            .or_insert_with(Vec::new)
+            .extend_from_slice(audio);
+        self.user_last_speech
+            .insert(ssrc, std::time::Instant::now());
 
         let mut buffer = self.audio_buffer.lock().await;
         buffer.extend_from_slice(audio);
@@ -131,14 +157,27 @@ impl VoiceHandler {
         drop(last_time);
         let mut last_ssrc = self.last_active_ssrc.lock().await;
         *last_ssrc = Some(ssrc);
-        tracing::debug!("VOICE_HANDLER: Audio content ssrc={} samples={} buffer_len={}", ssrc, audio.len(), buffer_len);
+        tracing::debug!(
+            "VOICE_HANDLER: Audio content ssrc={} samples={} buffer_len={}",
+            ssrc,
+            audio.len(),
+            buffer_len
+        );
     }
 
     pub async fn process_audio(&self, current_ssrc: u32) {
+        self.process_audio_inner(current_ssrc, false).await;
+    }
+
+    pub async fn process_audio_inner(&self, current_ssrc: u32, force_flush: bool) {
         let user_id = match self.get_user_from_ssrc(current_ssrc) {
             Some(discord_id) => {
                 if !self.is_user_allowed(discord_id).await {
-                    tracing::debug!("VOICE_HANDLER: SSRC {} mapped to user {} (not allowed), dropping", current_ssrc, discord_id);
+                    tracing::debug!(
+                        "VOICE_HANDLER: SSRC {} mapped to user {} (not allowed), dropping",
+                        current_ssrc,
+                        discord_id
+                    );
                     return;
                 }
                 discord_id.to_string()
@@ -148,7 +187,11 @@ impl VoiceHandler {
                 let fallback = self.fallback_user_id.lock().await.clone();
                 match fallback {
                     Some(user_id) => {
-                        tracing::debug!("VOICE_HANDLER: No SSRC mapping for {}, using fallback user {}", current_ssrc, user_id);
+                        tracing::debug!(
+                            "VOICE_HANDLER: No SSRC mapping for {}, using fallback user {}",
+                            current_ssrc,
+                            user_id
+                        );
                         user_id
                     }
                     None => {
@@ -159,7 +202,8 @@ impl VoiceHandler {
             }
         };
 
-        let max_buffer_samples = self.sample_rate as usize * 3; // 3 seconds
+        let auto_pause = *self.auto_pause_enabled.lock().await;
+        let max_buffer_samples = self.sample_rate as usize * 3; // 3s only used when auto_pause is on
         let pause_threshold = std::time::Duration::from_secs_f32(1.5);
 
         let time_since_speech = if let Some(last) = self.user_last_speech.get(&current_ssrc) {
@@ -168,27 +212,39 @@ impl VoiceHandler {
             return;
         };
 
-        let is_pause = time_since_speech >= pause_threshold;
-        let buffer_full = self.user_buffers.get(&current_ssrc).map(|b| b.len() >= max_buffer_samples).unwrap_or(false);
+        let is_pause = auto_pause && time_since_speech >= pause_threshold;
+        let buffer_full = auto_pause
+            && self
+                .user_buffers
+                .get(&current_ssrc)
+                .map(|b| b.len() >= max_buffer_samples)
+                .unwrap_or(false);
 
-        if !is_pause && !buffer_full {
+        if !is_pause && !buffer_full && !force_flush {
             return;
         }
 
-        let (buffer_len, audio_data) = if let Some(mut entry) = self.user_buffers.get_mut(&current_ssrc) {
-            let len = entry.len();
-            let data = entry.clone();
-            entry.clear();
-            (len, data)
-        } else {
-            return;
-        };
+        let (buffer_len, audio_data) =
+            if let Some(mut entry) = self.user_buffers.get_mut(&current_ssrc) {
+                let len = entry.len();
+                let data = entry.clone();
+                entry.clear();
+                (len, data)
+            } else {
+                return;
+            };
 
         if buffer_len == 0 {
             return;
         }
 
-        let reason = if is_pause { "pause" } else { "buffer full" };
+        let reason = if force_flush {
+            "speaking ended"
+        } else if is_pause {
+            "pause"
+        } else {
+            "buffer full"
+        };
         tracing::info!("VOICE_HANDLER: {} ({}ms since speech), sending {} samples for transcription (ssrc={}, user={})",
             reason, time_since_speech.as_millis(), buffer_len, current_ssrc, user_id);
 
@@ -201,7 +257,10 @@ impl VoiceHandler {
     pub async fn process_all_buffers(&self) {
         let ssrcs: Vec<u32> = self.user_buffers.iter().map(|e| *e.key()).collect();
         if !ssrcs.is_empty() {
-            tracing::debug!("VOICE_HANDLER: process_all_buffers checking {} buffered ssrcs", ssrcs.len());
+            tracing::debug!(
+                "VOICE_HANDLER: process_all_buffers checking {} buffered ssrcs",
+                ssrcs.len()
+            );
         }
         for ssrc in ssrcs {
             self.process_audio(ssrc).await;
@@ -239,12 +298,18 @@ impl VoiceHandler {
 #[cfg(feature = "songbird")]
 pub mod songbird_integration {
     use super::*;
-    use songbird::events::{Event, EventContext, EventHandler as SongbirdEventHandler};
-    use songbird::{Config, driver::{DecodeMode, DecodeConfig, Channels, SampleRate}};
     use async_trait::async_trait;
+    use songbird::events::{Event, EventContext, EventHandler as SongbirdEventHandler};
+    use songbird::{
+        driver::{Channels, DecodeConfig, DecodeMode, SampleRate},
+        Config,
+    };
 
     pub fn create_songbird_config() -> Config {
-        Config::default().decode_mode(DecodeMode::Decode(DecodeConfig::new(Channels::Mono, SampleRate::Hz16000)))
+        Config::default().decode_mode(DecodeMode::Decode(DecodeConfig::new(
+            Channels::Mono,
+            SampleRate::Hz16000,
+        )))
     }
 
     #[derive(Clone)]
@@ -263,18 +328,34 @@ pub mod songbird_integration {
         async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
             match ctx {
                 EventContext::SpeakingStateUpdate(speaking) => {
-                    tracing::info!("VOICE_EVENT: SpeakingStateUpdate ssrc={}, user_id={:?}", speaking.ssrc, speaking.user_id);
+                    tracing::info!(
+                        "VOICE_EVENT: SpeakingStateUpdate ssrc={}, user_id={:?}",
+                        speaking.ssrc,
+                        speaking.user_id
+                    );
                     if let Some(user_id) = speaking.user_id {
                         self.handler.set_ssrc_user(speaking.ssrc, user_id.0).await;
                     }
-                },
+                }
                 EventContext::VoiceTick(tick) => {
                     if !tick.speaking.is_empty() {
-                        let ssrc_info: Vec<String> = tick.speaking.iter().map(|(ssrc, data)| {
-                            let has_voice = data.decoded_voice.as_ref().map(|v| v.iter().filter(|&&s| s != 0).count()).unwrap_or(0);
-                            format!("ssrc={}({} nonzero samples)", ssrc, has_voice)
-                        }).collect();
-                        tracing::info!("VOICE_EVENT: VoiceTick with {} speaker(s): {}", tick.speaking.len(), ssrc_info.join(", "));
+                        let ssrc_info: Vec<String> = tick
+                            .speaking
+                            .iter()
+                            .map(|(ssrc, data)| {
+                                let has_voice = data
+                                    .decoded_voice
+                                    .as_ref()
+                                    .map(|v| v.iter().filter(|&&s| s != 0).count())
+                                    .unwrap_or(0);
+                                format!("ssrc={}({} nonzero samples)", ssrc, has_voice)
+                            })
+                            .collect();
+                        tracing::info!(
+                            "VOICE_EVENT: VoiceTick with {} speaker(s): {}",
+                            tick.speaking.len(),
+                            ssrc_info.join(", ")
+                        );
                     }
                     for (ssrc, data) in &tick.speaking {
                         if let Some(decoded_voice) = &data.decoded_voice {
@@ -282,7 +363,9 @@ pub mod songbird_integration {
                             if non_zero > 0 {
                                 // If we don't have SSRC mapping yet, try to use fallback user
                                 if self.handler.get_user_from_ssrc(*ssrc).is_none() {
-                                    if let Some(fallback) = self.handler.fallback_user_id.lock().await.as_ref() {
+                                    if let Some(fallback) =
+                                        self.handler.fallback_user_id.lock().await.as_ref()
+                                    {
                                         tracing::debug!("VOICE_EVENT: No SSRC mapping for {}, using fallback user {}", ssrc, fallback);
                                         // We can't set_ssrc_user here because we don't know the real Discord ID
                                         // Just add audio with unknown SSRC - it will be buffered
@@ -292,24 +375,26 @@ pub mod songbird_integration {
                             }
                         }
                     }
-                    let mut ssrcs_to_process: Vec<u32> = tick.speaking.keys().copied().collect();
+                    let speaking_ssrcs: Vec<u32> = tick.speaking.keys().copied().collect();
+                    let mut ssrcs_to_process: Vec<(u32, bool)> =
+                        speaking_ssrcs.iter().map(|s| (*s, false)).collect();
                     for entry in self.handler.user_buffers.iter() {
                         let ssrc = *entry.key();
-                        if !ssrcs_to_process.contains(&ssrc) && !entry.value().is_empty() {
-                            ssrcs_to_process.push(ssrc);
+                        if !speaking_ssrcs.contains(&ssrc) && !entry.value().is_empty() {
+                            ssrcs_to_process.push((ssrc, true)); // force flush for non-speaking SSRCs
                         }
                     }
-                    for ssrc in ssrcs_to_process {
-                        let _ = self.handler.process_audio(ssrc).await;
+                    for (ssrc, force_flush) in ssrcs_to_process {
+                        let _ = self.handler.process_audio_inner(ssrc, force_flush).await;
                     }
-                },
+                }
                 EventContext::ClientDisconnect(disc) => {
                     tracing::debug!("VOICE_EVENT: ClientDisconnect user_id={}", disc.user_id);
                     if disc.user_id.0 != 0 {
                         self.handler.remove_user(disc.user_id.0);
                     }
-                },
-                _ => {},
+                }
+                _ => {}
             }
             None
         }
@@ -414,7 +499,10 @@ mod handler_tests {
         let audio = vec![1000i16; 16000];
         handler.add_audio_raw(&audio, 100).await;
 
-        handler.user_last_speech.insert(100, std::time::Instant::now() - std::time::Duration::from_secs(1));
+        handler.user_last_speech.insert(
+            100,
+            std::time::Instant::now() - std::time::Duration::from_secs(1),
+        );
 
         handler.process_audio(100).await;
 
@@ -436,7 +524,10 @@ mod handler_tests {
         assert!(handler.user_buffers.get(&999).is_some());
         assert_eq!(handler.user_buffers.get(&999).unwrap().len(), 16000);
 
-        handler.user_last_speech.insert(999, std::time::Instant::now() - std::time::Duration::from_secs(1));
+        handler.user_last_speech.insert(
+            999,
+            std::time::Instant::now() - std::time::Duration::from_secs(1),
+        );
 
         handler.process_audio(999).await;
 
@@ -455,7 +546,10 @@ mod handler_tests {
         let audio = vec![1000i16; 100];
         handler.add_audio_raw(&audio, 100).await;
 
-        handler.user_last_speech.insert(100, std::time::Instant::now() - std::time::Duration::from_secs(1));
+        handler.user_last_speech.insert(
+            100,
+            std::time::Instant::now() - std::time::Duration::from_secs(1),
+        );
 
         handler.process_audio(100).await;
 

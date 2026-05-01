@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::Database;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
@@ -334,7 +334,6 @@ impl Database {
         ctx.turn += 1;
     }
 }
-
 
 #[cfg(test)]
 mod db_tests {

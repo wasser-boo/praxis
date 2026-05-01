@@ -1,7 +1,7 @@
+use crate::gateway::GatewayState;
 use axum::extract::State;
 use axum::Json;
 use serde::Serialize;
-use crate::gateway::GatewayState;
 
 #[derive(Serialize)]
 pub struct HealthResponse {
@@ -19,9 +19,7 @@ pub struct StatusResponse {
     pub default_provider: String,
 }
 
-pub async fn health_check(
-    State(state): State<GatewayState>,
-) -> Json<HealthResponse> {
+pub async fn health_check(State(state): State<GatewayState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
         uptime_secs: state.start_time.elapsed().as_secs(),
@@ -29,9 +27,7 @@ pub async fn health_check(
     })
 }
 
-pub async fn status(
-    State(state): State<GatewayState>,
-) -> Json<StatusResponse> {
+pub async fn status(State(state): State<GatewayState>) -> Json<StatusResponse> {
     let providers: Vec<String> = state.llm.provider_names();
     let default_provider = state.config.use_provider.clone();
 
