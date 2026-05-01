@@ -477,16 +477,7 @@ impl EventHandler for DiscordHandler {
                                     let voice_handler =
                                         Arc::new(crate::voice::handler::VoiceHandler::new());
 
-                                    // Set fallback user from the Discord user who invoked /join
                                     let fallback_discord_id = command.user.id.get();
-                                    if let Ok(Some(pairing)) = self
-                                        .db
-                                        .get_pairing_by_discord(&fallback_discord_id.to_string())
-                                    {
-                                        voice_handler
-                                            .set_fallback_user(pairing.user_id.clone())
-                                            .await;
-                                    }
 
                                     // Set allowed Discord user IDs (only paired users)
                                     let mut allowed_ids = vec![fallback_discord_id];

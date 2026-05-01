@@ -183,22 +183,11 @@ impl VoiceHandler {
                 discord_id.to_string()
             }
             None => {
-                // No SSRC mapping - use fallback user if available
-                let fallback = self.fallback_user_id.lock().await.clone();
-                match fallback {
-                    Some(user_id) => {
-                        tracing::debug!(
-                            "VOICE_HANDLER: No SSRC mapping for {}, using fallback user {}",
-                            current_ssrc,
-                            user_id
-                        );
-                        user_id
-                    }
-                    None => {
-                        tracing::debug!("VOICE_HANDLER: No SSRC mapping for {} and no fallback user, waiting for SpeakingStateUpdate", current_ssrc);
-                        return;
-                    }
-                }
+                tracing::debug!(
+                    "VOICE_HANDLER: No SSRC mapping for {}, waiting for SpeakingStateUpdate",
+                    current_ssrc
+                );
+                return;
             }
         };
 
@@ -255,6 +244,7 @@ impl VoiceHandler {
     }
 
     pub async fn process_all_buffers(&self) {
+        const UNMAPPED_BUFFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
         let ssrcs: Vec<u32> = self.user_buffers.iter().map(|e| *e.key()).collect();
         if !ssrcs.is_empty() {
             tracing::debug!(
@@ -263,7 +253,28 @@ impl VoiceHandler {
             );
         }
         for ssrc in ssrcs {
-            self.process_audio(ssrc).await;
+            if self.get_user_from_ssrc(ssrc).is_some() {
+                self.process_audio(ssrc).await;
+            } else {
+                let stale = self
+                    .user_last_speech
+                    .get(&ssrc)
+                    .map(|t| t.elapsed() >= UNMAPPED_BUFFER_TIMEOUT)
+                    .unwrap_or(true);
+                if stale {
+                    if let Some(mut buf) = self.user_buffers.get_mut(&ssrc) {
+                        let dropped = buf.len();
+                        buf.clear();
+                        if dropped > 0 {
+                            tracing::debug!(
+                                "VOICE_HANDLER: Cleared stale unmapped buffer for ssrc={} ({} samples)",
+                                ssrc,
+                                dropped
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -361,16 +372,6 @@ pub mod songbird_integration {
                         if let Some(decoded_voice) = &data.decoded_voice {
                             let non_zero = decoded_voice.iter().filter(|&&s| s != 0).count();
                             if non_zero > 0 {
-                                // If we don't have SSRC mapping yet, try to use fallback user
-                                if self.handler.get_user_from_ssrc(*ssrc).is_none() {
-                                    if let Some(fallback) =
-                                        self.handler.fallback_user_id.lock().await.as_ref()
-                                    {
-                                        tracing::debug!("VOICE_EVENT: No SSRC mapping for {}, using fallback user {}", ssrc, fallback);
-                                        // We can't set_ssrc_user here because we don't know the real Discord ID
-                                        // Just add audio with unknown SSRC - it will be buffered
-                                    }
-                                }
                                 self.handler.add_audio_raw(decoded_voice, *ssrc).await;
                             }
                         }
@@ -504,7 +505,7 @@ mod handler_tests {
             std::time::Instant::now() - std::time::Duration::from_secs(1),
         );
 
-        handler.process_audio(100).await;
+        handler.process_audio_inner(100, true).await;
 
         let msg = rx.recv().await;
         assert!(msg.is_some());
