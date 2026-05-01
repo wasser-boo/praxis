@@ -741,7 +741,7 @@ impl EventHandler for DiscordHandler {
                                             // Send text response to Discord channel
                                             if let Some(text) = response_text {
                                                 if !text.trim().is_empty() {
-                                                    let guild = serenity::model::id::GuildId::new(guild_id);
+                                                    let guild = guild_id;
                                                     if let Ok(channels) = guild.channels(&http).await {
                                                         if let Some((channel_id, _)) = channels.iter()
                                                             .find(|(_, ch)| ch.kind == serenity::model::channel::ChannelType::Text)
