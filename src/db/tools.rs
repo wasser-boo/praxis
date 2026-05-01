@@ -117,12 +117,6 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
             is_enabled: true,
         },
         Tool {
-            name: "web_search".into(),
-            description: Some("Search the web".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
-            is_enabled: true,
-        },
-        Tool {
             name: "get_context".into(),
             description: Some("Read current context".into()),
             parameters: serde_json::json!({"type":"object","properties":{}}),

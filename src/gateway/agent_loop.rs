@@ -1,5 +1,5 @@
 use crate::cl;
-use crate::gateway::llm::provider::{ChatMessage, ChatRequest, ToolCall, ToolDefinition};
+use crate::gateway::llm::provider::{ChatMessage, ChatRequest, ToolCall};
 use crate::gateway::GatewayState;
 use crate::tags::{self, TagExecution};
 
@@ -48,6 +48,19 @@ pub async fn run_agent_loop(
 
     // Load context
     let mut ctx = state.db.load_context(user_id)?;
+
+    // Merge plugin context defaults into custom_data
+    let plugin_defaults = state.plugins.context_defaults();
+    if !plugin_defaults.is_empty() {
+        if ctx.custom_data.is_null() {
+            ctx.custom_data = serde_json::json!({});
+        }
+        if let Some(obj) = ctx.custom_data.as_object_mut() {
+            for (key, value) in &plugin_defaults {
+                obj.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+    }
 
     // Apply CL workflow if configured
     if let Some(ref cl_path) = config.cl_file {
@@ -132,8 +145,9 @@ pub async fn run_agent_loop(
             });
         }
 
-        // Get tool definitions from database
-        let tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
+        // Get tool definitions from database + plugins
+        let mut tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
+        tools.extend(state.plugins.tool_definitions());
 
         let request = ChatRequest {
             messages,
@@ -188,7 +202,7 @@ pub async fn run_agent_loop(
                     }
                 }
 
-                let result = execute_tool_call(&state.db, user_id, tc).await;
+                let result = execute_tool_call(&state.db, user_id, tc, &state.plugins).await;
                 state.db.add_message(
                     user_id,
                     &crate::db::messages::Message::tool(result.clone(), tc.id.clone()),
@@ -443,11 +457,23 @@ async fn build_system_prompt(
     }
 }
 
-async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCall) -> String {
+async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCall, plugins: &crate::plugins::PluginRegistry) -> String {
     let args: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
         Ok(v) => v,
         Err(e) => return format!("Error parsing arguments: {}", e),
     };
+
+    let ctx_data = db.load_context(user_id)
+        .ok()
+        .map(|ctx| ctx.custom_data)
+        .filter(|v| !v.is_null());
+
+    let plugin_secret_keys = plugins.collect_secrets();
+    let all_secrets = crate::db::secrets::get_secrets();
+    let plugin_secrets: std::collections::HashMap<String, String> = plugin_secret_keys
+        .iter()
+        .filter_map(|k| all_secrets.custom.get(k).map(|v| (k.clone(), v.clone())))
+        .collect();
 
     match tc.function.name.as_str() {
         "execute_terminal" => {
@@ -673,7 +699,10 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
                 Err(e) => format!("Error: {}", e),
             }
         }
-        _ => format!("Unknown tool: {}", tc.function.name),
+        _ => match plugins.execute_tool(&tc.function.name, &args, ctx_data.as_ref(), Some(&plugin_secrets)).await {
+            Ok(result) => result,
+            Err(e) => format!("Unknown tool: {} ({})", tc.function.name, e),
+        },
     }
 }
 

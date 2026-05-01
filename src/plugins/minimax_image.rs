@@ -1,11 +1,14 @@
 use super::{Plugin, PluginHandler, PluginTool};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub fn create_plugin() -> Plugin {
     Plugin {
         name: "minimax_image".to_string(),
         description: "MiniMax image generation and analysis tools".to_string(),
         version: "1.0.0".to_string(),
+        context: HashMap::new(),
+        secrets: Vec::new(),
         tools: vec![
             PluginTool {
                 name: "image_generate".to_string(),

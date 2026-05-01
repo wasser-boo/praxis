@@ -33,6 +33,11 @@ enum Cli {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Manage plugins
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -54,6 +59,24 @@ enum ServiceAction {
     },
 }
 
+#[derive(clap::Subcommand)]
+enum PluginAction {
+    /// Install a plugin from a local directory
+    Install {
+        /// Path to the plugin directory (must contain plugin.json)
+        #[arg(value_name = "PLUGIN_PATH")]
+        path: String,
+    },
+    /// Uninstall a plugin and clean up its context and secrets
+    Uninstall {
+        /// Name of the plugin to uninstall
+        #[arg(value_name = "PLUGIN_NAME")]
+        name: String,
+    },
+    /// List installed plugins
+    List,
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
@@ -67,9 +90,12 @@ async fn run() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Service commands don't need logging setup
+    // Service and Plugin commands don't need logging setup
     if let Cli::Service { action } = &cli {
         return handle_service_action(action).await;
+    }
+    if let Cli::Plugin { action } = &cli {
+        return handle_plugin_action(action).await;
     }
 
     // Set up logging with file rotation
@@ -108,6 +134,7 @@ async fn run() -> anyhow::Result<()> {
             anyhow::bail!("Onboard requires --interactive flag");
         }
         Cli::Service { .. } => unreachable!(),
+        Cli::Plugin { .. } => unreachable!(),
     }
 }
 
@@ -344,6 +371,161 @@ WantedBy=multi-user.target
         }
     }
 
+    Ok(())
+}
+
+async fn handle_plugin_action(action: &PluginAction) -> anyhow::Result<()> {
+    let plugins_dir = std::env::var("PLUGINS_DIR").unwrap_or_else(|_| "./plugins".to_string());
+    let plugins_path = Path::new(&plugins_dir);
+
+    match action {
+        PluginAction::Install { path } => {
+            let src = Path::new(path);
+            if !src.is_dir() {
+                anyhow::bail!("Plugin path '{}' is not a directory", path);
+            }
+            let manifest = src.join("plugin.json");
+            if !manifest.exists() {
+                anyhow::bail!("No plugin.json found in '{}'", path);
+            }
+
+            let data = std::fs::read_to_string(&manifest)?;
+            let plugin: praxis::plugins::Plugin = serde_json::from_str(&data)?;
+
+            let dest = plugins_path.join(&plugin.name);
+            if dest.exists() {
+                anyhow::bail!("Plugin '{}' already installed at '{}'", plugin.name, dest.display());
+            }
+
+            std::fs::create_dir_all(plugins_path)?;
+            copy_dir_recursive(src, &dest)?;
+
+            println!("Plugin '{}' installed to {}", plugin.name, dest.display());
+            println!("  Tools: {}", plugin.tools.len());
+            println!("  Context vars: {}", plugin.context.len());
+            println!("  Secrets: {}", plugin.secrets.len());
+            if !plugin.secrets.is_empty() {
+                println!("  Configure secrets via dashboard or API before use.");
+            }
+        }
+        PluginAction::Uninstall { name } => {
+            let plugin_dir = plugins_path.join(name);
+            if !plugin_dir.exists() {
+                anyhow::bail!("Plugin '{}' not found at '{}'", name, plugin_dir.display());
+            }
+
+            let manifest = plugin_dir.join("plugin.json");
+            let (context_keys, secret_keys) = if manifest.exists() {
+                let data = std::fs::read_to_string(&manifest)?;
+                let plugin: praxis::plugins::Plugin = serde_json::from_str(&data)?;
+                let ctx_keys: Vec<String> = plugin.context.keys().cloned().collect();
+                (ctx_keys, plugin.secrets)
+            } else {
+                (vec![], vec![])
+            };
+
+            std::fs::remove_dir_all(&plugin_dir)?;
+            println!("Removed plugin directory: {}", plugin_dir.display());
+
+            let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+            if Path::new(&data_dir).exists() {
+                if let Ok(db) = praxis::db::Database::new(Path::new(&data_dir)) {
+                    if !secret_keys.is_empty() {
+                        if praxis::db::secrets::has_secrets() {
+                            println!("Note: Secrets ({}) are stored encrypted. Remove them manually via dashboard.", secret_keys.join(", "));
+                        }
+                    }
+
+                    if !context_keys.is_empty() {
+                        let conn = db.conn();
+                        let mut stmt = conn.prepare("SELECT user_id, data FROM contexts")?;
+                        let rows = stmt.query_map([], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })?;
+
+                        let mut cleaned = 0;
+                        for row in rows {
+                            let (user_id, data) = row?;
+                            if let Ok(mut ctx) = serde_json::from_str::<serde_json::Value>(&data) {
+                                if let Some(obj) = ctx.get_mut("custom_data").and_then(|v| v.as_object_mut()) {
+                                    let before = obj.len();
+                                    for key in &context_keys {
+                                        obj.remove(key);
+                                    }
+                                    if obj.len() < before {
+                                        conn.execute(
+                                            "UPDATE contexts SET data = ?1, updated_at = datetime('now') WHERE user_id = ?2",
+                                            rusqlite::params![serde_json::to_string(&ctx)?, user_id],
+                                        )?;
+                                        cleaned += 1;
+                                    }
+                                }
+                            }
+                        }
+                        if cleaned > 0 {
+                            println!("Cleaned context variables ({}) from {} user(s)", context_keys.join(", "), cleaned);
+                        }
+                    }
+                }
+            }
+
+            println!("Plugin '{}' uninstalled.", name);
+        }
+        PluginAction::List => {
+            if !plugins_path.exists() {
+                println!("No plugins directory found at '{}'", plugins_dir);
+                return Ok(());
+            }
+
+            let mut found = false;
+            for entry in std::fs::read_dir(plugins_path)? {
+                let entry = entry?;
+                let dir = entry.path();
+                if !dir.is_dir() {
+                    continue;
+                }
+                let manifest = dir.join("plugin.json");
+                if !manifest.exists() {
+                    continue;
+                }
+                match std::fs::read_to_string(&manifest) {
+                    Ok(data) => match serde_json::from_str::<praxis::plugins::Plugin>(&data) {
+                        Ok(plugin) => {
+                            let status = if plugin.enabled { "enabled" } else { "disabled" };
+                            println!("  {} v{} [{}] — {} tool(s), {} secret(s)",
+                                plugin.name, plugin.version, status,
+                                plugin.tools.len(), plugin.secrets.len());
+                            found = true;
+                        }
+                        Err(e) => {
+                            println!("  {} — invalid manifest: {}", dir.display(), e);
+                            found = true;
+                        }
+                    },
+                    Err(_) => continue,
+                }
+            }
+            if !found {
+                println!("No plugins installed.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_recursive(&path, &dest_path)?;
+        } else {
+            std::fs::copy(&path, &dest_path)?;
+        }
+    }
     Ok(())
 }
 

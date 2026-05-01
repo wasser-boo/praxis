@@ -17,13 +17,32 @@ pub struct GatewayState {
     pub config: crate::config::Config,
     pub secrets: crate::db::secrets::Secrets,
     pub llm: Arc<llm::LLMRouter>,
+    pub plugins: Arc<crate::plugins::PluginRegistry>,
     pub event_tx: tokio::sync::broadcast::Sender<crate::event_channel::GatewayEvent>,
     pub start_time: std::time::Instant,
 }
 
 pub async fn start(db: crate::db::Database, config: crate::config::Config) -> anyhow::Result<()> {
-    let secrets = crate::db::secrets::get_secrets();
+    let mut secrets = crate::db::secrets::get_secrets();
     let event_tx = crate::event_channel::init();
+
+    let plugins_dir = std::env::var("PLUGINS_DIR")
+        .unwrap_or_else(|_| "./plugins".to_string());
+    let plugins = Arc::new(crate::plugins::load_all_plugins(std::path::Path::new(&plugins_dir)));
+
+    let required_secrets = plugins.collect_secrets();
+    let mut secrets_changed = false;
+    for key in &required_secrets {
+        if !secrets.custom.contains_key(key) {
+            tracing::info!(key = %key, "Creating placeholder secret for plugin");
+            secrets.custom.insert(key.clone(), "CHANGE_ME".to_string());
+            secrets_changed = true;
+        }
+    }
+    if secrets_changed {
+        crate::db::secrets::init_secrets(secrets.clone());
+    }
+
     let llm = Arc::new(llm::LLMRouter::new(&config, &secrets));
 
     let state = GatewayState {
@@ -31,6 +50,7 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
         config: config.clone(),
         secrets,
         llm,
+        plugins,
         event_tx,
         start_time: std::time::Instant::now(),
     };

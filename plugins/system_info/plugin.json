@@ -1,0 +1,39 @@
+{
+  "name": "system_info",
+  "description": "System information tools",
+  "version": "1.0.0",
+  "enabled": true,
+  "tools": [
+    {
+      "name": "get_system_info",
+      "description": "Get system information (OS, hostname, uptime, memory, disk usage)",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": {
+        "type": "script",
+        "path": "system_info.py",
+        "interpreter": "python3"
+      }
+    },
+    {
+      "name": "get_process_list",
+      "description": "List running processes, optionally filtered by name",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "filter": {
+            "type": "string",
+            "description": "Filter processes by name (optional)"
+          }
+        }
+      },
+      "handler": {
+        "type": "script",
+        "path": "process_list.py",
+        "interpreter": "python3"
+      }
+    }
+  ]
+}

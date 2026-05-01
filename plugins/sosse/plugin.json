@@ -1,0 +1,62 @@
+{
+  "name": "sosse",
+  "description": "Search and browse documents from a Sosse search engine instance",
+  "version": "1.0.0",
+  "enabled": true,
+  "context": {
+    "sosse_url": ""
+  },
+  "secrets": [
+    "sosse_username",
+    "sosse_password",
+    "sosse_api_key"
+  ],
+  "tools": [
+    {
+      "name": "sosse_search",
+      "description": "Search documents in Sosse. Returns matching documents with title, URL, snippet, and metadata.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query string"
+          },
+          "collection": {
+            "type": "integer",
+            "description": "Optional collection ID to search in"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max results to return (default 20)"
+          }
+        },
+        "required": ["query"]
+      },
+      "handler": {
+        "type": "script",
+        "path": "search.py",
+        "interpreter": "python3"
+      }
+    },
+    {
+      "name": "sosse_get_document",
+      "description": "Get full details of an archived document by its ID. Shows title, URL, content, crawl dates, mimetype, tags, and snapshot status.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "integer",
+            "description": "The document ID to retrieve"
+          }
+        },
+        "required": ["document_id"]
+      },
+      "handler": {
+        "type": "script",
+        "path": "get_document.py",
+        "interpreter": "python3"
+      }
+    }
+  ]
+}

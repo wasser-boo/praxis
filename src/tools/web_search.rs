@@ -32,11 +32,11 @@ pub async fn web_search(query: &str, max_results: usize) -> anyhow::Result<Vec<S
 fn parse_search_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     let mut results = Vec::new();
 
-    let title_re = regex::Regex::new(r#"<a[^>]*class="result__a"[^>]*>(.*?)</a>"#).unwrap();
+    let title_re = regex::Regex::new(r#"(?s)<a[^>]*class="result__a"[^>]*>(.*?)</a>"#).unwrap();
     let snippet_re =
-        regex::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#).unwrap();
+        regex::Regex::new(r#"(?s)<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#).unwrap();
     let url_re =
-        regex::Regex::new(r#"<a[^>]*class="result__url"[^>]*>(.*?)</a>"#).unwrap();
+        regex::Regex::new(r#"(?s)<a[^>]*class="result__url"[^>]*>(.*?)</a>"#).unwrap();
     let strip_tags = regex::Regex::new(r"<[^>]+>").unwrap();
 
     let titles: Vec<String> = title_re
