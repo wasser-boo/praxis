@@ -195,13 +195,8 @@ async fn execute_script(
 
     if let Some(sec) = secrets {
         if !sec.is_empty() {
-            tracing::info!(path = %path, secret_keys = ?sec.keys().collect::<Vec<_>>(), "Passing PLUGIN_SECRETS to script");
             cmd.env("PLUGIN_SECRETS", serde_json::to_string(sec).unwrap_or_default());
-        } else {
-            tracing::warn!(path = %path, "No plugin secrets to pass (empty map)");
         }
-    } else {
-        tracing::warn!(path = %path, "No plugin secrets to pass (None)");
     }
 
     let output = cmd
@@ -211,11 +206,19 @@ async fn execute_script(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            "(no output)".to_string()
+        };
         anyhow::bail!(
             "Script {} exited with {}: {}",
             path,
             output.status.code().unwrap_or(-1),
-            stderr.trim()
+            detail
         );
     }
 
