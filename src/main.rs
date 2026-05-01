@@ -186,7 +186,7 @@ async fn run_services(
     praxis::dashboard::routes::sync_templates_from_disk(&db);
 
     // Load secrets (encrypted or plaintext)
-    let secrets = if let Some(ref password) = master_password {
+    let mut secrets = if let Some(ref password) = master_password {
         praxis::db::secrets::load_secrets_with_password(password)?
     } else {
         praxis::db::secrets::Secrets {
@@ -201,6 +201,16 @@ async fn run_services(
             ..Default::default()
         }
     };
+
+    // Create placeholder secrets for plugins
+    let plugins_dir = std::env::var("PLUGINS_DIR").unwrap_or_else(|_| "./plugins".to_string());
+    let plugin_registry = praxis::plugins::load_all_plugins(std::path::Path::new(&plugins_dir));
+    for key in plugin_registry.collect_secrets() {
+        if !secrets.custom.contains_key(&key) {
+            tracing::info!(key = %key, "Creating placeholder secret for plugin");
+            secrets.custom.insert(key, "CHANGE_ME".to_string());
+        }
+    }
 
     // Initialize global secrets
     praxis::db::secrets::init_secrets(secrets.clone());

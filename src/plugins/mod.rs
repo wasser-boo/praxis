@@ -30,9 +30,13 @@ pub struct PluginTool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum PluginHandler {
-    Builtin(String),
+    #[serde(rename = "builtin")]
+    Builtin { name: String },
+    #[serde(rename = "http")]
     Http { url: String, method: String },
+    #[serde(rename = "script")]
     Script { path: String, interpreter: String },
 }
 
@@ -123,8 +127,8 @@ impl PluginRegistry {
             for tool in &plugin.tools {
                 if tool.name == tool_name {
                     return match &tool.handler {
-                        PluginHandler::Builtin(builtin_name) => {
-                            minimax_image::execute_builtin(builtin_name, args).await
+                        PluginHandler::Builtin { name } => {
+                            minimax_image::execute_builtin(name, args).await
                         }
                         PluginHandler::Http { url, method } => {
                             execute_http_tool(url, method, args).await
@@ -232,30 +236,11 @@ struct PluginManifest {
     version: String,
     #[serde(default = "default_true")]
     enabled: bool,
-    tools: Vec<ManifestTool>,
+    tools: Vec<PluginTool>,
     #[serde(default)]
     context: HashMap<String, serde_json::Value>,
     #[serde(default)]
     secrets: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ManifestTool {
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
-    handler: ManifestHandler,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum ManifestHandler {
-    #[serde(rename = "script")]
-    Script { path: String, interpreter: String },
-    #[serde(rename = "http")]
-    Http { url: String, method: String },
-    #[serde(rename = "builtin")]
-    Builtin { name: String },
 }
 
 pub fn load_plugins_from_dir(dir: &Path) -> anyhow::Result<Vec<Plugin>> {
@@ -308,22 +293,19 @@ fn load_plugin_from_manifest(manifest_path: &Path, plugin_dir: &Path) -> anyhow:
         .tools
         .into_iter()
         .map(|t| {
-            let handler = match t.handler {
-                ManifestHandler::Script { path, interpreter } => {
-                    let abs_path = plugin_dir.join(&path);
-                    PluginHandler::Script {
+            if let PluginHandler::Script { path, interpreter } = t.handler {
+                let abs_path = plugin_dir.join(&path);
+                PluginTool {
+                    name: t.name,
+                    description: t.description,
+                    parameters: t.parameters,
+                    handler: PluginHandler::Script {
                         path: abs_path.to_string_lossy().to_string(),
                         interpreter,
-                    }
+                    },
                 }
-                ManifestHandler::Http { url, method } => PluginHandler::Http { url, method },
-                ManifestHandler::Builtin { name } => PluginHandler::Builtin(name),
-            };
-            PluginTool {
-                name: t.name,
-                description: t.description,
-                parameters: t.parameters,
-                handler,
+            } else {
+                t
             }
         })
         .collect();
@@ -393,7 +375,7 @@ mod plugin_tests {
                 name: "tool1".to_string(),
                 description: "A tool".to_string(),
                 parameters: serde_json::json!({}),
-                handler: PluginHandler::Builtin("test".to_string()),
+                handler: PluginHandler::Builtin { name: "test".to_string() },
             }],
             context: HashMap::new(),
             secrets: Vec::new(),
@@ -413,7 +395,7 @@ mod plugin_tests {
                 name: "tool1".to_string(),
                 description: "A tool".to_string(),
                 parameters: serde_json::json!({}),
-                handler: PluginHandler::Builtin("test".to_string()),
+                handler: PluginHandler::Builtin { name: "test".to_string() },
             }],
             context: HashMap::new(),
             secrets: Vec::new(),
@@ -480,9 +462,9 @@ mod plugin_tests {
     #[test]
     fn test_manifest_handler_deserialization() {
         let script_json = r#"{"type": "script", "path": "run.py", "interpreter": "python3"}"#;
-        let handler: ManifestHandler = serde_json::from_str(script_json).unwrap();
+        let handler: PluginHandler = serde_json::from_str(script_json).unwrap();
         match handler {
-            ManifestHandler::Script { path, interpreter } => {
+            PluginHandler::Script { path, interpreter } => {
                 assert_eq!(path, "run.py");
                 assert_eq!(interpreter, "python3");
             }
@@ -490,9 +472,9 @@ mod plugin_tests {
         }
 
         let http_json = r#"{"type": "http", "url": "http://localhost:8080", "method": "POST"}"#;
-        let handler: ManifestHandler = serde_json::from_str(http_json).unwrap();
+        let handler: PluginHandler = serde_json::from_str(http_json).unwrap();
         match handler {
-            ManifestHandler::Http { url, method } => {
+            PluginHandler::Http { url, method } => {
                 assert_eq!(url, "http://localhost:8080");
                 assert_eq!(method, "POST");
             }
@@ -500,9 +482,9 @@ mod plugin_tests {
         }
 
         let builtin_json = r#"{"type": "builtin", "name": "image_generate"}"#;
-        let handler: ManifestHandler = serde_json::from_str(builtin_json).unwrap();
+        let handler: PluginHandler = serde_json::from_str(builtin_json).unwrap();
         match handler {
-            ManifestHandler::Builtin { name } => {
+            PluginHandler::Builtin { name } => {
                 assert_eq!(name, "image_generate");
             }
             _ => panic!("Expected Builtin"),
