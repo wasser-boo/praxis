@@ -70,13 +70,9 @@ pub async fn run_agent_loop(
         if let Some(obj) = ctx.custom_data.as_object_mut() {
             obj.insert("user_prompt".to_string(), serde_json::json!(user_message));
 
-            let effective_path = if ctx.settings.path.is_empty() {
-                std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| "/".to_string())
-            } else {
-                ctx.settings.path.clone()
-            };
+            let effective_path = std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "/".to_string());
             obj.insert("path".to_string(), serde_json::json!(effective_path));
             obj.insert(
                 "time".to_string(),
@@ -447,9 +443,19 @@ pub async fn run_agent_loop(
         // Auto-compact if enabled and total history tokens exceed limit
         if ctx.settings.compaction_enabled {
             let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
+            let msg_count = state.db.count_messages(user_id).unwrap_or(0);
             let (_all_messages, total_tokens) = state
                 .db
-                .get_messages_with_token_budget(user_id, usize::MAX)?;
+                .get_messages_with_token_budget(user_id, usize::MAX)
+                .unwrap_or((vec![], 0));
+            tracing::info!(
+                user_id = %user_id,
+                msg_count = msg_count,
+                total_tokens = total_tokens,
+                compaction_limit = compaction_limit,
+                compaction_enabled = ctx.settings.compaction_enabled,
+                "Compaction check"
+            );
             if total_tokens > compaction_limit {
                 tracing::info!(user_id = %user_id, tokens = total_tokens, limit = compaction_limit, "Auto-compacting conversation");
                 if let Ok(summary) = generate_compaction_summary(
@@ -475,6 +481,19 @@ pub async fn run_agent_loop(
                     }
                 }
             }
+        } else {
+            let msg_count = state.db.count_messages(user_id).unwrap_or(0);
+            let (_all_messages, total_tokens) = state
+                .db
+                .get_messages_with_token_budget(user_id, usize::MAX)
+                .unwrap_or((vec![], 0));
+            tracing::info!(
+                user_id = %user_id,
+                msg_count = msg_count,
+                total_tokens = total_tokens,
+                compaction_enabled = false,
+                "Compaction skipped (disabled)"
+            );
         }
 
         if completed {
@@ -576,17 +595,11 @@ async fn build_system_prompt(
         "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     });
 
-    if let Some(ref name) = ctx.user_name {
-        context_json["user_name"] = serde_json::json!(name);
-    }
+    context_json["user_name"] = serde_json::json!(ctx.user_name.as_deref().unwrap_or("User"));
 
-    let effective_path = if ctx.settings.path.is_empty() {
-        std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/".to_string())
-    } else {
-        ctx.settings.path.clone()
-    };
+    let effective_path = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "/".to_string());
     context_json["path"] = serde_json::json!(effective_path);
 
     if let Some(ref state) = ctx.settings.active_state {
@@ -612,7 +625,11 @@ async fn build_system_prompt(
         "variables": memory.custom_variables,
     });
 
-    context_json["custom_data"] = ctx.custom_data.clone();
+    context_json["custom_data"] = if ctx.custom_data.is_null() {
+        serde_json::json!({})
+    } else {
+        ctx.custom_data.clone()
+    };
 
     let template_name = ctx.settings.system_template.as_deref().unwrap_or("system");
     let template_path = format!("templates/{}.poml", template_name);

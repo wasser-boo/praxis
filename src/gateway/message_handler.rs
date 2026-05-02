@@ -39,13 +39,9 @@ pub async fn handle_message(
         if let Some(obj) = ctx.custom_data.as_object_mut() {
             obj.insert("user_prompt".to_string(), serde_json::json!(content));
 
-            let effective_path = if ctx.settings.path.is_empty() {
-                std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| "/".to_string())
-            } else {
-                ctx.settings.path.clone()
-            };
+            let effective_path = std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "/".to_string());
             obj.insert("path".to_string(), serde_json::json!(effective_path));
             obj.insert(
                 "time".to_string(),
@@ -435,13 +431,9 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
         "uptime_secs": uptime_secs,
         "paired_users_count": paired_count,
         "paired_users": paired_list,
-        "path": if ctx.settings.path.is_empty() {
-            std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "/".to_string())
-        } else {
-            ctx.settings.path.clone()
-        },
+        "path": std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "/".to_string()),
         "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         "memory": serde_json::json!({
             "facts": memory.learned_facts,
@@ -449,7 +441,11 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
             "preferences": memory.user_preferences,
             "variables": memory.custom_variables,
         }),
-        "custom_data": ctx.custom_data.clone(),
+        "custom_data": if ctx.custom_data.is_null() {
+            serde_json::json!({})
+        } else {
+            ctx.custom_data.clone()
+        },
     });
 
     match crate::gateway::poml::render(&template_path, &context).await {

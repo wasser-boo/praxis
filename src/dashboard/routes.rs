@@ -520,7 +520,11 @@ async fn update_template(
             "preferences": memory.user_preferences,
             "variables": memory.custom_variables,
         }),
-        "custom_data": ctx.custom_data.clone(),
+        "custom_data": if ctx.custom_data.is_null() {
+            serde_json::json!({})
+        } else {
+            ctx.custom_data.clone()
+        },
         "user_message": "Preview message",
         "user_prompt": "Preview message",
         "user_template": ctx.custom_data.get("user_template").cloned().unwrap_or(serde_json::json!("user")),
