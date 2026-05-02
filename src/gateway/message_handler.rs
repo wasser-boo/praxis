@@ -399,6 +399,7 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
             "preferences": memory.user_preferences,
             "variables": memory.custom_variables,
         }),
+        "custom_data": ctx.custom_data.clone(),
     });
 
     match crate::gateway::poml::render(template_path, &context).await {

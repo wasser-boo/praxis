@@ -115,7 +115,10 @@ pub async fn run_agent_loop(
         .unwrap_or("user");
     let user_template_path = format!("templates/{}.poml", user_template_name);
     let rendered_user_message = if std::path::Path::new(&user_template_path).exists() {
-        let tmpl_ctx = serde_json::json!({ "user_prompt": user_message });
+        let tmpl_ctx = serde_json::json!({
+            "user_prompt": user_message,
+            "custom_data": ctx.custom_data,
+        });
         crate::gateway::poml::render(&user_template_path, &tmpl_ctx).await
             .unwrap_or_else(|_| user_message.to_string())
     } else {
@@ -517,6 +520,8 @@ async fn build_system_prompt(
         "preferences": memory.user_preferences,
         "variables": memory.custom_variables,
     });
+
+    context_json["custom_data"] = ctx.custom_data.clone();
 
     let template_path = "templates/system.poml";
     match crate::gateway::poml::render(template_path, &context_json).await {
