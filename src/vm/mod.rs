@@ -643,11 +643,13 @@ impl VmManager {
             // Send via QMP input-send-event
             if let Some(ref mut qmp) = instance.qmp {
                 let key_events = Self::keys_to_qmp(keys)?;
+                tracing::info!(keys = keys, events = ?key_events, "Sending QMP key events");
                 for (qcode, down) in key_events {
                     qmp.send_key_event(&qcode, down).await?;
                 }
                 return Ok(format!("Sent special key: {}", keys));
             }
+            tracing::warn!(vm = name, "QMP not connected for VM");
             anyhow::bail!("QMP not connected for VM '{}'", name);
         } else {
             // Regular text — send via serial

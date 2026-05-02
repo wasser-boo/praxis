@@ -666,18 +666,36 @@ async fn execute_tool_call(
             .unwrap_or_else(|e| format!("Error: {}", e))
         }
         "discord_upload_file" => {
-            let filename = args["filename"].as_str().unwrap_or("");
+            let channel_id = args["channel_id"].as_str().unwrap_or(user_id);
+            let filename = args["filename"].as_str().unwrap_or("file");
             let base64_content = args["base64_content"].as_str().unwrap_or("");
-            match crate::tools::discord_upload::upload_file(
-                user_id,
-                filename,
-                base64_content,
-                Some(""),
-            )
-            .await
-            {
-                Ok(_) => format!("File '{}' uploaded", filename),
-                Err(e) => format!("Error: {}", e),
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(base64_content) {
+                Ok(bytes) => {
+                    let tmp_path = format!("/tmp/{}", filename);
+                    if let Err(e) = std::fs::write(&tmp_path, &bytes) {
+                        format!("Error writing temp file: {}", e)
+                    } else {
+                        match crate::tools::discord_upload::upload_file(
+                            channel_id,
+                            &tmp_path,
+                            filename,
+                            args.get("message").and_then(|v| v.as_str()),
+                        )
+                        .await
+                        {
+                            Ok(result) => {
+                                let _ = std::fs::remove_file(&tmp_path);
+                                result
+                            }
+                            Err(e) => {
+                                let _ = std::fs::remove_file(&tmp_path);
+                                format!("Error: {}", e)
+                            }
+                        }
+                    }
+                }
+                Err(e) => format!("Error decoding base64: {}", e),
             }
         }
         "discord_send_message" => {

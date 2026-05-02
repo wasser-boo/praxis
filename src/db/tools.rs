@@ -181,8 +181,8 @@ fn get_default_tools() -> Vec<Tool> {
         },
         Tool {
             name: "discord_upload_file".into(),
-            description: Some("Upload file to Discord".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"filename":{"type":"string"},"base64_content":{"type":"string"}},"required":["filename","base64_content"]}),
+            description: Some("Upload file to Discord channel. Provide channel_id, filename (display name), and base64_content (base64-encoded file data).".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"filename":{"type":"string","description":"Display filename for the attachment"},"base64_content":{"type":"string","description":"Base64-encoded file content"},"message":{"type":"string","description":"Optional message text"}},"required":["channel_id","filename","base64_content"]}),
             is_enabled: true,
         },
         Tool {
