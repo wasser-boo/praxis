@@ -256,6 +256,12 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
             is_enabled: false,
         },
         Tool {
+            name: "vm_install".into(),
+            description: Some("Start a VM with an installation ISO to install an OS. Provide either iso_name (searches in installation_disks context) or iso_path (direct path). The VM boots from the ISO. Use vm_keys and vm_screenshot to complete the installation.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"iso_name":{"type":"string","description":"Name to search for in installation_disks (e.g. 'alpine', 'ubuntu', 'arch')"},"iso_path":{"type":"string","description":"Direct path to ISO file (alternative to iso_name)"},"vm_name":{"type":"string","default":"praxis-vm"},"cpu_cores":{"type":"integer","default":2},"ram_mb":{"type":"integer","default":4096},"disk_size":{"type":"string","default":"40G"}}}),
+            is_enabled: false,
+        },
+        Tool {
             name: "send_screenshot_to_discord".into(),
             description: Some("Take a VM screenshot and send it to a Discord channel. Use this to show the user what's happening on the VM desktop.".into()),
             parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"caption":{"type":"string","description":"Optional caption for the screenshot"},"vm_name":{"type":"string","default":"praxis-vm"}},"required":["channel_id"]}),
@@ -313,7 +319,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 30);
+        assert_eq!(tools.len(), 31);
     }
 
     #[test]
@@ -322,7 +328,7 @@ mod tool_tests {
         init_default_tools(&db).unwrap();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 30);
+        assert_eq!(tools.len(), 31);
     }
 
     #[test]

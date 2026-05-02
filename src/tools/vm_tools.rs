@@ -36,6 +36,7 @@ pub async fn dispatch_vm_tool(tool_name: &str, args: &serde_json::Value) -> Opti
         "vm_shared_folder" => handle_vm_shared_folder(&manager, args).await,
         "vm_mouse" => handle_vm_mouse(&manager, args).await,
         "vm_look_screenshot" => handle_vm_look_screenshot(&manager, args).await,
+        "vm_install" => handle_vm_install(&manager, args).await,
         _ => return None,
     };
 
@@ -402,4 +403,97 @@ fn cleanup_screenshot_limit_dir(ss_dir: &str) {
         let _ = std::fs::remove_file(path);
     }
     tracing::info!("Cleaned {} old screenshots from {}", to_delete, ss_dir);
+}
+
+async fn handle_vm_install(manager: &VmManager, args: &serde_json::Value) -> String {
+    let iso_name = args["iso_name"].as_str().unwrap_or("");
+    let iso_path_arg = args["iso_path"].as_str();
+    let vm_name = args["vm_name"].as_str().unwrap_or("praxis-vm");
+    let cpu_cores = args["cpu_cores"].as_u64().unwrap_or(2) as u32;
+    let ram_mb = args["ram_mb"].as_u64().unwrap_or(4096) as u32;
+    let disk_size = args["disk_size"].as_str().unwrap_or("40G");
+
+    // Resolve ISO path: check iso_name against installation_disks, or use iso_path directly
+    let iso_path = if let Some(path) = iso_path_arg {
+        path.to_string()
+    } else if !iso_name.is_empty() {
+        // Search in installation_disks
+        let isos = manager.list_isos();
+        let found = isos.iter().find(|iso| {
+            iso.get("name")
+                .and_then(|v| v.as_str())
+                .map(|n| n.to_lowercase().contains(&iso_name.to_lowercase()))
+                .unwrap_or(false)
+                || iso
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|p| p.to_lowercase().contains(&iso_name.to_lowercase()))
+                    .unwrap_or(false)
+        });
+        match found {
+            Some(iso) => iso
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            None => {
+                // Also check the iso_dir for a file matching the name
+                let iso_dir = manager.iso_dir();
+                let candidates: Vec<String> = std::fs::read_dir(&iso_dir)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        let fname = e.file_name().to_string_lossy().to_lowercase();
+                        fname.contains(&iso_name.to_lowercase())
+                            && (fname.ends_with(".iso") || fname.ends_with(".img"))
+                    })
+                    .map(|e| e.path().to_string_lossy().to_string())
+                    .collect();
+                if let Some(path) = candidates.first() {
+                    path.clone()
+                } else {
+                    return format!(
+                        "ISO '{}' not found in installation_disks or {}. Available ISOs: {:?}",
+                        iso_name,
+                        iso_dir,
+                        isos.iter()
+                            .filter_map(|i| i.get("name").and_then(|v| v.as_str()))
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    } else {
+        return "Error: either iso_name or iso_path is required".to_string();
+    };
+
+    // Verify the ISO exists
+    if !std::path::Path::new(&iso_path).exists() {
+        return format!("ISO not found at: {}", iso_path);
+    }
+
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+    let arch = std::env::var("VM_ARCH").unwrap_or_else(|_| "x86_64".to_string());
+    let vnc_offset = manager.list_vms().await.len() as u16 + 1;
+
+    let mut config = crate::vm::VmConfig::default_for_name(vm_name, &data_dir, vnc_offset, &arch);
+    config.cpu_cores = cpu_cores;
+    config.ram_mb = ram_mb;
+    config.disk_size = disk_size.to_string();
+    config.iso_path = Some(iso_path.clone());
+
+    // Add shared folder
+    config.shared_folders.push(crate::vm::SharedFolder {
+        host_path: format!("{}/shared", data_dir),
+        mount_tag: "praxis-shared".to_string(),
+        mount_point: "/mnt/shared".to_string(),
+        readonly: false,
+    });
+
+    match manager.start_vm(config).await {
+        Ok(msg) => format!("VM '{}' started with ISO '{}'. The installer should boot.\n{}\nUse vm_keys and vm_screenshot to interact with the installer.", vm_name, iso_path, msg),
+        Err(e) => format!("Error starting VM with ISO: {}", e),
+    }
 }

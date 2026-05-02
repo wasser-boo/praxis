@@ -43,6 +43,26 @@ enum Cli {
         #[command(subcommand)]
         action: VmAction,
     },
+    /// Create a backup of all Praxis data
+    Backup {
+        /// Output file path (default: praxis-backup-YYYY-MM-DD.tar.gz)
+        #[arg(long, short)]
+        output: Option<String>,
+        /// Exclude VM disk images (makes backup much smaller)
+        #[arg(long)]
+        no_disks: bool,
+        /// Exclude ISO files
+        #[arg(long)]
+        no_isos: bool,
+    },
+    /// Restore Praxis from a backup file
+    Restore {
+        /// Path to backup file
+        file: String,
+        /// Skip confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -98,7 +118,7 @@ enum VmAction {
         /// Disk size
         #[arg(long, default_value = "40G")]
         disk: String,
-        /// ISO path for installation
+        /// ISO path or name (searches installation_disks by name, or uses as direct path)
         #[arg(long)]
         iso: Option<String>,
     },
@@ -134,14 +154,23 @@ enum VmAction {
     },
     /// Create a disk image
     Disk {
-        /// Disk path
+        #[command(subcommand)]
+        action: DiskAction,
+    },
+    /// List available installation ISOs
+    ListIsos,
+    /// Add an ISO path to the installation disks registry
+    AddIso {
+        /// ISO file path
         path: String,
-        /// Disk size (e.g. 40G)
-        #[arg(long, default_value = "40G")]
-        size: String,
-        /// Disk format
-        #[arg(long, default_value = "qcow2")]
-        format: String,
+        /// Display name (optional, derived from filename if omitted)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Remove an ISO from the installation disks registry
+    RemoveIso {
+        /// ISO name or path
+        name_or_path: String,
     },
     /// List snapshots
     Snapshots {
@@ -164,6 +193,45 @@ enum VmAction {
         /// Timeout in seconds
         #[arg(long, default_value = "30")]
         timeout: u64,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum DiskAction {
+    /// Create a new disk image
+    Create {
+        /// Disk path
+        path: String,
+        /// Disk size (e.g. 40G, 100G)
+        #[arg(long, default_value = "40G")]
+        size: String,
+        /// Disk format (qcow2, raw, vdi, vmdk)
+        #[arg(long, default_value = "qcow2")]
+        format: String,
+    },
+    /// List all VM disks
+    List,
+    /// Show disk info
+    Info {
+        /// Disk path
+        path: String,
+    },
+    /// Resize a disk image
+    Resize {
+        /// Disk path
+        path: String,
+        /// New size (e.g. 100G)
+        size: String,
+    },
+    /// Convert disk format
+    Convert {
+        /// Source disk path
+        source: String,
+        /// Target disk path
+        target: String,
+        /// Target format (qcow2, raw, vdi, vmdk)
+        #[arg(long)]
+        format: String,
     },
 }
 
@@ -224,6 +292,12 @@ async fn run() -> anyhow::Result<()> {
             anyhow::bail!("Onboard requires --interactive flag");
         }
         Cli::Vm { action } => return handle_vm_action(action).await,
+        Cli::Backup {
+            output,
+            no_disks,
+            no_isos,
+        } => return handle_backup(output, no_disks, no_isos).await,
+        Cli::Restore { file, yes } => return handle_restore(&file, yes).await,
         Cli::Service { .. } => unreachable!(),
         Cli::Plugin { .. } => unreachable!(),
     }
@@ -326,6 +400,7 @@ async fn run_services(
             "vm_shared_folder",
             "vm_mouse",
             "vm_look_screenshot",
+            "vm_install",
         ] {
             let _ = praxis::db::tools::set_enabled(&db, tool_name, true);
         }
@@ -715,12 +790,61 @@ async fn handle_vm_action(action: VmAction) -> anyhow::Result<()> {
             disk,
             iso,
         } => {
+            // Resolve ISO: check if it's a name in installation_disks or a direct path
+            let resolved_iso = iso.map(|ref iso_val| {
+                if std::path::Path::new(iso_val).exists() {
+                    iso_val.clone()
+                } else {
+                    // Search by name in installation_disks
+                    let isos = manager.list_isos();
+                    if let Some(found) = isos.iter().find(|i| {
+                        i.get("name")
+                            .and_then(|v| v.as_str())
+                            .map(|n| n.to_lowercase().contains(&iso_val.to_lowercase()))
+                            .unwrap_or(false)
+                    }) {
+                        found
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(iso_val)
+                            .to_string()
+                    } else {
+                        // Search in iso_dir
+                        let iso_dir = format!("{}/vm/isos", config.data_dir);
+                        let candidates: Vec<String> = std::fs::read_dir(&iso_dir)
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|e| e.ok())
+                            .filter(|e| {
+                                e.file_name()
+                                    .to_string_lossy()
+                                    .to_lowercase()
+                                    .contains(&iso_val.to_lowercase())
+                            })
+                            .map(|e| e.path().to_string_lossy().to_string())
+                            .collect();
+                        candidates
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| iso_val.clone())
+                    }
+                }
+            });
+
             let mut vm_config =
                 praxis::vm::VmConfig::default_for_name(&name, &config.data_dir, 1, &config.vm_arch);
             vm_config.cpu_cores = cpu;
             vm_config.ram_mb = ram;
             vm_config.disk_size = disk;
-            vm_config.iso_path = iso;
+            vm_config.iso_path = resolved_iso;
+            if let Some(ref iso_path) = vm_config.iso_path {
+                if std::path::Path::new(iso_path).exists() {
+                    println!("Booting from ISO: {}", iso_path);
+                } else {
+                    eprintln!("Warning: ISO not found at '{}'", iso_path);
+                }
+            }
             vm_config.shared_folders.push(praxis::vm::SharedFolder {
                 host_path: format!("{}/shared", config.data_dir),
                 mount_tag: "praxis-shared".to_string(),
@@ -796,16 +920,57 @@ async fn handle_vm_action(action: VmAction) -> anyhow::Result<()> {
                 println!("Ejecting CD from VM '{}'...", name);
             }
         },
-        VmAction::Disk { path, size, format } => {
-            let output = tokio::process::Command::new("qemu-img")
-                .args(["create", "-f", &format, &path, &size])
-                .output()
-                .await?;
-            if output.status.success() {
-                println!("Disk created: {} ({}, {})", path, size, format);
+        VmAction::Disk { action } => {
+            handle_disk_action(action, &config.data_dir).await?;
+        }
+        VmAction::ListIsos => {
+            let isos = manager.list_isos();
+            if isos.is_empty() {
+                println!("No installation ISOs configured.");
+                println!("Add ISOs with: praxis vm add-iso /path/to/file.iso");
+                println!("Or place ISOs in: {}/vm/isos/", config.data_dir);
             } else {
-                eprintln!("Error: {}", String::from_utf8_lossy(&output.stderr));
+                println!("Available installation ISOs:");
+                for iso in &isos {
+                    let name = iso.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let path = iso.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+                    let exists = iso.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let source = iso.get("source").and_then(|v| v.as_str()).unwrap_or("?");
+                    let status = if exists { "OK" } else { "NOT FOUND" };
+                    let size = iso
+                        .get("size_bytes")
+                        .and_then(|v| v.as_u64())
+                        .map(|s| {
+                            if s > 1_073_741_824 {
+                                format!("{:.1} GB", s as f64 / 1_073_741_824.0)
+                            } else if s > 1_048_576 {
+                                format!("{:.1} MB", s as f64 / 1_048_576.0)
+                            } else {
+                                format!("{} B", s)
+                            }
+                        })
+                        .unwrap_or_default();
+                    println!("  [{}] {} {} ({}) [{}]", status, name, size, path, source);
+                }
             }
+        }
+        VmAction::AddIso { path, name } => {
+            let iso_name = name.unwrap_or_else(|| {
+                std::path::Path::new(&path)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            });
+            manager.add_installation_disk(&iso_name, &path)?;
+            println!("Added ISO: {} -> {}", iso_name, path);
+            if !std::path::Path::new(&path).exists() {
+                println!("Warning: file not found at '{}'", path);
+            }
+        }
+        VmAction::RemoveIso { name_or_path } => {
+            manager.remove_installation_disk(&name_or_path)?;
+            println!("Removed: {}", name_or_path);
         }
         VmAction::Snapshots { name } => {
             println!("Snapshots for VM '{}':", name);
@@ -839,6 +1004,333 @@ async fn handle_vm_action(action: VmAction) -> anyhow::Result<()> {
                 Err(e) => eprintln!("Error: {}", e),
             }
         }
+    }
+
+    Ok(())
+}
+
+async fn handle_disk_action(action: DiskAction, data_dir: &str) -> anyhow::Result<()> {
+    match action {
+        DiskAction::Create { path, size, format } => {
+            let output = tokio::process::Command::new("qemu-img")
+                .args(["create", "-f", &format, &path, &size])
+                .output()
+                .await?;
+            if output.status.success() {
+                println!("Disk created: {} ({}, {})", path, size, format);
+            } else {
+                eprintln!("Error: {}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
+        DiskAction::List => {
+            let vm_dir = format!("{}/vm", data_dir);
+            println!("VM Disks:");
+            let mut found = false;
+            // Scan all VM directories for disk images
+            if let Ok(entries) = std::fs::read_dir(&vm_dir) {
+                for entry in entries.flatten() {
+                    let vm_path = entry.path();
+                    if !vm_path.is_dir() {
+                        continue;
+                    }
+                    let vm_name = vm_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    if vm_name == "isos" || vm_name == "shared" {
+                        continue;
+                    }
+                    if let Ok(files) = std::fs::read_dir(&vm_path) {
+                        for file in files.flatten() {
+                            let fpath = file.path();
+                            let fname = fpath.file_name().unwrap_or_default().to_string_lossy();
+                            if fname.ends_with(".qcow2")
+                                || fname.ends_with(".img")
+                                || fname.ends_with(".raw")
+                            {
+                                let size = fpath.metadata().map(|m| m.len()).unwrap_or(0);
+                                let size_str = if size > 1_073_741_824 {
+                                    format!("{:.1} GB", size as f64 / 1_073_741_824.0)
+                                } else if size > 1_048_576 {
+                                    format!("{:.1} MB", size as f64 / 1_048_576.0)
+                                } else {
+                                    format!("{} B", size)
+                                };
+                                println!("  [{}] {} ({})", vm_name, fname, size_str);
+                                found = true;
+                            }
+                        }
+                    }
+                }
+            }
+            // Also scan disks/ directory
+            let disks_dir = format!("{}/vm/disks", data_dir);
+            if let Ok(entries) = std::fs::read_dir(&disks_dir) {
+                for entry in entries.flatten() {
+                    let fpath = entry.path();
+                    let fname = fpath.file_name().unwrap_or_default().to_string_lossy();
+                    if fname.ends_with(".qcow2") || fname.ends_with(".img") {
+                        let size = fpath.metadata().map(|m| m.len()).unwrap_or(0);
+                        let size_str = if size > 1_073_741_824 {
+                            format!("{:.1} GB", size as f64 / 1_073_741_824.0)
+                        } else if size > 1_048_576 {
+                            format!("{:.1} MB", size as f64 / 1_048_576.0)
+                        } else {
+                            format!("{} B", size)
+                        };
+                        println!("  [disks] {} ({})", fname, size_str);
+                        found = true;
+                    }
+                }
+            }
+            if !found {
+                println!(
+                    "  No disks found. Create one with: praxis vm disk create <path> --size 40G"
+                );
+            }
+        }
+        DiskAction::Info { path } => {
+            let output = tokio::process::Command::new("qemu-img")
+                .args(["info", &path])
+                .output()
+                .await?;
+            if output.status.success() {
+                println!("{}", String::from_utf8_lossy(&output.stdout));
+            } else {
+                eprintln!("Error: {}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
+        DiskAction::Resize { path, size } => {
+            let output = tokio::process::Command::new("qemu-img")
+                .args(["resize", &path, &size])
+                .output()
+                .await?;
+            if output.status.success() {
+                println!("Disk resized: {} -> {}", path, size);
+            } else {
+                eprintln!("Error: {}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
+        DiskAction::Convert {
+            source,
+            target,
+            format,
+        } => {
+            println!("Converting {} -> {} ({})", source, target, format);
+            let output = tokio::process::Command::new("qemu-img")
+                .args(["convert", "-f", "qcow2", "-O", &format, &source, &target])
+                .output()
+                .await?;
+            if output.status.success() {
+                println!("Disk converted: {} -> {}", source, target);
+            } else {
+                eprintln!("Error: {}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_backup(
+    output: Option<String>,
+    no_disks: bool,
+    no_isos: bool,
+) -> anyhow::Result<()> {
+    let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S");
+    let default_name = format!("praxis-backup-{}.tar.gz", timestamp);
+    let output_path = output.unwrap_or(default_name);
+
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+    let plugins_dir = std::env::var("PLUGINS_DIR").unwrap_or_else(|_| "./plugins".to_string());
+
+    println!("Creating backup: {}", output_path);
+    println!("Data dir: {}", data_dir);
+
+    // Build list of paths to include
+    let mut includes: Vec<String> = Vec::new();
+
+    // .env file
+    if std::path::Path::new(".env").exists() {
+        includes.push(".env".to_string());
+    }
+
+    // Templates
+    if std::path::Path::new("templates").exists() {
+        includes.push("templates".to_string());
+    }
+
+    // Skills
+    if std::path::Path::new("skills").exists() {
+        includes.push("skills".to_string());
+    }
+
+    // Plugins
+    if std::path::Path::new(&plugins_dir).exists() {
+        includes.push(plugins_dir.clone());
+    }
+
+    // Context language files
+    if std::path::Path::new("contextlanguage").exists() {
+        includes.push("contextlanguage".to_string());
+    }
+
+    // Data directory (database, secrets, contexts, tools config)
+    if std::path::Path::new(&data_dir).exists() {
+        includes.push(format!("{}/praxis.db", data_dir));
+        includes.push(format!("{}/tools.json", data_dir));
+
+        // Secrets (encrypted)
+        let secrets_path = format!("{}/secrets.enc2", data_dir);
+        if std::path::Path::new(&secrets_path).exists() {
+            includes.push(secrets_path);
+        }
+        let secrets_plain = format!("{}/secrets.json", data_dir);
+        if std::path::Path::new(&secrets_plain).exists() {
+            includes.push(secrets_plain);
+        }
+
+        // VM config
+        let vm_dir = format!("{}/vm", data_dir);
+        if std::path::Path::new(&vm_dir).exists() {
+            // Always include VM configs and installation_disks.json
+            includes.push(format!("{}/vm/installation_disks.json", data_dir));
+
+            // Include per-VM configs (qmp.sock paths, etc are in the config)
+            if let Ok(entries) = std::fs::read_dir(&vm_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        if name == "isos" || name == "shared" || name == "disks" {
+                            continue;
+                        }
+                        // Include screenshots and secrets
+                        includes.push(format!("{}/vm/{}/screenshots", data_dir, name));
+                        includes.push(format!("{}/vm/{}/secrets", data_dir, name));
+                    }
+                }
+            }
+
+            // VM disks (optional, can be huge)
+            if !no_disks {
+                if let Ok(entries) = std::fs::read_dir(&vm_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy();
+                            if name == "isos" || name == "shared" || name == "disks" {
+                                continue;
+                            }
+                            let disk = format!("{}/vm/{}/disk.qcow2", data_dir, name);
+                            if std::path::Path::new(&disk).exists() {
+                                includes.push(disk);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ISOs (optional)
+            if !no_isos {
+                let iso_dir = format!("{}/vm/isos", data_dir);
+                if std::path::Path::new(&iso_dir).exists() {
+                    includes.push(iso_dir);
+                }
+            }
+        }
+
+        // Shared folder
+        let shared_dir = format!("{}/shared", data_dir);
+        if std::path::Path::new(&shared_dir).exists() {
+            includes.push(shared_dir);
+        }
+    }
+
+    if includes.is_empty() {
+        anyhow::bail!("Nothing to backup. No data found.");
+    }
+
+    // Build tar command
+    let mut cmd = tokio::process::Command::new("tar");
+    cmd.arg("czf").arg(&output_path);
+
+    // Exclude patterns
+    cmd.arg("--exclude").arg("*.log");
+    cmd.arg("--exclude").arg("logs/");
+
+    for path in &includes {
+        if std::path::Path::new(path).exists() {
+            cmd.arg(path);
+        }
+    }
+
+    let output = cmd.output().await?;
+    if output.status.success() {
+        let size = std::fs::metadata(&output_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let size_str = if size > 1_073_741_824 {
+            format!("{:.1} GB", size as f64 / 1_073_741_824.0)
+        } else {
+            format!("{:.1} MB", size as f64 / 1_048_576.0)
+        };
+        println!("Backup created: {} ({})", output_path, size_str);
+        println!("Includes: {} paths", includes.len());
+        if no_disks {
+            println!("  (VM disks excluded)");
+        }
+        if no_isos {
+            println!("  (ISOs excluded)");
+        }
+    } else {
+        anyhow::bail!("tar failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    Ok(())
+}
+
+async fn handle_restore(file: &str, yes: bool) -> anyhow::Result<()> {
+    if !std::path::Path::new(file).exists() {
+        anyhow::bail!("Backup file not found: {}", file);
+    }
+
+    let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+    let size_str = if size > 1_073_741_824 {
+        format!("{:.1} GB", size as f64 / 1_073_741_824.0)
+    } else {
+        format!("{:.1} MB", size as f64 / 1_048_576.0)
+    };
+
+    println!("Restoring from: {} ({})", file, size_str);
+    println!();
+    println!("This will overwrite:");
+    println!("  - .env (if included)");
+    println!("  - data/ (database, secrets, VM configs)");
+    println!("  - templates/, skills/, plugins/");
+    println!();
+
+    if !yes {
+        println!("Continue? (y/N)");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // Extract with tar
+    let output = tokio::process::Command::new("tar")
+        .args(["xzf", file])
+        .output()
+        .await?;
+
+    if output.status.success() {
+        println!("Restore complete!");
+        println!("Run ./praxis run to start with the restored data.");
+    } else {
+        anyhow::bail!("tar failed: {}", String::from_utf8_lossy(&output.stderr));
     }
 
     Ok(())

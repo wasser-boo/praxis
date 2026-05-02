@@ -205,11 +205,129 @@ pub struct VmManager {
 
 impl VmManager {
     pub fn new(data_dir: &str) -> Self {
+        // Create VM folder structure
+        let vm_base = format!("{}/vm", data_dir);
+        let _ = std::fs::create_dir_all(&vm_base);
+        let _ = std::fs::create_dir_all(format!("{}/isos", vm_base));
+        let _ = std::fs::create_dir_all(format!("{}/disks", vm_base));
+        let _ = std::fs::create_dir_all(format!("{}/shared", data_dir));
+
         Self {
             instances: Arc::new(RwLock::new(HashMap::new())),
             data_dir: data_dir.to_string(),
             next_vnc: Arc::new(RwLock::new(1)),
         }
+    }
+
+    /// Get the base VM storage directory
+    pub fn vm_dir(&self) -> String {
+        format!("{}/vm", self.data_dir)
+    }
+
+    /// Get the ISO directory
+    pub fn iso_dir(&self) -> String {
+        format!("{}/vm/isos", self.data_dir)
+    }
+
+    /// List available ISOs in the iso directory
+    pub fn list_isos(&self) -> Vec<serde_json::Value> {
+        let iso_dir = self.iso_dir();
+        let mut isos = Vec::new();
+
+        // Scan the default iso dir
+        Self::scan_iso_dir(&iso_dir, &mut isos);
+
+        // Also scan context-configured paths
+        let installation_disks = self.get_installation_disks();
+        for disk in &installation_disks {
+            if let Some(path) = disk.get("path").and_then(|v| v.as_str()) {
+                let name = disk
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        std::path::Path::new(path)
+                            .file_stem()
+                            .and_then(|n| n.to_str())
+                    })
+                    .unwrap_or("unknown");
+                let exists = std::path::Path::new(path).exists();
+                isos.push(serde_json::json!({
+                    "name": name,
+                    "path": path,
+                    "exists": exists,
+                    "source": "context"
+                }));
+            }
+        }
+
+        isos
+    }
+
+    fn scan_iso_dir(dir: &str, isos: &mut Vec<serde_json::Value>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_stem().unwrap_or_default().to_string_lossy();
+                let ext = path
+                    .extension()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_lowercase();
+                if ext == "iso" || ext == "img" || ext == "qcow2" {
+                    let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+                    isos.push(serde_json::json!({
+                        "name": name,
+                        "path": path.to_string_lossy(),
+                        "size_bytes": size,
+                        "exists": true,
+                        "source": "iso_dir"
+                    }));
+                }
+            }
+        }
+    }
+
+    /// Get installation_disks from context (stored in a file for persistence)
+    fn get_installation_disks(&self) -> Vec<serde_json::Value> {
+        let config_path = format!("{}/vm/installation_disks.json", self.data_dir);
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            if let Ok(disks) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                return disks;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Save installation_disks to context file
+    pub fn set_installation_disks(&self, disks: &[serde_json::Value]) -> anyhow::Result<()> {
+        let config_path = format!("{}/vm/installation_disks.json", self.data_dir);
+        let content = serde_json::to_string_pretty(disks)?;
+        std::fs::write(&config_path, content)?;
+        Ok(())
+    }
+
+    /// Add an ISO path to the installation disks list
+    pub fn add_installation_disk(&self, name: &str, path: &str) -> anyhow::Result<()> {
+        let mut disks = self.get_installation_disks();
+        // Check if already exists
+        if disks
+            .iter()
+            .any(|d| d.get("path").and_then(|v| v.as_str()) == Some(path))
+        {
+            return Ok(());
+        }
+        disks.push(serde_json::json!({ "name": name, "path": path }));
+        self.set_installation_disks(&disks)
+    }
+
+    /// Remove an ISO from the installation disks list
+    pub fn remove_installation_disk(&self, name_or_path: &str) -> anyhow::Result<()> {
+        let mut disks = self.get_installation_disks();
+        disks.retain(|d| {
+            d.get("name").and_then(|v| v.as_str()) != Some(name_or_path)
+                && d.get("path").and_then(|v| v.as_str()) != Some(name_or_path)
+        });
+        self.set_installation_disks(&disks)
     }
 
     /// Start a VM with the given config

@@ -79,6 +79,40 @@ pub async fn run_agent_loop(
                 serde_json::json!(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
             );
 
+            // VM context: expose VM state and available ISOs to the LLM
+            let vm_enabled = std::env::var("VM_ENABLED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if vm_enabled {
+                let vm_mode = std::env::var("VM_MODE").unwrap_or_else(|_| "shared".to_string());
+                let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+                obj.insert("vm_enabled".to_string(), serde_json::json!(true));
+                obj.insert("vm_mode".to_string(), serde_json::json!(vm_mode));
+                obj.insert(
+                    "vm_storage_dir".to_string(),
+                    serde_json::json!(format!("{}/vm", data_dir)),
+                );
+                obj.insert(
+                    "vm_iso_dir".to_string(),
+                    serde_json::json!(format!("{}/vm/isos", data_dir)),
+                );
+                obj.insert(
+                    "vm_shared_dir".to_string(),
+                    serde_json::json!(format!("{}/shared", data_dir)),
+                );
+
+                if let Some(manager) = crate::tools::vm_tools::get_vm_manager().await {
+                    obj.insert(
+                        "installation_disks".to_string(),
+                        serde_json::json!(manager.list_isos()),
+                    );
+                    obj.insert(
+                        "running_vms".to_string(),
+                        serde_json::json!(manager.list_vms().await),
+                    );
+                }
+            }
+
             let user_template = obj
                 .get("user_template")
                 .cloned()

@@ -174,16 +174,12 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     // VM (optional)
     println!("--- Virtual Machine (Optional) ---");
     println!("Enable QEMU VM support? The LLM can control a full Linux VM.");
-    println!("Requires: qemu-system-x86_64, qemu-img");
+    println!("Requires: qemu-system-x86_64 (apt install qemu-system-x86)");
     let has_vm = existing.contains_key("VM_ENABLED");
-    let vm_default = if has_vm {
-        existing
-            .get("VM_ENABLED")
-            .map(|v| v == "true")
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let vm_default = existing
+        .get("VM_ENABLED")
+        .map(|v| v == "true")
+        .unwrap_or(false);
     let vm_label = if has_vm {
         "Update VM config?"
     } else {
@@ -193,30 +189,47 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
 
     if setup_vm {
         env_lines.push("VM_ENABLED=true".to_string());
+
+        // CPU Cores
         let cpu_cores = prompt_with_default(
-            "VM CPU Cores",
+            "VM CPU Cores (1-8, more = faster but uses more host resources)",
             &get_existing(&existing, "VM_CPU_CORES", "2"),
         );
-        let ram_mb =
-            prompt_with_default("VM RAM (MB)", &get_existing(&existing, "VM_RAM_MB", "4096"));
+        env_lines.push(format!("VM_CPU_CORES={}", cpu_cores));
+
+        // RAM
+        let ram_mb = prompt_with_default(
+            "VM RAM in MB (1024-16384, 4096 = 4GB recommended)",
+            &get_existing(&existing, "VM_RAM_MB", "4096"),
+        );
+        env_lines.push(format!("VM_RAM_MB={}", ram_mb));
+
+        // Disk Size
         let disk_size = prompt_with_default(
-            "VM Disk Size",
+            "VM Disk Size (e.g. 20G, 40G, 100G)",
             &get_existing(&existing, "VM_DISK_SIZE", "40G"),
         );
-        let arch = prompt_with_default(
-            "VM Architecture (x86_64 or aarch64)",
-            &get_existing(&existing, "VM_ARCH", "x86_64"),
-        );
-        env_lines.push(format!("VM_CPU_CORES={}", cpu_cores));
-        env_lines.push(format!("VM_RAM_MB={}", ram_mb));
         env_lines.push(format!("VM_DISK_SIZE={}", disk_size));
+
+        // Architecture
+        println!();
+        println!("VM Architecture:");
+        println!("  1) x86_64  — Standard Intel/AMD (most Linux images)");
+        println!("  2) aarch64 — ARM64 (Raspberry Pi images, Apple Silicon)");
+        let arch_choice = prompt_choice("Architecture", &["1", "2"], "1")?;
+        let arch = if arch_choice == "2" {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
         env_lines.push(format!("VM_ARCH={}", arch));
 
+        // Access Mode
         println!();
         println!("VM Access Mode:");
-        println!("  1) shared — LLM can use VM AND host system tools");
-        println!("  2) vm     — LLM can ONLY use the VM (no host access)");
-        let vm_mode_choice = prompt_choice("Select VM mode", &["1", "2"], "1")?;
+        println!("  1) shared — LLM can use VM AND host system (run commands on both)");
+        println!("  2) vm     — LLM can ONLY use the VM (host system is isolated from LLM)");
+        let vm_mode_choice = prompt_choice("Access mode", &["1", "2"], "1")?;
         let vm_mode = if vm_mode_choice == "2" {
             "vm"
         } else {
@@ -224,10 +237,111 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
         };
         env_lines.push(format!("VM_MODE={}", vm_mode));
 
-        println!("VM mode enabled. The LLM will have full control over the VM.");
-        println!("Secrets are injected into the VM but are NEVER visible to the LLM.");
+        // Socket Mode
+        println!();
+        println!("VM Communication Socket:");
+        println!("  1) unix — Unix sockets (faster, ~5x less latency, Linux/macOS only)");
+        println!("  2) tcp  — TCP sockets (cross-platform, works on Windows too)");
+        let default_socket = if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
+            "1"
+        } else {
+            "2"
+        };
+        let socket_choice = prompt_choice("Socket mode", &["1", "2"], default_socket)?;
+        let socket_mode = if socket_choice == "1" { "unix" } else { "tcp" };
+        env_lines.push(format!("VM_SOCKET_MODE={}", socket_mode));
+
+        // Summary
+        println!();
+        println!("VM Configuration Summary:");
+        println!("  CPU: {} cores", cpu_cores);
+        println!("  RAM: {} MB", ram_mb);
+        println!("  Disk: {}", disk_size);
+        println!("  Arch: {}", arch);
+        println!(
+            "  Mode: {} (LLM {})",
+            vm_mode,
+            if vm_mode == "vm" {
+                "VM only"
+            } else {
+                "VM + host"
+            }
+        );
+        println!(
+            "  Socket: {} ({})",
+            socket_mode,
+            if socket_mode == "unix" {
+                "fastest"
+            } else {
+                "cross-platform"
+            }
+        );
+        println!();
+
+        // Installation Disks
+        println!("Installation ISOs:");
+        println!("Add paths to Linux ISO files. The LLM can use these to install OSes.");
+        println!("Example: /home/user/Downloads/ubuntu-24.04.iso");
+        println!("Leave empty to skip. You can add more later via dashboard or context.");
+        let mut iso_paths: Vec<String> = Vec::new();
+        loop {
+            let num = iso_paths.len() + 1;
+            let prompt = if iso_paths.is_empty() {
+                "ISO path (or press Enter to skip)".to_string()
+            } else {
+                format!("ISO path #{} (or press Enter to finish)", num)
+            };
+            let iso = prompt_with_default(&prompt, "");
+            if iso.is_empty() {
+                break;
+            }
+            if std::path::Path::new(&iso).exists() {
+                let name = std::path::Path::new(&iso)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                iso_paths.push(iso.clone());
+                println!("  Added: {} ({})", name, iso);
+            } else {
+                println!("  Warning: file not found at '{}'. Adding anyway.", iso);
+                iso_paths.push(iso);
+            }
+        }
+
+        println!();
+        println!("Secrets are injected into the VM as files (not env vars).");
+        println!("The LLM cannot read secret values — apps must use: cat /run/secrets/SECRET_NAME");
+        println!("The VM auto-starts when you run: ./praxis run");
+        if !iso_paths.is_empty() {
+            println!("Installation ISOs configured: {}", iso_paths.len());
+            println!("The LLM can use vm_install to boot from these ISOs.");
+
+            // Save ISOs to installation_disks.json
+            let data_dir_for_isos = env_lines
+                .iter()
+                .find(|l| l.starts_with("DATA_DIR="))
+                .map(|l| l.strip_prefix("DATA_DIR=").unwrap_or("./data"))
+                .unwrap_or("./data");
+            let vm_dir = format!("{}/vm", data_dir_for_isos);
+            let _ = std::fs::create_dir_all(&vm_dir);
+            let disks: Vec<serde_json::Value> = iso_paths
+                .iter()
+                .map(|path| {
+                    let name = std::path::Path::new(path)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    serde_json::json!({ "name": name, "path": path })
+                })
+                .collect();
+            let disks_json =
+                serde_json::to_string_pretty(&disks).unwrap_or_else(|_| "[]".to_string());
+            let _ = std::fs::write(format!("{}/installation_disks.json", vm_dir), disks_json);
+        }
     } else if has_vm {
-        // Keep existing
+        // Keep existing values
         for key in &[
             "VM_ENABLED",
             "VM_CPU_CORES",
@@ -235,6 +349,7 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
             "VM_DISK_SIZE",
             "VM_ARCH",
             "VM_MODE",
+            "VM_SOCKET_MODE",
         ] {
             if let Some(val) = existing.get(*key) {
                 env_lines.push(format!("{}={}", key, val));
@@ -463,6 +578,8 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     }
 
     std::fs::write(env_path, content)?;
+
+    println!("\nOnboarding complete! Run: ./praxis run");
 
     println!("Configuration saved to {}", env_path);
 
