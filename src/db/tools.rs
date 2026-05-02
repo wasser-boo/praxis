@@ -343,7 +343,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 31);
+        assert_eq!(tools.len(), 32);
     }
 
     #[test]
@@ -352,7 +352,7 @@ mod tool_tests {
         init_default_tools(&db).unwrap();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 31);
+        assert_eq!(tools.len(), 32);
     }
 
     #[test]
@@ -360,11 +360,11 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let enabled = list_enabled(&db).unwrap();
-        assert_eq!(enabled.len(), 17); // 17 enabled (8 VM tools disabled by default)
+        assert_eq!(enabled.len(), 18); // 18 enabled (14 VM/discord tools disabled by default)
 
         disable(&db, "execute_terminal").unwrap();
         let enabled = list_enabled(&db).unwrap();
-        assert_eq!(enabled.len(), 16);
+        assert_eq!(enabled.len(), 17);
     }
 
     #[test]
@@ -454,7 +454,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let defs = to_tool_definitions(&db).unwrap();
-        assert_eq!(defs.len(), 17); // 17 enabled (8 VM tools disabled by default)
+        assert_eq!(defs.len(), 18); // 18 enabled (14 VM/discord tools disabled by default)
         assert_eq!(defs[0].function.name, "execute_terminal");
     }
 
@@ -466,7 +466,7 @@ mod tool_tests {
         disable(&db, "write_file").unwrap();
 
         let defs = to_tool_definitions(&db).unwrap();
-        assert_eq!(defs.len(), 15);
+        assert_eq!(defs.len(), 16);
         assert!(defs.iter().all(|d| d.function.name != "execute_terminal"));
     }
 }

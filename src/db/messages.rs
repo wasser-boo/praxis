@@ -21,6 +21,8 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallData>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_parts: Option<Vec<serde_json::Value>>,
 }
 
 impl Message {
@@ -30,6 +32,7 @@ impl Message {
             content,
             tool_call_id: None,
             tool_calls: None,
+            content_parts: None,
         }
     }
 
@@ -39,6 +42,7 @@ impl Message {
             content,
             tool_call_id: None,
             tool_calls: None,
+            content_parts: None,
         }
     }
 
@@ -48,6 +52,7 @@ impl Message {
             content,
             tool_call_id: None,
             tool_calls: Some(tool_calls),
+            content_parts: None,
         }
     }
 
@@ -57,6 +62,21 @@ impl Message {
             content,
             tool_call_id: Some(tool_call_id),
             tool_calls: None,
+            content_parts: None,
+        }
+    }
+
+    pub fn tool_with_image(
+        content: String,
+        tool_call_id: String,
+        content_parts: Vec<serde_json::Value>,
+    ) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content,
+            tool_call_id: Some(tool_call_id),
+            tool_calls: None,
+            content_parts: Some(content_parts),
         }
     }
 }
@@ -109,6 +129,7 @@ impl Database {
                     content: row.get(1)?,
                     tool_call_id: row.get(2)?,
                     tool_calls,
+                    content_parts: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -137,6 +158,7 @@ impl Database {
                 content: row.get(1)?,
                 tool_call_id: row.get(2)?,
                 tool_calls,
+                content_parts: None,
             })
         })?;
 

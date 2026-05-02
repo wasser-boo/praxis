@@ -270,7 +270,12 @@ pub async fn run_agent_loop(
                 } else {
                     Some(msg.content.clone())
                 },
-                content_parts: None,
+                content_parts: msg.content_parts.as_ref().map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                        .collect()
+                }),
                 tool_calls,
                 tool_call_id: msg.tool_call_id.clone(),
             });
@@ -355,6 +360,24 @@ pub async fn run_agent_loop(
 
                 let result = execute_tool_call(&state.db, user_id, tc, &state.plugins).await;
                 let mut final_result = result.clone();
+                let mut image_content_parts: Option<Vec<serde_json::Value>> = None;
+
+                // Check if understand_image returned image data
+                if tc.function.name == "understand_image" {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result) {
+                        if let Some(parts) = parsed.get("content_parts").and_then(|v| v.as_array())
+                        {
+                            if !parts.is_empty() {
+                                final_result = parsed
+                                    .get("text")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&result)
+                                    .to_string();
+                                image_content_parts = Some(parts.clone());
+                            }
+                        }
+                    }
+                }
 
                 // Log ALL tool calls to vm_activity_log for dashboard visibility
                 {
@@ -394,10 +417,16 @@ pub async fn run_agent_loop(
                     }
                 }
 
-                state.db.add_message(
-                    user_id,
-                    &crate::db::messages::Message::tool(final_result, tc.id.clone()),
-                )?;
+                let msg = if let Some(parts) = image_content_parts {
+                    crate::db::messages::Message::tool_with_image(
+                        final_result,
+                        tc.id.clone(),
+                        parts,
+                    )
+                } else {
+                    crate::db::messages::Message::tool(final_result, tc.id.clone())
+                };
+                state.db.add_message(user_id, &msg)?;
                 tool_call_count += 1;
             }
             // Continue loop for next LLM turn
@@ -1040,6 +1069,19 @@ async fn execute_tool_call(
                 Ok(_) => format!("Topic tracked: {}", topic),
                 Err(e) => format!("Error: {}", e),
             }
+        }
+        "understand_image" => {
+            let result = crate::tools::understand_image::run(&args).await;
+            // Store image content_parts alongside the result
+            // We return the text, but the caller needs to handle content_parts separately
+            // Use a special marker to indicate this tool returned image data
+            return serde_json::json!({
+                "text": result.text,
+                "content_parts": result.content_parts.iter().map(|cp| {
+                    serde_json::to_value(cp).unwrap_or_default()
+                }).collect::<Vec<_>>()
+            })
+            .to_string();
         }
         "send_screenshot_to_discord" => {
             let channel_id = args["channel_id"].as_str().unwrap_or("");

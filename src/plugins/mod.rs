@@ -336,8 +336,8 @@ fn load_plugin_from_manifest(manifest_path: &Path, plugin_dir: &Path) -> anyhow:
     })
 }
 
-pub fn register_builtin_plugins(registry: &mut PluginRegistry) {
-    registry.register(minimax_image::create_plugin());
+pub fn register_builtin_plugins(_registry: &mut PluginRegistry) {
+    // No built-in plugins — install plugins via the plugins/ directory
 }
 
 pub fn load_all_plugins(plugins_dir: &Path) -> PluginRegistry {
@@ -427,7 +427,8 @@ mod plugin_tests {
     fn test_builtin_plugins_registered() {
         let mut registry = PluginRegistry::new();
         register_builtin_plugins(&mut registry);
-        assert!(registry.get("minimax_image").is_some());
+        // No built-in plugins — minimax_image is installed via plugins/ directory
+        assert_eq!(registry.list().len(), 0);
     }
 
     #[test]
