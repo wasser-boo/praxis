@@ -130,7 +130,11 @@ fn sync_templates_dir(db: &crate::db::Database, dir: &std::path::Path, prefix: &
                 };
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     let existing = db.get_template(&name).ok().flatten();
-                    if existing.is_none() {
+                    let needs_sync = match &existing {
+                        None => true,
+                        Some(t) => t.content != content,
+                    };
+                    if needs_sync {
                         let _ = db.save_template(&name, &content, None, true);
                         tracing::info!("Synced template from disk: {}", name);
                     }
