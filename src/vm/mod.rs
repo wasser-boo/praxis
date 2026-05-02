@@ -834,6 +834,37 @@ impl VmManager {
         ))
     }
 
+    /// Insert or eject a CD/ISO in the VM
+    pub async fn change_cd(&self, name: &str, iso_path: Option<&str>) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            anyhow::bail!("VM '{}' is not running", name);
+        }
+
+        let qmp = instance
+            .qmp
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("QMP not connected for VM '{}'", name))?;
+
+        match iso_path {
+            Some(path) => {
+                if !std::path::Path::new(path).exists() {
+                    anyhow::bail!("ISO file not found: {}", path);
+                }
+                qmp.blockdev_change_medium("ide1-cd0", path).await?;
+                Ok(format!("CD '{}' inserted into VM '{}'", path, name))
+            }
+            None => {
+                qmp.eject("ide1-cd0").await?;
+                Ok(format!("CD ejected from VM '{}'", name))
+            }
+        }
+    }
+
     /// Add a shared folder (requires VM restart)
     pub async fn add_shared_folder(
         &self,

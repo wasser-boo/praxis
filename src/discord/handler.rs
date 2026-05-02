@@ -191,22 +191,35 @@ impl EventHandler for DiscordHandler {
             return;
         }
 
+        let mut thinking_msg_ids: Vec<serenity::model::id::MessageId> = Vec::new();
+
         loop {
             match ws_client.recv().await {
                 Ok(IncomingMessage::Response { content, .. }) => {
                     typing_handle.abort();
+                    for mid in &thinking_msg_ids {
+                        let _ = msg.channel_id.delete_message(&ctx.http, mid).await;
+                    }
                     if let Err(e) = send_message_split(&ctx.http, msg.channel_id, &content).await {
                         tracing::error!("Failed to send response: {}", e);
                     }
                     break;
                 }
                 Ok(IncomingMessage::Feedback { content, .. }) => {
-                    if let Err(e) = send_message_split(&ctx.http, msg.channel_id, &content).await {
-                        tracing::error!("Failed to send feedback: {}", e);
+                    match msg.channel_id.say(&ctx.http, &content).await {
+                        Ok(feedback_msg) => {
+                            thinking_msg_ids.push(feedback_msg.id);
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to send feedback: {}", e);
+                        }
                     }
                 }
                 Ok(IncomingMessage::Error { message }) => {
                     typing_handle.abort();
+                    for mid in &thinking_msg_ids {
+                        let _ = msg.channel_id.delete_message(&ctx.http, mid).await;
+                    }
                     let _ = msg.reply(&ctx.http, format!("Error: {}", message)).await;
                     break;
                 }
@@ -219,6 +232,9 @@ impl EventHandler for DiscordHandler {
                 Err(e) => {
                     tracing::error!("Failed to receive response: {}", e);
                     typing_handle.abort();
+                    for mid in &thinking_msg_ids {
+                        let _ = msg.channel_id.delete_message(&ctx.http, mid).await;
+                    }
                     let _ = msg
                         .reply(&ctx.http, "Failed to get response. Try again.")
                         .await;

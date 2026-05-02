@@ -1057,13 +1057,10 @@ async fn vm_start(Json(req): Json<VmStartRequest>) -> Result<Json<serde_json::Va
 }
 
 async fn vm_stop(Json(req): Json<VmStopRequest>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let config = crate::config::Config::from_env();
     let manager = match crate::tools::vm_tools::get_vm_manager().await {
         Some(m) => m,
-        None => {
-            return Ok(Json(
-                serde_json::json!({"error": "VM manager not initialized"}),
-            ))
-        }
+        None => crate::tools::vm_tools::init_vm_manager(&config.data_dir),
     };
 
     let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
@@ -1076,13 +1073,10 @@ async fn vm_stop(Json(req): Json<VmStopRequest>) -> Result<Json<serde_json::Valu
 async fn vm_snapshot(
     Json(req): Json<VmSnapshotRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let config = crate::config::Config::from_env();
     let manager = match crate::tools::vm_tools::get_vm_manager().await {
         Some(m) => m,
-        None => {
-            return Ok(Json(
-                serde_json::json!({"error": "VM manager not initialized"}),
-            ))
-        }
+        None => crate::tools::vm_tools::init_vm_manager(&config.data_dir),
     };
 
     let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
@@ -1095,13 +1089,10 @@ async fn vm_snapshot(
 async fn vm_shared_folder(
     Json(req): Json<VmSharedFolderRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let config = crate::config::Config::from_env();
     let manager = match crate::tools::vm_tools::get_vm_manager().await {
         Some(m) => m,
-        None => {
-            return Ok(Json(
-                serde_json::json!({"error": "VM manager not initialized"}),
-            ))
-        }
+        None => crate::tools::vm_tools::init_vm_manager(&config.data_dir),
     };
 
     let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
@@ -1138,41 +1129,16 @@ async fn vm_cd(Json(req): Json<VmCdRequest>) -> Result<Json<serde_json::Value>, 
         return Ok(Json(serde_json::json!({"error": "VM not enabled"})));
     }
 
-    let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
-
-    // Get QMP port from VM manager
     let manager = match crate::tools::vm_tools::get_vm_manager().await {
         Some(m) => m,
-        None => {
-            return Ok(Json(
-                serde_json::json!({"error": "VM manager not initialized"}),
-            ))
-        }
+        None => crate::tools::vm_tools::init_vm_manager(&config.data_dir),
     };
 
-    let vm_info = match manager.get_vm_info(&name).await {
-        Ok(info) => info,
-        Err(e) => return Ok(Json(serde_json::json!({"error": e.to_string()}))),
-    };
+    let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
 
-    let qmp_port = vm_info["qmp_port"].as_u64().unwrap_or(44400) as u16;
-    let qmp_addr = format!("127.0.0.1:{}", qmp_port);
-
-    match req.iso_path {
-        Some(iso) => match crate::vm::qmp::QmpClient::connect(&qmp_addr).await {
-            Ok(mut client) => {
-                let _ = client.negotiate().await;
-                Ok(Json(
-                    serde_json::json!({"message": format!("CD '{}' inserted into VM '{}'", iso, name)}),
-                ))
-            }
-            Err(e) => Ok(Json(
-                serde_json::json!({"error": format!("Cannot connect to VM QMP: {}", e)}),
-            )),
-        },
-        None => Ok(Json(
-            serde_json::json!({"message": format!("CD ejected from VM '{}'", name)}),
-        )),
+    match manager.change_cd(&name, req.iso_path.as_deref()).await {
+        Ok(msg) => Ok(Json(serde_json::json!({"message": msg}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
     }
 }
 

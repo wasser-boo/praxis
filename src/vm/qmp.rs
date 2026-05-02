@@ -296,4 +296,29 @@ impl QmpClient {
         })
         .await
     }
+
+    pub async fn eject(&mut self, device: &str) -> anyhow::Result<()> {
+        self.execute(QmpCommand {
+            execute: "eject".to_string(),
+            arguments: Some(serde_json::json!({ "device": device })),
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn blockdev_change_medium(
+        &mut self,
+        device: &str,
+        filename: &str,
+    ) -> anyhow::Result<()> {
+        self.execute(QmpCommand {
+            execute: "blockdev-change-medium".to_string(),
+            arguments: Some(serde_json::json!({
+                "device": device,
+                "filename": filename
+            })),
+        })
+        .await?;
+        Ok(())
+    }
 }
