@@ -286,24 +286,45 @@ pub async fn save_screenshot_to_disk(vm_name: &str, data_dir: &str) -> Option<St
     cleanup_screenshot_limit_dir(&ss_dir);
 
     let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let filename = format!("{}/screenshot_{}.ppm", ss_dir, ts);
+    let filename = format!("{}/screenshot_{}.png", ss_dir, ts);
 
     if let Some(b64) = screenshot_data.strip_prefix("data:image/ppm;base64,") {
         use base64::Engine;
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
-            let _ = std::fs::write(&filename, bytes);
-            return Some(filename);
+            // Convert PPM to PNG
+            match image::load_from_memory_with_format(&bytes, image::ImageFormat::Pnm) {
+                Ok(img) => {
+                    let mut png_buf = Vec::new();
+                    let cursor = std::io::Cursor::new(&mut png_buf);
+                    if img.write_to(cursor, image::ImageFormat::Png).is_ok() {
+                        let _ = std::fs::write(&filename, &png_buf);
+                        return Some(filename);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("PPM to PNG conversion failed: {}, falling back to PPM", e);
+                }
+            }
+            // Fallback: save as PPM if conversion fails
+            let ppm_filename = format!("{}/screenshot_{}.ppm", ss_dir, ts);
+            let _ = std::fs::write(&ppm_filename, bytes);
+            return Some(ppm_filename);
         }
     }
     None
 }
 
-/// Read a PPM screenshot file and return a base64 data URL for use as image content_part
+/// Read a screenshot file and return a base64 data URL
 pub fn screenshot_to_data_url(path: &str) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Some(format!("data:image/ppm;base64,{}", b64))
+    let mime = if path.ends_with(".png") {
+        "image/png"
+    } else {
+        "image/ppm"
+    };
+    Some(format!("data:{};base64,{}", mime, b64))
 }
 
 async fn handle_vm_look_screenshot(_manager: &VmManager, args: &serde_json::Value) -> String {
