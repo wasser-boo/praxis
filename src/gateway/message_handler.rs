@@ -160,9 +160,13 @@ pub async fn handle_message(
         },
         temperature: Some(0.7),
         max_tokens: Some(4096),
+        model: ctx.settings.model.clone(),
     };
 
-    let response = state.llm.chat(request, None).await?;
+    let response = state
+        .llm
+        .chat(request, ctx.settings.provider.as_deref())
+        .await?;
 
     if let Some(tool_calls) = &response.tool_calls {
         // Persist the assistant message with tool_calls
@@ -233,9 +237,13 @@ pub async fn handle_message(
             tools: None,
             temperature: Some(0.7),
             max_tokens: Some(4096),
+            model: ctx.settings.model.clone(),
         };
 
-        let followup_response = state.llm.chat(followup_request, None).await?;
+        let followup_response = state
+            .llm
+            .chat(followup_request, ctx.settings.provider.as_deref())
+            .await?;
         let reply = followup_response.content.unwrap_or_default();
 
         state.db.add_message(

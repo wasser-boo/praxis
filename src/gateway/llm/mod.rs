@@ -83,6 +83,7 @@ impl LLMRouter {
 
         for p in &self.providers {
             if p.name() != provider_name {
+                tracing::info!("Trying fallback provider: {}", p.name());
                 match p.chat(request.clone()).await {
                     Ok(response) => {
                         tracing::info!("Fallback to {} successful", p.name());
@@ -151,6 +152,7 @@ impl LLMRouter {
                 },
                 temperature: Some(0.7),
                 max_tokens: Some(4096),
+                model: None,
             };
 
             let response = self.chat(request, None).await?;

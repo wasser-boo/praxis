@@ -26,8 +26,9 @@ impl LLMProvider for AnthropicProvider {
 
         let (system_prompt, messages) = build_anthropic_messages(&request.messages);
 
+        let model = request.model.as_deref().unwrap_or(&self.model);
         let mut body = serde_json::json!({
-            "model": self.model,
+            "model": model,
             "messages": messages,
             "max_tokens": request.max_tokens.unwrap_or(4096),
         });

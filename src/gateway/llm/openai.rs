@@ -24,8 +24,9 @@ impl LLMProvider for OpenAIProvider {
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let url = format!("{}/chat/completions", self.base_url);
 
+        let model = request.model.as_deref().unwrap_or(&self.model);
         let body = serde_json::json!({
-            "model": self.model,
+            "model": model,
             "messages": request.messages,
             "tools": request.tools,
             "temperature": request.temperature,

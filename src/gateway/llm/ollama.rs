@@ -46,8 +46,9 @@ impl LLMProvider for OllamaProvider {
             })
             .collect();
 
+        let model = request.model.as_deref().unwrap_or(&self.model);
         let mut body = serde_json::json!({
-            "model": self.model,
+            "model": model,
             "messages": messages,
             "stream": false,
         });

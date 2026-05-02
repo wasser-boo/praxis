@@ -248,10 +248,15 @@ pub async fn run_agent_loop(
             tools: if tools.is_empty() { None } else { Some(tools) },
             temperature: Some(0.7),
             max_tokens: Some(4096),
+            model: ctx.settings.model.clone(),
         };
 
         // Call LLM
-        let response = match state.llm.chat(request, None).await {
+        let response = match state
+            .llm
+            .chat(request, ctx.settings.provider.as_deref())
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(user_id = %user_id, error = %e, "LLM call failed");
@@ -569,6 +574,7 @@ pub async fn generate_compaction_summary(
         tools: None,
         temperature: Some(0.3),
         max_tokens: Some(500),
+        model: None,
     };
 
     let response = state.llm.chat(request, None).await?;

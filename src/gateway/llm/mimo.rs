@@ -65,13 +65,18 @@ impl MiMoProvider {
             })
             .collect();
 
+        let model = request.model.as_deref().unwrap_or(&self.model);
         let mut body = serde_json::json!({
-            "model": self.model,
+            "model": model,
             "messages": messages,
         });
 
         if let Some(ref tools) = request.tools {
             body["tools"] = serde_json::json!(tools);
+        }
+
+        if let Some(max_tokens) = request.max_tokens {
+            body["max_completion_tokens"] = serde_json::json!(max_tokens);
         }
 
         let resp = self
@@ -113,8 +118,9 @@ impl MiMoProvider {
         let (system_prompt, messages) =
             super::anthropic::build_anthropic_messages(&request.messages);
 
+        let model = request.model.as_deref().unwrap_or(&self.model);
         let mut body = serde_json::json!({
-            "model": self.model,
+            "model": model,
             "messages": messages,
             "max_tokens": request.max_tokens.unwrap_or(4096),
         });
