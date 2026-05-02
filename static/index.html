@@ -42,6 +42,7 @@
                     <li data-tab="memory">Memory</li>
                     <li data-tab="secrets">Secrets</li>
                     <li data-tab="pairings">Pairings</li>
+                    <li data-tab="vm">VM</li>
                     <li data-tab="cl-files">CL Files</li>
                     <li data-tab="cron-jobs">Cron Jobs</li>
                 </ul>
@@ -138,6 +139,49 @@
                     <div id="pairings-list" class="data-list"></div>
                     <h3 style="margin-top:2rem;margin-bottom:1rem">Pending Pairings</h3>
                     <div id="pending-pairings-list" class="data-list"></div>
+                </div>
+
+                <!-- CL Files Tab -->
+                <div id="tab-cl-files" class="tab">
+
+                <!-- VM Tab -->
+                <div id="tab-vm" class="tab">
+                    <h2>Virtual Machine</h2>
+                    <div id="vm-controls" style="display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap">
+                        <button class="btn btn-sm btn-primary" onclick="vmStart()">Start VM</button>
+                        <button class="btn btn-sm btn-danger" onclick="vmStop()">Stop VM</button>
+                        <button class="btn btn-sm btn-secondary" onclick="vmReboot()">Reboot</button>
+                        <button class="btn btn-sm btn-secondary" onclick="vmInsertCD()">Insert CD</button>
+                        <button class="btn btn-sm btn-secondary" onclick="vmEjectCD()">Eject CD</button>
+                        <button class="btn btn-sm btn-secondary" onclick="vmRefresh()">Refresh</button>
+                    </div>
+                    <div id="vm-status-bar" class="data-list" style="margin-bottom:1rem"></div>
+
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+                        <div>
+                            <h3>Desktop (VNC)</h3>
+                            <div id="vm-vnc-container" style="background:#000;border:1px solid var(--border);border-radius:8px;min-height:300px;display:flex;align-items:center;justify-content:center;position:relative">
+                                <div id="vm-vnc-placeholder" style="color:var(--text-secondary);font-size:0.9rem">VM not running. Click "Start VM" to begin.</div>
+                                <canvas id="vm-vnc-canvas" style="display:none;width:100%;max-height:400px;border-radius:6px"></canvas>
+                            </div>
+                        </div>
+                        <div>
+                            <h3>LLM Activity Log</h3>
+                            <div id="vm-activity-log" style="background:var(--bg-tertiary,#1a1a2e);border:1px solid var(--border);border-radius:8px;padding:0.75rem;min-height:300px;max-height:400px;overflow-y:auto;font-family:monospace;font-size:0.8rem;line-height:1.6">
+                                <div style="color:var(--text-secondary)">No VM activity yet.</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <h3 style="margin-top:1.5rem">VM Configuration</h3>
+                    <div id="vm-config" class="data-list"></div>
+
+                    <h3 style="margin-top:1.5rem">Quick Actions</h3>
+                    <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                        <button class="btn btn-sm btn-secondary" onclick="vmCreateSnapshot()">Snapshot</button>
+                        <button class="btn btn-sm btn-secondary" onclick="vmAddSharedFolder()">Add Shared Folder</button>
+                        <button class="btn btn-sm btn-secondary" onclick="vmShowSetup()">Setup New VM</button>
+                    </div>
                 </div>
 
                 <!-- CL Files Tab -->

@@ -171,6 +171,78 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     };
     println!();
 
+    // VM (optional)
+    println!("--- Virtual Machine (Optional) ---");
+    println!("Enable QEMU VM support? The LLM can control a full Linux VM.");
+    println!("Requires: qemu-system-x86_64, qemu-img");
+    let has_vm = existing.contains_key("VM_ENABLED");
+    let vm_default = if has_vm {
+        existing
+            .get("VM_ENABLED")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let vm_label = if has_vm {
+        "Update VM config?"
+    } else {
+        "Enable VM mode?"
+    };
+    let setup_vm = prompt_yes_no(vm_label, vm_default)?;
+
+    if setup_vm {
+        env_lines.push("VM_ENABLED=true".to_string());
+        let cpu_cores = prompt_with_default(
+            "VM CPU Cores",
+            &get_existing(&existing, "VM_CPU_CORES", "2"),
+        );
+        let ram_mb =
+            prompt_with_default("VM RAM (MB)", &get_existing(&existing, "VM_RAM_MB", "4096"));
+        let disk_size = prompt_with_default(
+            "VM Disk Size",
+            &get_existing(&existing, "VM_DISK_SIZE", "40G"),
+        );
+        let arch = prompt_with_default(
+            "VM Architecture (x86_64 or aarch64)",
+            &get_existing(&existing, "VM_ARCH", "x86_64"),
+        );
+        env_lines.push(format!("VM_CPU_CORES={}", cpu_cores));
+        env_lines.push(format!("VM_RAM_MB={}", ram_mb));
+        env_lines.push(format!("VM_DISK_SIZE={}", disk_size));
+        env_lines.push(format!("VM_ARCH={}", arch));
+
+        println!();
+        println!("VM Access Mode:");
+        println!("  1) shared — LLM can use VM AND host system tools");
+        println!("  2) vm     — LLM can ONLY use the VM (no host access)");
+        let vm_mode_choice = prompt_choice("Select VM mode", &["1", "2"], "1")?;
+        let vm_mode = if vm_mode_choice == "2" {
+            "vm"
+        } else {
+            "shared"
+        };
+        env_lines.push(format!("VM_MODE={}", vm_mode));
+
+        println!("VM mode enabled. The LLM will have full control over the VM.");
+        println!("Secrets are injected into the VM but are NEVER visible to the LLM.");
+    } else if has_vm {
+        // Keep existing
+        for key in &[
+            "VM_ENABLED",
+            "VM_CPU_CORES",
+            "VM_RAM_MB",
+            "VM_DISK_SIZE",
+            "VM_ARCH",
+            "VM_MODE",
+        ] {
+            if let Some(val) = existing.get(*key) {
+                env_lines.push(format!("{}={}", key, val));
+            }
+        }
+    }
+    println!();
+
     // Data directory
     println!("--- Data Storage ---");
     let data_dir = prompt_with_default(
@@ -376,6 +448,15 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     content.push_str("# Plugins\n");
     for line in &env_lines {
         if line.starts_with("PLUGIN_") {
+            content.push_str(line);
+            content.push('\n');
+        }
+    }
+    content.push('\n');
+
+    content.push_str("# VM\n");
+    for line in &env_lines {
+        if line.starts_with("VM_") {
             content.push_str(line);
             content.push('\n');
         }

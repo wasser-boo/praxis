@@ -109,6 +109,9 @@ async function loadTabData(tab) {
             case 'cron-jobs':
                 await loadCronJobs();
                 break;
+            case 'vm':
+                await loadVM();
+                break;
             case 'messages':
                 await populateUserDropdowns();
                 break;
@@ -918,6 +921,283 @@ function escapeHtml(str) {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+}
+
+// ── VM ───────────────────────────────────────────────────────────────────────
+
+async function loadVM() {
+    try {
+        await loadVMStatus();
+        await loadVMActivity();
+    } catch (err) {
+        console.error('Failed to load VM:', err);
+    }
+}
+
+async function loadVMStatus() {
+    const container = document.getElementById('vm-status-bar');
+    try {
+        const res = await apiFetch('/api/vm');
+        if (!res.ok) {
+            container.innerHTML = '<div class="data-item"><span class="name" style="color:var(--text-secondary)">VM feature not available. Add VM=true to .env</span></div>';
+            return;
+        }
+        const data = await res.json();
+        const vms = data.vms || [];
+        const config = data.config || {};
+
+        if (vms.length === 0) {
+            container.innerHTML = '<div class="data-item"><span class="name">No VMs running</span></div>';
+        } else {
+            container.innerHTML = vms.map(vm => `
+                <div class="data-item">
+                    <div>
+                        <span class="name">${escapeHtml(vm.name)}</span>
+                        <span class="meta">Status: ${escapeHtml(vm.status)} | PID: ${vm.pid || '-'} | VNC: ${vm.vnc_port || '-'}</span>
+                    </div>
+                    <div class="actions">
+                        <button class="btn btn-sm btn-danger" onclick="vmStop('${escapeHtml(vm.name)}')">Stop</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Config info
+        const configEl = document.getElementById('vm-config');
+        if (config && config.vm_enabled !== undefined) {
+            configEl.innerHTML = `
+                <div class="data-item"><span class="name">VM Enabled</span><span class="meta">${config.vm_enabled ? 'Yes' : 'No'}</span></div>
+                <div class="data-item"><span class="name">CPU Cores</span><span class="meta">${config.vm_cpu_cores || '-'}</span></div>
+                <div class="data-item"><span class="name">RAM (MB)</span><span class="meta">${config.vm_ram_mb || '-'}</span></div>
+                <div class="data-item"><span class="name">Disk Size</span><span class="meta">${config.vm_disk_size || '-'}</span></div>
+                <div class="data-item"><span class="name">Architecture</span><span class="meta">${config.vm_arch || '-'}</span></div>
+            `;
+        }
+    } catch (err) {
+        container.innerHTML = `<div class="data-item"><span class="name" style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`;
+    }
+}
+
+async function loadVMActivity() {
+    const container = document.getElementById('vm-activity-log');
+    try {
+        const res = await apiFetch('/api/vm/activity');
+        if (!res.ok) return;
+        const data = await res.json();
+        const activities = data.activities || [];
+
+        if (activities.length === 0) {
+            container.innerHTML = '<div style="color:var(--text-secondary)">No VM activity yet.</div>';
+            return;
+        }
+
+        container.innerHTML = activities.map(a => {
+            const time = a.created_at ? new Date(a.created_at).toLocaleTimeString() : '';
+            let color = 'var(--text-primary)';
+            let icon = '';
+            const name = a.action || '';
+            // VM-specific tools
+            if (name === 'vm_shell') { color = '#00D9FF'; icon = '[SHELL]'; }
+            else if (name === 'vm_keys') { color = '#FFD600'; icon = '[KEYS]'; }
+            else if (name === 'vm_mouse') { color = '#FF9800'; icon = '[MOUSE]'; }
+            else if (name === 'vm_screenshot') { color = '#6C63FF'; icon = '[SCREEN]'; }
+            else if (name === 'vm_start') { color = '#00E676'; icon = '[START]'; }
+            else if (name === 'vm_stop') { color = '#FF5252'; icon = '[STOP]'; }
+            else if (name === 'vm_file_transfer') { color = '#E040FB'; icon = '[FILE]'; }
+            else if (name === 'vm_snapshot') { color = '#7C4DFF'; icon = '[SNAP]'; }
+            else if (name === 'vm_shared_folder') { color = '#00BCD4'; icon = '[SHARE]'; }
+            // Host tools
+            else if (name === 'execute_terminal') { color = '#4CAF50'; icon = '[TERM]'; }
+            else if (name === 'write_file') { color = '#2196F3'; icon = '[WRITE]'; }
+            else if (name === 'edit_file') { color = '#2196F3'; icon = '[EDIT]'; }
+            else if (name === 'read_file') { color = '#90CAF9'; icon = '[READ]'; }
+            else if (name === 'set_context' || name === 'get_context') { color = '#78909C'; icon = '[CTX]'; }
+            else if (name.startsWith('agent_')) { color = '#FFA726'; icon = '[AGENT]'; }
+            else if (name.startsWith('discord_')) { color = '#7289DA'; icon = '[DISCORD]'; }
+            else if (name.startsWith('learn_')) { color = '#CE93D8'; icon = '[LEARN]'; }
+            else { icon = '[TOOL]'; }
+
+            // Parse input to show useful summary
+            let inputSummary = '';
+            try {
+                const inp = JSON.parse(a.input || '{}');
+                if (inp.command) inputSummary = inp.command.substring(0, 80);
+                else if (inp.keys) inputSummary = `"${inp.keys}"`;
+                else if (inp.path) inputSummary = inp.path;
+                else if (inp.message) inputSummary = inp.message.substring(0, 60);
+                else if (inp.action) inputSummary = inp.action;
+                else inputSummary = (a.input || '').substring(0, 80);
+            } catch { inputSummary = (a.input || '').substring(0, 80); }
+
+            // Truncate output for display
+            let outputPreview = (a.output || '').substring(0, 120).replace(/\n/g, ' ');
+
+            return `<div style="margin-bottom:0.3rem;padding:0.2rem 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+                <span style="color:var(--text-secondary);font-size:0.75rem">${time}</span>
+                <span style="color:${color};font-weight:600;font-size:0.8rem">${icon} ${escapeHtml(name)}</span>
+                <span style="color:var(--text-primary);font-size:0.8rem"> ${escapeHtml(inputSummary)}</span>
+                ${outputPreview ? `<div style="color:var(--text-secondary);font-size:0.75rem;padding-left:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(outputPreview)}</div>` : ''}
+            </div>`;
+        }).join('');
+    } catch (err) {
+        console.error('Failed to load VM activity:', err);
+    }
+}
+
+async function vmStart() {
+    showModal('Start VM', `
+        <div class="form-group">
+            <label>VM Name</label>
+            <input type="text" id="vm-start-name" value="praxis-vm" style="width:100%;padding:0.5rem">
+        </div>
+        <div class="form-group">
+            <label>CPU Cores</label>
+            <input type="number" id="vm-start-cpu" value="2" style="width:100%;padding:0.5rem">
+        </div>
+        <div class="form-group">
+            <label>RAM (MB)</label>
+            <input type="number" id="vm-start-ram" value="4096" style="width:100%;padding:0.5rem">
+        </div>
+        <div class="form-group">
+            <label>Disk Size</label>
+            <input type="text" id="vm-start-disk" value="40G" style="width:100%;padding:0.5rem">
+        </div>
+        <div class="form-group">
+            <label>ISO Path (optional, for OS installation)</label>
+            <input type="text" id="vm-start-iso" placeholder="/path/to/linux.iso" style="width:100%;padding:0.5rem">
+        </div>
+        <button class="btn btn-primary" style="margin-top:1rem" onclick="vmDoStart()">Start VM</button>
+    `);
+}
+
+async function vmDoStart() {
+    const body = {
+        name: document.getElementById('vm-start-name').value || 'praxis-vm',
+        cpu_cores: parseInt(document.getElementById('vm-start-cpu').value) || 2,
+        ram_mb: parseInt(document.getElementById('vm-start-ram').value) || 4096,
+        disk_size: document.getElementById('vm-start-disk').value || '40G',
+    };
+    const iso = document.getElementById('vm-start-iso').value;
+    if (iso) body.iso_path = iso;
+
+    try {
+        const res = await apiFetch('/api/vm/start', {
+            method: 'POST',
+            body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        closeModal();
+        alert(data.message || data.error || 'Done');
+        loadVM();
+    } catch (err) {
+        alert('Failed: ' + err.message);
+    }
+}
+
+async function vmStop(name) {
+    name = name || 'praxis-vm';
+    if (!confirm(`Stop VM "${name}"?`)) return;
+    try {
+        const res = await apiFetch('/api/vm/stop', {
+            method: 'POST',
+            body: JSON.stringify({ name })
+        });
+        const data = await res.json();
+        alert(data.message || data.error || 'Stopped');
+        loadVM();
+    } catch (err) {
+        alert('Failed: ' + err.message);
+    }
+}
+
+async function vmRefresh() {
+    await loadVM();
+}
+
+async function vmCreateSnapshot() {
+    const name = prompt('Snapshot name:');
+    if (!name) return;
+    try {
+        const res = await apiFetch('/api/vm/snapshot', {
+            method: 'POST',
+            body: JSON.stringify({ snapshot_name: name })
+        });
+        const data = await res.json();
+        alert(data.message || data.error || 'Snapshot created');
+    } catch (err) {
+        alert('Failed: ' + err.message);
+    }
+}
+
+async function vmAddSharedFolder() {
+    showModal('Add Shared Folder', `
+        <div class="form-group">
+            <label>Host Path</label>
+            <input type="text" id="vm-sf-host" placeholder="/home/user/projects" style="width:100%;padding:0.5rem">
+        </div>
+        <div class="form-group">
+            <label>Mount Point (in VM)</label>
+            <input type="text" id="vm-sf-mount" value="/mnt/projects" style="width:100%;padding:0.5rem">
+        </div>
+        <button class="btn btn-primary" style="margin-top:1rem" onclick="vmDoAddSharedFolder()">Add</button>
+    `);
+}
+
+async function vmDoAddSharedFolder() {
+    const host_path = document.getElementById('vm-sf-host').value;
+    const mount_point = document.getElementById('vm-sf-mount').value;
+    if (!host_path) { alert('Host path required'); return; }
+    try {
+        const res = await apiFetch('/api/vm/shared-folder', {
+            method: 'POST',
+            body: JSON.stringify({ host_path, mount_point })
+        });
+        const data = await res.json();
+        closeModal();
+        alert(data.message || data.error || 'Shared folder added');
+    } catch (err) {
+        alert('Failed: ' + err.message);
+    }
+}
+
+function vmShowSetup() {
+    alert('To configure VM settings, add these to your .env file:\n\nVM_ENABLED=true\nVM_CPU_CORES=2\nVM_RAM_MB=4096\nVM_DISK_SIZE=40G\nVM_ARCH=x86_64\nVM_MODE=shared\n\nThen restart Praxis.');
+}
+
+async function vmReboot() {
+    if (!confirm('Reboot VM?')) return;
+    try {
+        await apiFetch('/api/vm/stop', { method: 'POST', body: JSON.stringify({ name: 'praxis-vm' }) });
+        setTimeout(async () => {
+            await apiFetch('/api/vm/start', { method: 'POST', body: JSON.stringify({ name: 'praxis-vm' }) });
+            alert('VM rebooting...');
+            loadVM();
+        }, 2000);
+    } catch (err) { alert('Failed: ' + err.message); }
+}
+
+async function vmInsertCD() {
+    const iso = prompt('Path to ISO file:');
+    if (!iso) return;
+    try {
+        const res = await apiFetch('/api/vm/cd', {
+            method: 'POST',
+            body: JSON.stringify({ name: 'praxis-vm', iso_path: iso })
+        });
+        const data = await res.json();
+        alert(data.message || data.error || 'CD inserted');
+    } catch (err) { alert('Failed: ' + err.message); }
+}
+
+async function vmEjectCD() {
+    try {
+        const res = await apiFetch('/api/vm/cd', {
+            method: 'POST',
+            body: JSON.stringify({ name: 'praxis-vm', iso_path: null })
+        });
+        const data = await res.json();
+        alert(data.message || data.error || 'CD ejected');
+    } catch (err) { alert('Failed: ' + err.message); }
 }
 
 // ── Event Listeners ───────────────────────────────────────────────────────────

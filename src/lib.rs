@@ -10,4 +10,5 @@ pub mod plugins;
 pub mod skills;
 pub mod tags;
 pub mod tools;
+pub mod vm;
 pub mod voice;

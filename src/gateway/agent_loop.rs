@@ -317,9 +317,63 @@ pub async fn run_agent_loop(
                 }
 
                 let result = execute_tool_call(&state.db, user_id, tc, &state.plugins).await;
+                let mut final_result = result.clone();
+
+                // Log ALL tool calls to vm_activity_log for dashboard visibility
+                {
+                    let conn = state.db.conn();
+                    let _ = conn.execute(
+                        "INSERT INTO vm_activity_log (vm_id, action, input, output) VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![
+                            "praxis-vm",
+                            &tc.function.name,
+                            &tc.function.arguments,
+                            if result.len() > 2000 { &result[..2000] } else { &result }
+                        ],
+                    );
+                }
+
+                // Auto-screenshot after VM tool calls
+                if tc.function.name.starts_with("vm_") && tc.function.name != "vm_screenshot" {
+                    let auto_screenshot = ctx
+                        .custom_data
+                        .get("vm_auto_screenshot")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    if auto_screenshot {
+                        let screenshot_dir = ctx
+                            .custom_data
+                            .get("vm_screenshot_dir")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if let Some(screenshot) =
+                            crate::tools::vm_tools::take_screenshot_for_context("praxis-vm").await
+                        {
+                            // Save to configurable folder if set
+                            if !screenshot_dir.is_empty() {
+                                let _ = std::fs::create_dir_all(screenshot_dir);
+                                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                                let filename =
+                                    format!("{}/{}_{}.ppm", screenshot_dir, tc.function.name, ts);
+                                // screenshot is data:image/ppm;base64,... so decode
+                                if let Some(b64) = screenshot.strip_prefix("data:image/ppm;base64,")
+                                {
+                                    use base64::Engine;
+                                    if let Ok(bytes) =
+                                        base64::engine::general_purpose::STANDARD.decode(b64)
+                                    {
+                                        let _ = std::fs::write(&filename, bytes);
+                                    }
+                                }
+                            }
+                            final_result = format!("{}\n\n[VM Screenshot: {}]", result, screenshot);
+                        }
+                    }
+                }
+
                 state.db.add_message(
                     user_id,
-                    &crate::db::messages::Message::tool(result.clone(), tc.id.clone()),
+                    &crate::db::messages::Message::tool(final_result, tc.id.clone()),
                 )?;
                 tool_call_count += 1;
             }
@@ -679,64 +733,149 @@ async fn execute_tool_call(
 
     match tc.function.name.as_str() {
         "execute_terminal" => {
-            let command = args["command"].as_str().unwrap_or("");
-            match crate::tools::execute_terminal::execute_terminal(command, None).await {
-                Ok(result) => {
-                    if result.exit_code == 0 {
-                        if result.stdout.is_empty() {
-                            "Command executed successfully (no output)".to_string()
-                        } else {
-                            result.stdout
-                        }
-                    } else {
-                        format!(
-                            "Exit code: {}\nStdout: {}\nStderr: {}",
-                            result.exit_code, result.stdout, result.stderr
-                        )
-                    }
+            // If VM_MODE=vm, redirect to VM
+            let vm_mode = std::env::var("VM_MODE").unwrap_or_else(|_| "shared".to_string());
+            let vm_enabled = std::env::var("VM_ENABLED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if vm_enabled && vm_mode == "vm" {
+                let command = args["command"].as_str().unwrap_or("");
+                match crate::tools::vm_tools::dispatch_vm_tool(
+                    "vm_shell",
+                    &serde_json::json!({"command": command}),
+                )
+                .await
+                {
+                    Some(result) => result,
+                    None => "Error: VM not running. Start a VM first with vm_start.".to_string(),
                 }
-                Err(e) => format!("Error: {}", e),
-            }
+            } else {
+                let command = args["command"].as_str().unwrap_or("");
+                match crate::tools::execute_terminal::execute_terminal(command, None).await {
+                    Ok(result) => {
+                        if result.exit_code == 0 {
+                            if result.stdout.is_empty() {
+                                "Command executed successfully (no output)".to_string()
+                            } else {
+                                result.stdout
+                            }
+                        } else {
+                            format!(
+                                "Exit code: {}\nStdout: {}\nStderr: {}",
+                                result.exit_code, result.stdout, result.stderr
+                            )
+                        }
+                    }
+                    Err(e) => format!("Error: {}", e),
+                }
+            } // end else (shared mode)
         }
         "write_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            let content = args["content"].as_str().unwrap_or("");
-            match crate::tools::write_file::write_file(path, content).await {
-                Ok(_) => format!("File written: {}", path),
-                Err(e) => format!("Error: {}", e),
-            }
+            let vm_mode = std::env::var("VM_MODE").unwrap_or_else(|_| "shared".to_string());
+            let vm_enabled = std::env::var("VM_ENABLED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if vm_enabled && vm_mode == "vm" {
+                let path = args["path"].as_str().unwrap_or("");
+                let content = args["content"].as_str().unwrap_or("");
+                match crate::tools::vm_tools::dispatch_vm_tool(
+                    "vm_file_transfer",
+                    &serde_json::json!({"path": path, "content": content, "direction": "to_vm"}),
+                )
+                .await
+                {
+                    Some(result) => result,
+                    None => "Error: VM not running. Start a VM first with vm_start.".to_string(),
+                }
+            } else {
+                let path = args["path"].as_str().unwrap_or("");
+                let content = args["content"].as_str().unwrap_or("");
+                match crate::tools::write_file::write_file(path, content).await {
+                    Ok(_) => format!("File written: {}", path),
+                    Err(e) => format!("Error: {}", e),
+                }
+            } // end else (shared mode)
         }
         "edit_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            let old_text = args["old_text"]
-                .as_str()
-                .or_else(|| args["old_string"].as_str())
-                .unwrap_or("");
-            let new_text = args["new_text"]
-                .as_str()
-                .or_else(|| args["new_string"].as_str())
-                .unwrap_or("");
-            match crate::tools::edit_file::edit_file(path, old_text, new_text).await {
-                Ok(_) => format!("File edited: {}", path),
-                Err(e) => format!("Error: {}", e),
-            }
+            let vm_mode = std::env::var("VM_MODE").unwrap_or_else(|_| "shared".to_string());
+            let vm_enabled = std::env::var("VM_ENABLED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if vm_enabled && vm_mode == "vm" {
+                let path = args["path"].as_str().unwrap_or("");
+                let old_text = args["old_text"]
+                    .as_str()
+                    .or_else(|| args["old_string"].as_str())
+                    .unwrap_or("");
+                let new_text = args["new_text"]
+                    .as_str()
+                    .or_else(|| args["new_string"].as_str())
+                    .unwrap_or("");
+                let cmd = format!(
+                    "sed -i 's/{}/{}/g' {}",
+                    old_text.replace('/', "\\/"),
+                    new_text.replace('/', "\\/"),
+                    path
+                );
+                match crate::tools::vm_tools::dispatch_vm_tool(
+                    "vm_shell",
+                    &serde_json::json!({"command": cmd}),
+                )
+                .await
+                {
+                    Some(result) => result,
+                    None => "Error: VM not running. Start a VM first with vm_start.".to_string(),
+                }
+            } else {
+                let path = args["path"].as_str().unwrap_or("");
+                let old_text = args["old_text"]
+                    .as_str()
+                    .or_else(|| args["old_string"].as_str())
+                    .unwrap_or("");
+                let new_text = args["new_text"]
+                    .as_str()
+                    .or_else(|| args["new_string"].as_str())
+                    .unwrap_or("");
+                match crate::tools::edit_file::edit_file(path, old_text, new_text).await {
+                    Ok(_) => format!("File edited: {}", path),
+                    Err(e) => format!("Error: {}", e),
+                }
+            } // end else (shared mode)
         }
         "read_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    if content.len() > 10000 {
-                        format!(
-                            "{}...\n\n[File truncated - {} bytes total]",
-                            &content[..10000],
-                            content.len()
-                        )
-                    } else {
-                        content
-                    }
+            let vm_mode = std::env::var("VM_MODE").unwrap_or_else(|_| "shared".to_string());
+            let vm_enabled = std::env::var("VM_ENABLED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if vm_enabled && vm_mode == "vm" {
+                let path = args["path"].as_str().unwrap_or("");
+                let cmd = format!("cat {}", path);
+                match crate::tools::vm_tools::dispatch_vm_tool(
+                    "vm_shell",
+                    &serde_json::json!({"command": cmd}),
+                )
+                .await
+                {
+                    Some(result) => result,
+                    None => "Error: VM not running. Start a VM first with vm_start.".to_string(),
                 }
-                Err(e) => format!("Error reading file: {}", e),
-            }
+            } else {
+                let path = args["path"].as_str().unwrap_or("");
+                match std::fs::read_to_string(path) {
+                    Ok(content) => {
+                        if content.len() > 10000 {
+                            format!(
+                                "{}...\n\n[File truncated - {} bytes total]",
+                                &content[..10000],
+                                content.len()
+                            )
+                        } else {
+                            content
+                        }
+                    }
+                    Err(e) => format!("Error reading file: {}", e),
+                }
+            } // end else (shared mode)
         }
         "get_context" => match db.load_context(user_id) {
             Ok(ctx) => serde_json::to_string_pretty(&ctx)
@@ -878,18 +1017,28 @@ async fn execute_tool_call(
                 Err(e) => format!("Error: {}", e),
             }
         }
-        _ => match plugins
-            .execute_tool(
-                &tc.function.name,
-                &args,
-                ctx_data.as_ref(),
-                Some(&plugin_secrets),
-            )
-            .await
-        {
-            Ok(result) => result,
-            Err(e) => format!("Unknown tool: {} ({})", tc.function.name, e),
-        },
+        _ => {
+            // Check VM tools first
+            if tc.function.name.starts_with("vm_") {
+                if let Some(result) =
+                    crate::tools::vm_tools::dispatch_vm_tool(&tc.function.name, &args).await
+                {
+                    return result;
+                }
+            }
+            match plugins
+                .execute_tool(
+                    &tc.function.name,
+                    &args,
+                    ctx_data.as_ref(),
+                    Some(&plugin_secrets),
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => format!("Unknown tool: {} ({})", tc.function.name, e),
+            }
+        }
     }
 }
 

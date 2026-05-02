@@ -59,6 +59,10 @@ impl Database {
             conn.execute_batch(include_str!("../../migrations/004_tool_calls.sql"))?;
             conn.pragma_update(None, "user_version", 4)?;
         }
+        if version < 5 {
+            conn.execute_batch(include_str!("../../migrations/005_vm.sql"))?;
+            conn.pragma_update(None, "user_version", 5)?;
+        }
 
         Ok(())
     }

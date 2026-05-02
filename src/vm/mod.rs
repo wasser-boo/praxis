@@ -1,0 +1,772 @@
+pub mod qmp;
+pub mod secrets_inject;
+pub mod serial;
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum VmStatus {
+    Stopped,
+    Running,
+    Paused,
+    Installing,
+    Error,
+}
+
+impl std::fmt::Display for VmStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VmStatus::Stopped => write!(f, "stopped"),
+            VmStatus::Running => write!(f, "running"),
+            VmStatus::Paused => write!(f, "paused"),
+            VmStatus::Installing => write!(f, "installing"),
+            VmStatus::Error => write!(f, "error"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum VmArch {
+    #[serde(rename = "x86_64")]
+    X86_64,
+    #[serde(rename = "aarch64")]
+    Aarch64,
+}
+
+impl VmArch {
+    pub fn qemu_binary(&self) -> &str {
+        match self {
+            VmArch::X86_64 => "qemu-system-x86_64",
+            VmArch::Aarch64 => "qemu-system-aarch64",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "aarch64" => VmArch::Aarch64,
+            _ => VmArch::X86_64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedFolder {
+    pub host_path: String,
+    pub mount_tag: String,
+    pub mount_point: String,
+    pub readonly: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmConfig {
+    pub name: String,
+    pub arch: VmArch,
+    pub cpu_cores: u32,
+    pub ram_mb: u32,
+    pub disk_path: String,
+    pub disk_size: String,
+    pub iso_path: Option<String>,
+    pub vnc_port: u16,
+    pub qmp_socket: String,
+    pub serial_socket: String,
+    pub shared_folders: Vec<SharedFolder>,
+    pub network_mode: String,
+    pub audio_enabled: bool,
+}
+
+impl VmConfig {
+    pub fn default_for_name(name: &str, data_dir: &str, vnc_offset: u16, arch: &str) -> Self {
+        let vm_dir = format!("{}/vm/{}", data_dir, name);
+        Self {
+            name: name.to_string(),
+            arch: VmArch::from_str(arch),
+            cpu_cores: 2,
+            ram_mb: 4096,
+            disk_path: format!("{}/disk.qcow2", vm_dir),
+            disk_size: "40G".to_string(),
+            iso_path: None,
+            vnc_port: 5900 + vnc_offset,
+            qmp_socket: format!("{}/qmp.sock", vm_dir),
+            serial_socket: format!("{}/serial.sock", vm_dir),
+            shared_folders: Vec::new(),
+            network_mode: "user".to_string(),
+            audio_enabled: false,
+        }
+    }
+}
+
+/// Runtime state of a running VM
+pub struct VmInstance {
+    pub config: VmConfig,
+    pub status: VmStatus,
+    pub process: Option<tokio::process::Child>,
+    pub qmp: Option<qmp::QmpClient>,
+    pub serial: Option<serial::SerialShell>,
+    pub pid: Option<u32>,
+}
+
+/// VM Manager — manages all VM instances
+#[derive(Clone)]
+pub struct VmManager {
+    instances: Arc<RwLock<HashMap<String, VmInstance>>>,
+    data_dir: String,
+    next_vnc: Arc<RwLock<u16>>,
+}
+
+impl VmManager {
+    pub fn new(data_dir: &str) -> Self {
+        Self {
+            instances: Arc::new(RwLock::new(HashMap::new())),
+            data_dir: data_dir.to_string(),
+            next_vnc: Arc::new(RwLock::new(1)),
+        }
+    }
+
+    /// Start a VM with the given config
+    pub async fn start_vm(&self, config: VmConfig) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        if let Some(inst) = instances.get(&config.name) {
+            if inst.status == VmStatus::Running {
+                return Ok(format!("VM '{}' is already running", config.name));
+            }
+        }
+
+        // Ensure directories exist
+        let vm_dir = format!("{}/vm/{}", self.data_dir, config.name);
+        std::fs::create_dir_all(&vm_dir)?;
+
+        // Create disk if it doesn't exist
+        if !std::path::Path::new(&config.disk_path).exists() {
+            tracing::info!(disk = %config.disk_path, size = %config.disk_size, "Creating VM disk");
+            let output = tokio::process::Command::new("qemu-img")
+                .args([
+                    "create",
+                    "-f",
+                    "qcow2",
+                    &config.disk_path,
+                    &config.disk_size,
+                ])
+                .output()
+                .await?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "Failed to create disk: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+
+        // Build QEMU command
+        let args = self.build_qemu_args(&config);
+
+        tracing::info!(name = %config.name, arch = ?config.arch, "Starting VM");
+
+        // Start QEMU process
+        let mut cmd = tokio::process::Command::new(config.arch.qemu_binary());
+        cmd.args(&args);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let child = cmd.spawn().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to start QEMU ({}): {}. Is qemu-system-x86_64 installed?",
+                config.arch.qemu_binary(),
+                e
+            )
+        })?;
+
+        let pid = child.id();
+        tracing::info!(name = %config.name, pid = ?pid, "QEMU process started");
+
+        // Wait for sockets to appear
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        // Connect QMP
+        let qmp = match qmp::QmpClient::connect(&config.qmp_socket).await {
+            Ok(mut client) => {
+                let _ = client.negotiate().await;
+                tracing::info!("QMP connected for VM '{}'", config.name);
+                Some(client)
+            }
+            Err(e) => {
+                tracing::warn!("QMP connection failed (VM may still be booting): {}", e);
+                None
+            }
+        };
+
+        // Connect serial
+        let serial = match serial::SerialShell::connect(&config.serial_socket).await {
+            Ok(shell) => {
+                tracing::info!("Serial connected for VM '{}'", config.name);
+                Some(shell)
+            }
+            Err(e) => {
+                tracing::warn!("Serial connection failed: {}", e);
+                None
+            }
+        };
+
+        // Inject secrets via 9p if configured
+        if let Err(e) = secrets_inject::inject_secrets(&config.name, &self.data_dir).await {
+            tracing::warn!("Secret injection failed (non-fatal): {}", e);
+        }
+
+        let instance = VmInstance {
+            config: config.clone(),
+            status: VmStatus::Running,
+            process: Some(child),
+            qmp,
+            serial,
+            pid,
+        };
+
+        instances.insert(config.name.clone(), instance);
+
+        Ok(format!(
+            "VM '{}' started (PID: {:?}, VNC: {}, QMP: {})",
+            config.name, pid, config.vnc_port, config.qmp_socket
+        ))
+    }
+
+    /// Stop a VM gracefully
+    pub async fn stop_vm(&self, name: &str) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            return Ok(format!("VM '{}' is not running", name));
+        }
+
+        // Try QMP powerdown first (graceful)
+        if let Some(ref mut qmp) = instance.qmp {
+            let _ = qmp.system_powerdown().await;
+            tracing::info!("Sent system_powerdown to VM '{}'", name);
+
+            // Wait up to 10s for graceful shutdown
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Some(ref mut proc) = instance.process {
+                    match proc.try_wait() {
+                        Ok(Some(_)) => {
+                            instance.status = VmStatus::Stopped;
+                            instance.process = None;
+                            instance.qmp = None;
+                            instance.serial = None;
+                            return Ok(format!("VM '{}' stopped gracefully", name));
+                        }
+                        _ => continue,
+                    }
+                }
+            }
+        }
+
+        // Force kill if graceful failed
+        if let Some(ref mut proc) = instance.process {
+            proc.kill().await?;
+            instance.status = VmStatus::Stopped;
+            instance.process = None;
+            instance.qmp = None;
+            instance.serial = None;
+            return Ok(format!("VM '{}' force-stopped", name));
+        }
+
+        Ok(format!("VM '{}' was not running", name))
+    }
+
+    /// Execute a shell command in a VM
+    pub async fn shell_exec(
+        &self,
+        name: &str,
+        command: &str,
+        timeout_secs: u64,
+    ) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            anyhow::bail!("VM '{}' is not running", name);
+        }
+
+        let serial = instance
+            .serial
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Serial not connected for VM '{}'", name))?;
+
+        serial.execute(command, timeout_secs).await
+    }
+
+    /// Send raw keystrokes to a VM
+    pub async fn send_keys(&self, name: &str, keys: &str) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            anyhow::bail!("VM '{}' is not running", name);
+        }
+
+        // Use serial for regular text, QMP for special keys
+        if keys.starts_with("ctrl+")
+            || keys.starts_with("alt+")
+            || keys == "enter"
+            || keys == "esc"
+            || keys == "tab"
+            || keys.starts_with("f1")
+            || keys.starts_with("f2")
+            || keys.starts_with("f3")
+            || keys.starts_with("f4")
+            || keys.starts_with("f5")
+            || keys.starts_with("f6")
+            || keys.starts_with("f7")
+            || keys.starts_with("f8")
+            || keys.starts_with("f9")
+            || keys.starts_with("f10")
+            || keys.starts_with("f11")
+            || keys.starts_with("f12")
+            || keys == "arrow_up"
+            || keys == "arrow_down"
+            || keys == "arrow_left"
+            || keys == "arrow_right"
+            || keys == "pageup"
+            || keys == "pagedown"
+            || keys == "home"
+            || keys == "end"
+            || keys == "insert"
+            || keys == "delete"
+            || keys == "backspace"
+        {
+            // Send via QMP input-send-event
+            if let Some(ref mut qmp) = instance.qmp {
+                let (keycode, down, up) = Self::keys_to_qmp(keys)?;
+                qmp.send_key_event(&keycode, down, up).await?;
+                return Ok(format!("Sent special key: {}", keys));
+            }
+            anyhow::bail!("QMP not connected for VM '{}'", name);
+        } else {
+            // Regular text — send via serial
+            let serial = instance
+                .serial
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("Serial not connected for VM '{}'", name))?;
+            serial.send_raw(keys).await?;
+            return Ok(format!("Sent keys: {}", keys));
+        }
+    }
+
+    /// Send mouse input to the VM
+    pub async fn send_mouse(
+        &self,
+        name: &str,
+        action: &str,
+        x: Option<i32>,
+        y: Option<i32>,
+        dx: Option<i32>,
+        dy: Option<i32>,
+        button: Option<i32>,
+        scroll_vertical: Option<i32>,
+        scroll_horizontal: Option<i32>,
+    ) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            anyhow::bail!("VM '{}' is not running", name);
+        }
+
+        let qmp = instance
+            .qmp
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("QMP not connected for VM '{}'", name))?;
+
+        match action {
+            "move_absolute" => {
+                let mx = x.unwrap_or(0);
+                let my = y.unwrap_or(0);
+                qmp.mouse_move_absolute(mx, my).await?;
+                Ok(format!("Mouse moved to ({}, {})", mx, my))
+            }
+            "move_relative" => {
+                let mdx = dx.unwrap_or(0);
+                let mdy = dy.unwrap_or(0);
+                qmp.mouse_move_relative(mdx, mdy).await?;
+                Ok(format!("Mouse moved by ({}, {})", mdx, mdy))
+            }
+            "click" => {
+                let btn = button.unwrap_or(0);
+                qmp.mouse_button(btn, true).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                qmp.mouse_button(btn, false).await?;
+                let btn_name = match btn { 0 => "left", 1 => "middle", 2 => "right", _ => "left" };
+                Ok(format!("Mouse {} clicked at ({}, {})", btn_name, x.unwrap_or(-1), y.unwrap_or(-1)))
+            }
+            "double_click" => {
+                let btn = button.unwrap_or(0);
+                for _ in 0..2 {
+                    qmp.mouse_button(btn, true).await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                    qmp.mouse_button(btn, false).await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                }
+                Ok(format!("Mouse double-clicked"))
+            }
+            "drag" => {
+                // Move to start, press, move to end, release
+                let sx = x.unwrap_or(0);
+                let sy = y.unwrap_or(0);
+                let ex = dx.unwrap_or(0);
+                let ey = dy.unwrap_or(0);
+                let btn = button.unwrap_or(0);
+                qmp.mouse_move_absolute(sx, sy).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                qmp.mouse_button(btn, true).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                qmp.mouse_move_absolute(ex, ey).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                qmp.mouse_button(btn, false).await?;
+                Ok(format!("Mouse dragged from ({},{}) to ({},{})", sx, sy, ex, ey))
+            }
+            "scroll" => {
+                let sv = scroll_vertical.unwrap_or(0);
+                let sh = scroll_horizontal.unwrap_or(0);
+                qmp.mouse_scroll(sv, sh).await?;
+                Ok(format!("Mouse scrolled (vertical: {}, horizontal: {})", sv, sh))
+            }
+            _ => anyhow::bail!(
+                "Unknown mouse action: {}. Use: move_absolute, move_relative, click, double_click, drag, scroll",
+                action
+            ),
+        }
+    }
+
+    /// Take a screenshot of the VM display
+    pub async fn screenshot(&self, name: &str) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            anyhow::bail!("VM '{}' is not running", name);
+        }
+
+        let qmp = instance
+            .qmp
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("QMP not connected for VM '{}'", name))?;
+
+        let vm_dir = format!("{}/vm/{}", self.data_dir, name);
+        let screenshot_path = format!("{}/screenshot.ppm", vm_dir);
+
+        qmp.screendump(&screenshot_path).await?;
+
+        // Read and convert PPM to base64 PNG if possible, otherwise return PPM base64
+        let data = std::fs::read(&screenshot_path)?;
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+
+        Ok(format!("data:image/ppm;base64,{}", b64))
+    }
+
+    /// Get VM status info
+    pub async fn get_vm_info(&self, name: &str) -> anyhow::Result<serde_json::Value> {
+        let instances = self.instances.read().await;
+        let instance = instances
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        Ok(serde_json::json!({
+            "name": instance.config.name,
+            "status": instance.status.to_string(),
+            "arch": instance.config.arch.qemu_binary(),
+            "cpu_cores": instance.config.cpu_cores,
+            "ram_mb": instance.config.ram_mb,
+            "disk_path": instance.config.disk_path,
+            "disk_size": instance.config.disk_size,
+            "vnc_port": instance.config.vnc_port,
+            "qmp_socket": instance.config.qmp_socket,
+            "pid": instance.pid,
+            "shared_folders": instance.config.shared_folders,
+            "network_mode": instance.config.network_mode,
+            "audio_enabled": instance.config.audio_enabled,
+        }))
+    }
+
+    /// List all VMs
+    pub async fn list_vms(&self) -> Vec<serde_json::Value> {
+        let instances = self.instances.read().await;
+        instances
+            .values()
+            .map(|inst| {
+                serde_json::json!({
+                    "name": inst.config.name,
+                    "status": inst.status.to_string(),
+                    "pid": inst.pid,
+                    "vnc_port": inst.config.vnc_port,
+                })
+            })
+            .collect()
+    }
+
+    /// Create a snapshot
+    pub async fn create_snapshot(&self, name: &str, snapshot_name: &str) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        let qmp = instance
+            .qmp
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("QMP not connected"))?;
+
+        qmp.blockdev_snapshotsync(snapshot_name).await?;
+        Ok(format!(
+            "Snapshot '{}' created for VM '{}'",
+            snapshot_name, name
+        ))
+    }
+
+    /// Add a shared folder (requires VM restart)
+    pub async fn add_shared_folder(
+        &self,
+        name: &str,
+        folder: SharedFolder,
+    ) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        instance.config.shared_folders.push(folder.clone());
+        Ok(format!(
+            "Shared folder added: {} -> {}. Restart VM to apply.",
+            folder.host_path, folder.mount_point
+        ))
+    }
+
+    /// Reconnect QMP/serial if VM is running but connections were lost
+    pub async fn reconnect(&self, name: &str) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            anyhow::bail!("VM '{}' is not running", name);
+        }
+
+        if instance.qmp.is_none() {
+            match qmp::QmpClient::connect(&instance.config.qmp_socket).await {
+                Ok(mut client) => {
+                    let _ = client.negotiate().await;
+                    instance.qmp = Some(client);
+                    tracing::info!("QMP reconnected for VM '{}'", name);
+                }
+                Err(e) => {
+                    tracing::warn!("QMP reconnect failed: {}", e);
+                }
+            }
+        }
+
+        if instance.serial.is_none() {
+            match serial::SerialShell::connect(&instance.config.serial_socket).await {
+                Ok(shell) => {
+                    instance.serial = Some(shell);
+                    tracing::info!("Serial reconnected for VM '{}'", name);
+                }
+                Err(e) => {
+                    tracing::warn!("Serial reconnect failed: {}", e);
+                }
+            }
+        }
+
+        Ok(format!("Reconnection attempted for VM '{}'", name))
+    }
+
+    fn build_qemu_args(&self, config: &VmConfig) -> Vec<String> {
+        let mut args = vec![
+            "-name".to_string(),
+            config.name.clone(),
+            "-machine".to_string(),
+            "q35,accel=kvm".to_string(),
+            "-cpu".to_string(),
+            "host".to_string(),
+            "-smp".to_string(),
+            config.cpu_cores.to_string(),
+            "-m".to_string(),
+            config.ram_mb.to_string(),
+        ];
+
+        // Disk
+        args.extend([
+            "-drive".to_string(),
+            format!("file={},format=qcow2,if=virtio", config.disk_path),
+        ]);
+
+        // ISO (for installation)
+        if let Some(ref iso) = config.iso_path {
+            args.extend([
+                "-cdrom".to_string(),
+                iso.clone(),
+                "-boot".to_string(),
+                "d".to_string(),
+            ]);
+        }
+
+        // VNC display (headless with VNC)
+        let vnc_display = format!(":{}", config.vnc_port - 5900);
+        args.extend([
+            "-vnc".to_string(),
+            vnc_display.clone(),
+            "-display".to_string(),
+            "none".to_string(),
+        ]);
+
+        // QMP control socket
+        args.extend([
+            "-qmp".to_string(),
+            format!("unix:{},server,nowait", config.qmp_socket),
+        ]);
+
+        // Serial for shell interaction
+        args.extend([
+            "-chardev".to_string(),
+            format!(
+                "socket,id=serial0,path={},server=on,wait=off",
+                config.serial_socket
+            ),
+            "-serial".to_string(),
+            "chardev:serial0".to_string(),
+        ]);
+
+        // 9p shared folders
+        for folder in &config.shared_folders {
+            let security = if folder.readonly {
+                "passthrough,readonly"
+            } else {
+                "passthrough"
+            };
+            args.extend([
+                "-virtfs".to_string(),
+                format!(
+                    "local,path={},mount_tag={},security_model={}",
+                    folder.host_path, folder.mount_tag, security
+                ),
+            ]);
+        }
+
+        // Secrets 9p mount (always present, invisible to LLM)
+        let secrets_dir = format!("{}/vm/{}/secrets", self.data_dir, config.name);
+        args.extend([
+            "-virtfs".to_string(),
+            format!(
+                "local,path={},mount_tag=praxis-secrets,security_model=none,readonly",
+                secrets_dir
+            ),
+        ]);
+
+        // Network
+        match config.network_mode.as_str() {
+            "none" => {
+                args.extend(["-net".to_string(), "none".to_string()]);
+            }
+            "bridge" => {
+                args.extend([
+                    "-device".to_string(),
+                    "virtio-net,netdev=net0".to_string(),
+                    "-netdev".to_string(),
+                    "bridge,id=net0,br=br0".to_string(),
+                ]);
+            }
+            _ => {
+                // NAT with SSH forwarding
+                args.extend([
+                    "-device".to_string(),
+                    "virtio-net,netdev=net0".to_string(),
+                    "-netdev".to_string(),
+                    "user,id=net0,hostfwd=tcp::2222-:22".to_string(),
+                ]);
+            }
+        }
+
+        // Audio (optional)
+        if config.audio_enabled {
+            args.extend([
+                "-audiodev".to_string(),
+                "pa,id=audio0".to_string(),
+                "-device".to_string(),
+                "AC97,audiodev=audio0".to_string(),
+            ]);
+        }
+
+        // UEFI firmware (try standard paths)
+        for firmware_path in &[
+            "/usr/share/OVMF/OVMF_CODE.fd",
+            "/usr/share/edk2/x64/OVMF_CODE.4m.fd",
+            "/usr/share/qemu/OVMF_CODE.fd",
+        ] {
+            if std::path::Path::new(firmware_path).exists() {
+                args.extend(["-bios".to_string(), firmware_path.to_string()]);
+                break;
+            }
+        }
+
+        args
+    }
+
+    fn keys_to_qmp(key: &str) -> anyhow::Result<(String, bool, bool)> {
+        let keycode = match key {
+            "enter" | "return" => "ret",
+            "esc" | "escape" => "esc",
+            "tab" => "tab",
+            "backspace" => "backspace",
+            "space" => "spc",
+            "arrow_up" | "up" => "up",
+            "arrow_down" | "down" => "down",
+            "arrow_left" | "left" => "left",
+            "arrow_right" | "right" => "right",
+            "pageup" => "pgup",
+            "pagedown" => "pgdn",
+            "home" => "home",
+            "end" => "end",
+            "insert" => "insert",
+            "delete" => "delete",
+            "f1" => "f1",
+            "f2" => "f2",
+            "f3" => "f3",
+            "f4" => "f4",
+            "f5" => "f5",
+            "f6" => "f6",
+            "f7" => "f7",
+            "f8" => "f8",
+            "f9" => "f9",
+            "f10" => "f10",
+            "f11" => "f11",
+            "f12" => "f12",
+            "ctrl+c" => "ctrl-c",
+            "ctrl+z" => "ctrl-z",
+            "ctrl+d" => "ctrl-d",
+            "ctrl+l" => "ctrl-l",
+            "ctrl+a" => "ctrl-a",
+            "ctrl+e" => "ctrl-e",
+            "ctrl+x" => "ctrl-x",
+            "ctrl+v" => "ctrl-v",
+            "ctrl+w" => "ctrl-w",
+            "alt+f4" => "alt-f4",
+            "alt+tab" => "alt-tab",
+            _ => anyhow::bail!("Unknown key: {}", key),
+        };
+        Ok((keycode.to_string(), true, true))
+    }
+}

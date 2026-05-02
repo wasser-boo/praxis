@@ -194,6 +194,67 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
             parameters: serde_json::json!({"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}),
             is_enabled: true,
         },
+        // VM Tools (only enabled when VM=true)
+        Tool {
+            name: "vm_start".into(),
+            description: Some("Start a QEMU VM. Creates a new VM if none exists. The VM runs a full Linux environment you control.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm","description":"VM name"},"cpu_cores":{"type":"integer","default":2},"ram_mb":{"type":"integer","default":4096},"disk_size":{"type":"string","default":"40G"},"iso_path":{"type":"string","description":"Path to ISO for OS installation"},"arch":{"type":"string","enum":["x86_64","aarch64"],"default":"x86_64"}}}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_stop".into(),
+            description: Some("Stop a running VM".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm"},"force":{"type":"boolean","default":false,"description":"Force kill instead of graceful shutdown"}}}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_shell".into(),
+            description: Some("Execute a shell command inside the VM. Returns stdout, stderr, and exit code. The VM has bash and you have full root access.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"name":{"type":"string","default":"praxis-vm"},"timeout_secs":{"type":"integer","default":30}},"required":["command"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_keys".into(),
+            description: Some("Send keyboard input to the VM. Use this for TUI apps (vim, htop, nano, etc). Special keys: 'enter', 'esc', 'tab', 'ctrl+c', 'ctrl+z', 'ctrl+d', 'arrow_up', 'arrow_down', 'arrow_left', 'arrow_right', 'f1'-'f12', 'pageup', 'pagedown', 'backspace'. Regular text is sent as-is.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"keys":{"type":"string","description":"Text or special key to send"},"name":{"type":"string","default":"praxis-vm"}},"required":["keys"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_screenshot".into(),
+            description: Some("Take a screenshot of the VM display. Returns base64-encoded image. Use this to see what's on the VM screen (GUI, TUI apps, etc).".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm"}}}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_file_transfer".into(),
+            description: Some("Transfer a file to/from the VM. Use direction='to_vm' to upload or 'from_vm' to download. Content is base64 encoded.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File path in VM"},"content":{"type":"string","description":"File content (base64 for binary, plain text for text)"},"direction":{"type":"string","enum":["to_vm","from_vm"],"default":"to_vm"},"name":{"type":"string","default":"praxis-vm"}},"required":["path"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_snapshot".into(),
+            description: Some("Create a VM snapshot for later restore. Great for saving state before risky operations.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"snapshot_name":{"type":"string","description":"Name for the snapshot"},"name":{"type":"string","default":"praxis-vm"}},"required":["snapshot_name"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_shared_folder".into(),
+            description: Some("Add a shared folder between host and VM. Files in host_path will be accessible at mount_point inside the VM. Requires VM restart.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"host_path":{"type":"string","description":"Path on the host machine"},"mount_point":{"type":"string","description":"Mount path inside VM","default":"/mnt/shared"},"readonly":{"type":"boolean","default":false},"name":{"type":"string","default":"praxis-vm"}},"required":["host_path"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_mouse".into(),
+            description: Some("Control the mouse in the VM. Actions: move_absolute (x,y), move_relative (dx,dy), click (x,y,button), double_click, drag (x,y to dx,dy), scroll (vertical/horizontal). Button: 0=left, 1=middle, 2=right.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["move_absolute","move_relative","click","double_click","drag","scroll"]},"x":{"type":"integer"},"y":{"type":"integer"},"dx":{"type":"integer"},"dy":{"type":"integer"},"button":{"type":"integer","description":"0=left,1=middle,2=right","default":0},"scroll_vertical":{"type":"integer","description":"Positive=up, negative=down"},"scroll_horizontal":{"type":"integer","description":"Positive=left, negative=right"},"name":{"type":"string","default":"praxis-vm"}},"required":["action"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_look_screenshot".into(),
+            description: Some("Look at a saved VM screenshot. index: -1=latest, 0=oldest, N=specific screenshot number. Returns base64 image. Max 500 screenshots are kept (oldest auto-deleted).".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"index":{"type":"integer","description":"-1=latest, 0=oldest, N=specific","default":-1},"name":{"type":"string","default":"praxis-vm"}}}),
+            is_enabled: false,
+        },
     ];
 
     save_tools(db, &defaults)?;
@@ -234,7 +295,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 27);
     }
 
     #[test]
@@ -243,7 +304,7 @@ mod tool_tests {
         init_default_tools(&db).unwrap();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 27);
     }
 
     #[test]
@@ -251,7 +312,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let enabled = list_enabled(&db).unwrap();
-        assert_eq!(enabled.len(), 17);
+        assert_eq!(enabled.len(), 17); // 17 enabled (8 VM tools disabled by default)
 
         disable(&db, "execute_terminal").unwrap();
         let enabled = list_enabled(&db).unwrap();
@@ -345,7 +406,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let defs = to_tool_definitions(&db).unwrap();
-        assert_eq!(defs.len(), 17);
+        assert_eq!(defs.len(), 17); // 17 enabled (8 VM tools disabled by default)
         assert_eq!(defs[0].function.name, "execute_terminal");
     }
 

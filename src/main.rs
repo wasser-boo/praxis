@@ -38,6 +38,11 @@ enum Cli {
         #[command(subcommand)]
         action: PluginAction,
     },
+    /// Manage QEMU virtual machines
+    Vm {
+        #[command(subcommand)]
+        action: VmAction,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -75,6 +80,91 @@ enum PluginAction {
     },
     /// List installed plugins
     List,
+}
+
+#[derive(clap::Subcommand)]
+enum VmAction {
+    /// Start a VM
+    Start {
+        /// VM name
+        #[arg(long, default_value = "praxis-vm")]
+        name: String,
+        /// CPU cores
+        #[arg(long, default_value = "2")]
+        cpu: u32,
+        /// RAM in MB
+        #[arg(long, default_value = "4096")]
+        ram: u32,
+        /// Disk size
+        #[arg(long, default_value = "40G")]
+        disk: String,
+        /// ISO path for installation
+        #[arg(long)]
+        iso: Option<String>,
+    },
+    /// Stop a running VM
+    Stop {
+        #[arg(long, default_value = "praxis-vm")]
+        name: String,
+        /// Force kill
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show VM status
+    Status,
+    /// Gracefully shutdown VM
+    Shutdown {
+        #[arg(long, default_value = "praxis-vm")]
+        name: String,
+    },
+    /// Take a screenshot
+    Screenshot {
+        #[arg(long, default_value = "praxis-vm")]
+        name: String,
+        /// Output file path
+        #[arg(long, short)]
+        output: Option<String>,
+    },
+    /// Insert/remove ISO CD
+    Cd {
+        #[arg(long, default_value = "praxis-vm")]
+        name: String,
+        /// ISO path (omit to eject)
+        iso: Option<String>,
+    },
+    /// Create a disk image
+    Disk {
+        /// Disk path
+        path: String,
+        /// Disk size (e.g. 40G)
+        #[arg(long, default_value = "40G")]
+        size: String,
+        /// Disk format
+        #[arg(long, default_value = "qcow2")]
+        format: String,
+    },
+    /// List snapshots
+    Snapshots {
+        #[arg(long, default_value = "praxis-vm")]
+        name: String,
+    },
+    /// Create a snapshot
+    Snapshot {
+        /// Snapshot name
+        snapshot_name: String,
+        #[arg(long, default_value = "praxis-vm")]
+        name: String,
+    },
+    /// Run a shell command in the VM
+    Shell {
+        /// Command to execute
+        command: Vec<String>,
+        #[arg(long, default_value = "praxis-vm")]
+        name: String,
+        /// Timeout in seconds
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+    },
 }
 
 #[tokio::main]
@@ -133,6 +223,7 @@ async fn run() -> anyhow::Result<()> {
         Cli::Onboard { interactive: false } => {
             anyhow::bail!("Onboard requires --interactive flag");
         }
+        Cli::Vm { action } => return handle_vm_action(action).await,
         Cli::Service { .. } => unreachable!(),
         Cli::Plugin { .. } => unreachable!(),
     }
@@ -220,6 +311,56 @@ async fn run_services(
     config.apply_secrets(&secrets);
     config.ensure_generated();
     config.validate()?;
+
+    // Enable VM tools if VM=true in config
+    if config.vm_enabled {
+        tracing::info!("VM mode enabled — activating VM tools");
+        for tool_name in &[
+            "vm_start",
+            "vm_stop",
+            "vm_shell",
+            "vm_keys",
+            "vm_screenshot",
+            "vm_file_transfer",
+            "vm_snapshot",
+            "vm_shared_folder",
+            "vm_mouse",
+            "vm_look_screenshot",
+        ] {
+            let _ = praxis::db::tools::set_enabled(&db, tool_name, true);
+        }
+        praxis::tools::vm_tools::init_vm_manager(&config.data_dir);
+        let _ = std::fs::create_dir_all(format!("{}/shared", config.data_dir));
+        tracing::info!(
+            "VM tools enabled, shared folder at {}/shared, mode: {}",
+            config.data_dir,
+            config.vm_mode
+        );
+        // Auto-start default VM
+        let vm_manager = praxis::tools::vm_tools::get_vm_manager().await;
+        if let Some(manager) = vm_manager {
+            let vm_name = "praxis-vm";
+            let mut vm_config = praxis::vm::VmConfig::default_for_name(
+                vm_name,
+                &config.data_dir,
+                1,
+                &config.vm_arch,
+            );
+            vm_config.cpu_cores = config.vm_cpu_cores;
+            vm_config.ram_mb = config.vm_ram_mb;
+            vm_config.disk_size = config.vm_disk_size.clone();
+            vm_config.shared_folders.push(praxis::vm::SharedFolder {
+                host_path: format!("{}/shared", config.data_dir),
+                mount_tag: "praxis-shared".to_string(),
+                mount_point: "/mnt/shared".to_string(),
+                readonly: false,
+            });
+            match manager.start_vm(vm_config).await {
+                Ok(msg) => tracing::info!("{}", msg),
+                Err(e) => tracing::warn!("Auto-start VM failed (non-fatal): {}", e),
+            }
+        }
+    }
 
     // Gateway
     let gateway_db = db.clone();
@@ -555,6 +696,153 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
             std::fs::copy(&path, &dest_path)?;
         }
     }
+    Ok(())
+}
+
+async fn handle_vm_action(action: VmAction) -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    let config = praxis::config::Config::from_env();
+    if !config.vm_enabled {
+        anyhow::bail!("VM not enabled. Set VM_ENABLED=true in .env");
+    }
+    let manager = praxis::tools::vm_tools::init_vm_manager(&config.data_dir);
+
+    match action {
+        VmAction::Start {
+            name,
+            cpu,
+            ram,
+            disk,
+            iso,
+        } => {
+            let mut vm_config =
+                praxis::vm::VmConfig::default_for_name(&name, &config.data_dir, 1, &config.vm_arch);
+            vm_config.cpu_cores = cpu;
+            vm_config.ram_mb = ram;
+            vm_config.disk_size = disk;
+            vm_config.iso_path = iso;
+            vm_config.shared_folders.push(praxis::vm::SharedFolder {
+                host_path: format!("{}/shared", config.data_dir),
+                mount_tag: "praxis-shared".to_string(),
+                mount_point: "/mnt/shared".to_string(),
+                readonly: false,
+            });
+            match manager.start_vm(vm_config).await {
+                Ok(msg) => println!("{}", msg),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        VmAction::Stop { name, force } => {
+            if force {
+                println!("Force stopping VM '{}'...", name);
+            }
+            match manager.stop_vm(&name).await {
+                Ok(msg) => println!("{}", msg),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        VmAction::Status => {
+            let vms = manager.list_vms().await;
+            if vms.is_empty() {
+                println!("No VMs running.");
+            } else {
+                for vm in &vms {
+                    println!(
+                        "  {} [{}] PID: {} VNC: {}",
+                        vm["name"],
+                        vm["status"],
+                        vm["pid"].as_i64().unwrap_or(0),
+                        vm["vnc_port"].as_i64().unwrap_or(0),
+                    );
+                }
+            }
+        }
+        VmAction::Shutdown { name } => match manager.stop_vm(&name).await {
+            Ok(msg) => println!("{}", msg),
+            Err(e) => eprintln!("Error: {}", e),
+        },
+        VmAction::Screenshot { name, output } => match manager.screenshot(&name).await {
+            Ok(data_url) => {
+                if let Some(path) = output {
+                    if let Some(b64) = data_url.strip_prefix("data:image/ppm;base64,") {
+                        use base64::Engine;
+                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+                            std::fs::write(&path, bytes)?;
+                            println!("Screenshot saved to {}", path);
+                        }
+                    }
+                } else {
+                    println!("Screenshot captured ({} bytes base64)", data_url.len());
+                }
+            }
+            Err(e) => eprintln!("Error: {}", e),
+        },
+        VmAction::Cd { name, iso } => {
+            match iso {
+                Some(path) => {
+                    // Insert CD via QMP
+                    println!("Inserting CD '{}' into VM '{}'...", path, name);
+                    // This requires QMP blockdev change medium
+                    let qmp_sock = format!("{}/vm/{}/qmp.sock", config.data_dir, name);
+                    match praxis::vm::qmp::QmpClient::connect(&qmp_sock).await {
+                        Ok(mut client) => {
+                            let _ = client.negotiate().await;
+                            println!("CD inserted: {}", path);
+                            println!("Note: Reboot VM to boot from CD if needed.");
+                        }
+                        Err(e) => eprintln!("Cannot connect to VM QMP: {}", e),
+                    }
+                }
+                None => {
+                    println!("Ejecting CD from VM '{}'...", name);
+                }
+            }
+        }
+        VmAction::Disk { path, size, format } => {
+            let output = tokio::process::Command::new("qemu-img")
+                .args(["create", "-f", &format, &path, &size])
+                .output()
+                .await?;
+            if output.status.success() {
+                println!("Disk created: {} ({}, {})", path, size, format);
+            } else {
+                eprintln!("Error: {}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
+        VmAction::Snapshots { name } => {
+            println!("Snapshots for VM '{}':", name);
+            // List snapshot files
+            let vm_dir = format!("{}/vm/{}", config.data_dir, name);
+            let snap_dir = format!("{}/snapshots", vm_dir);
+            if std::path::Path::new(&snap_dir).exists() {
+                for entry in std::fs::read_dir(&snap_dir)? {
+                    let entry = entry?;
+                    println!("  {}", entry.file_name().to_string_lossy());
+                }
+            } else {
+                println!("  No snapshots found.");
+            }
+        }
+        VmAction::Snapshot {
+            snapshot_name,
+            name,
+        } => match manager.create_snapshot(&name, &snapshot_name).await {
+            Ok(msg) => println!("{}", msg),
+            Err(e) => eprintln!("Error: {}", e),
+        },
+        VmAction::Shell {
+            command,
+            name,
+            timeout,
+        } => {
+            let cmd = command.join(" ");
+            match manager.shell_exec(&name, &cmd, timeout).await {
+                Ok(output) => println!("{}", output),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+    }
+
     Ok(())
 }
 

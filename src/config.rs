@@ -41,6 +41,12 @@ pub struct Config {
     pub dashboard_admin_password: String,
     pub data_dir: String,
     pub rust_log: String,
+    pub vm_enabled: bool,
+    pub vm_cpu_cores: u32,
+    pub vm_ram_mb: u32,
+    pub vm_disk_size: String,
+    pub vm_arch: String,
+    pub vm_mode: String, // "shared" (VM + host) or "vm" (VM only, no host access)
 }
 
 impl Config {
@@ -87,6 +93,20 @@ impl Config {
             dashboard_admin_password: env::var("DASHBOARD_ADMIN_PASSWORD").unwrap_or_default(),
             data_dir: env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+            vm_enabled: env::var("VM_ENABLED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            vm_cpu_cores: env::var("VM_CPU_CORES")
+                .unwrap_or_else(|_| "2".to_string())
+                .parse()
+                .unwrap_or(2),
+            vm_ram_mb: env::var("VM_RAM_MB")
+                .unwrap_or_else(|_| "4096".to_string())
+                .parse()
+                .unwrap_or(4096),
+            vm_disk_size: env::var("VM_DISK_SIZE").unwrap_or_else(|_| "40G".to_string()),
+            vm_arch: env::var("VM_ARCH").unwrap_or_else(|_| "x86_64".to_string()),
+            vm_mode: env::var("VM_MODE").unwrap_or_else(|_| "shared".to_string()),
         }
     }
 

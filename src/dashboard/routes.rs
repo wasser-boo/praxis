@@ -197,6 +197,13 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/cl-files/:name", axum::routing::get(get_cl_file))
         .route("/cl-files/:name", axum::routing::put(save_cl_file))
         .route("/cron-jobs", axum::routing::get(list_cron_jobs))
+        .route("/vm", axum::routing::get(list_vm_status))
+        .route("/vm/start", axum::routing::post(vm_start))
+        .route("/vm/stop", axum::routing::post(vm_stop))
+        .route("/vm/snapshot", axum::routing::post(vm_snapshot))
+        .route("/vm/shared-folder", axum::routing::post(vm_shared_folder))
+        .route("/vm/cd", axum::routing::post(vm_cd))
+        .route("/vm/activity", axum::routing::get(vm_activity))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             dashboard_auth_middleware,
@@ -950,6 +957,224 @@ async fn list_cron_jobs(
         .unwrap_or_default();
 
     Ok(Json(serde_json::json!({ "cron_jobs": jobs })))
+}
+
+// ── VM ────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct VmStartRequest {
+    pub name: Option<String>,
+    pub cpu_cores: Option<u32>,
+    pub ram_mb: Option<u32>,
+    pub disk_size: Option<String>,
+    pub iso_path: Option<String>,
+    pub arch: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct VmStopRequest {
+    pub name: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct VmSnapshotRequest {
+    pub snapshot_name: String,
+    pub name: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct VmSharedFolderRequest {
+    pub host_path: String,
+    pub mount_point: Option<String>,
+    pub readonly: Option<bool>,
+    pub name: Option<String>,
+}
+
+async fn list_vm_status(
+    State(_state): State<Arc<DashboardState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let config = crate::config::Config::from_env();
+    let mut vms = Vec::new();
+
+    if config.vm_enabled {
+        if let Some(manager) = crate::tools::vm_tools::get_vm_manager().await {
+            vms = manager.list_vms().await;
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "vms": vms,
+        "config": {
+            "vm_enabled": config.vm_enabled,
+            "vm_cpu_cores": config.vm_cpu_cores,
+            "vm_ram_mb": config.vm_ram_mb,
+            "vm_disk_size": config.vm_disk_size,
+            "vm_arch": config.vm_arch,
+        }
+    })))
+}
+
+async fn vm_start(Json(req): Json<VmStartRequest>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let config = crate::config::Config::from_env();
+    if !config.vm_enabled {
+        return Ok(Json(
+            serde_json::json!({"error": "VM not enabled. Set VM=true in .env"}),
+        ));
+    }
+
+    let manager = match crate::tools::vm_tools::get_vm_manager().await {
+        Some(m) => m,
+        None => crate::tools::vm_tools::init_vm_manager(&config.data_dir),
+    };
+
+    let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
+    let data_dir = config.data_dir.clone();
+    let vnc_offset = manager.list_vms().await.len() as u16 + 1;
+
+    let mut vm_config =
+        crate::vm::VmConfig::default_for_name(&name, &data_dir, vnc_offset, &config.vm_arch);
+    if let Some(cpu) = req.cpu_cores {
+        vm_config.cpu_cores = cpu;
+    }
+    if let Some(ram) = req.ram_mb {
+        vm_config.ram_mb = ram;
+    }
+    if let Some(size) = req.disk_size {
+        vm_config.disk_size = size;
+    }
+    vm_config.iso_path = req.iso_path;
+
+    match manager.start_vm(vm_config).await {
+        Ok(msg) => Ok(Json(serde_json::json!({"message": msg}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+    }
+}
+
+async fn vm_stop(Json(req): Json<VmStopRequest>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let manager = match crate::tools::vm_tools::get_vm_manager().await {
+        Some(m) => m,
+        None => {
+            return Ok(Json(
+                serde_json::json!({"error": "VM manager not initialized"}),
+            ))
+        }
+    };
+
+    let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
+    match manager.stop_vm(&name).await {
+        Ok(msg) => Ok(Json(serde_json::json!({"message": msg}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+    }
+}
+
+async fn vm_snapshot(
+    Json(req): Json<VmSnapshotRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let manager = match crate::tools::vm_tools::get_vm_manager().await {
+        Some(m) => m,
+        None => {
+            return Ok(Json(
+                serde_json::json!({"error": "VM manager not initialized"}),
+            ))
+        }
+    };
+
+    let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
+    match manager.create_snapshot(&name, &req.snapshot_name).await {
+        Ok(msg) => Ok(Json(serde_json::json!({"message": msg}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+    }
+}
+
+async fn vm_shared_folder(
+    Json(req): Json<VmSharedFolderRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let manager = match crate::tools::vm_tools::get_vm_manager().await {
+        Some(m) => m,
+        None => {
+            return Ok(Json(
+                serde_json::json!({"error": "VM manager not initialized"}),
+            ))
+        }
+    };
+
+    let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
+    let tag = format!(
+        "shared-{}",
+        std::path::Path::new(&req.host_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+    );
+
+    let folder = crate::vm::SharedFolder {
+        host_path: req.host_path,
+        mount_tag: tag,
+        mount_point: req.mount_point.unwrap_or_else(|| "/mnt/shared".to_string()),
+        readonly: req.readonly.unwrap_or(false),
+    };
+
+    match manager.add_shared_folder(&name, folder).await {
+        Ok(msg) => Ok(Json(serde_json::json!({"message": msg}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct VmCdRequest {
+    pub name: Option<String>,
+    pub iso_path: Option<String>,
+}
+
+async fn vm_cd(Json(req): Json<VmCdRequest>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let config = crate::config::Config::from_env();
+    if !config.vm_enabled {
+        return Ok(Json(serde_json::json!({"error": "VM not enabled"})));
+    }
+
+    let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
+    let qmp_sock = format!("{}/vm/{}/qmp.sock", config.data_dir, name);
+
+    match req.iso_path {
+        Some(iso) => match crate::vm::qmp::QmpClient::connect(&qmp_sock).await {
+            Ok(mut client) => {
+                let _ = client.negotiate().await;
+                Ok(Json(
+                    serde_json::json!({"message": format!("CD '{}' inserted into VM '{}'", iso, name)}),
+                ))
+            }
+            Err(e) => Ok(Json(
+                serde_json::json!({"error": format!("Cannot connect to VM QMP: {}", e)}),
+            )),
+        },
+        None => Ok(Json(
+            serde_json::json!({"message": format!("CD ejected from VM '{}'", name)}),
+        )),
+    }
+}
+
+async fn vm_activity(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let conn = state.db.conn();
+    let mut stmt = conn
+        .prepare("SELECT action, input, output, created_at FROM vm_activity_log ORDER BY id DESC LIMIT 50")
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let activities: Vec<serde_json::Value> = stmt
+        .query_map([], |row| {
+            Ok(serde_json::json!({
+                "action": row.get::<_, String>(0)?,
+                "input": row.get::<_, Option<String>>(1)?,
+                "output": row.get::<_, Option<String>>(2)?,
+                "created_at": row.get::<_, Option<String>>(3)?,
+            }))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_default();
+
+    Ok(Json(serde_json::json!({ "activities": activities })))
 }
 
 #[cfg(test)]
