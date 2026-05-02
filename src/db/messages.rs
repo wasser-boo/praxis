@@ -105,10 +105,14 @@ impl Database {
             .tool_calls
             .as_ref()
             .map(|tc| serde_json::to_string(tc).unwrap_or_default());
+        let content_parts_json = msg
+            .content_parts
+            .as_ref()
+            .map(|cp| serde_json::to_string(cp).unwrap_or_default());
         let conn = self.conn();
         let id = conn.execute(
-            "INSERT INTO messages (user_id, role, content, tool_call_id, tool_calls) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![user_id, msg.role, msg.content, msg.tool_call_id, tool_calls_json],
+            "INSERT INTO messages (user_id, role, content, tool_call_id, tool_calls, content_parts) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![user_id, msg.role, msg.content, msg.tool_call_id, tool_calls_json, content_parts_json],
         )?;
         Ok(id as i64)
     }
@@ -116,7 +120,7 @@ impl Database {
     pub fn get_messages(&self, user_id: &str, limit: i32) -> anyhow::Result<Vec<Message>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_calls FROM messages WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2"
+            "SELECT role, content, tool_call_id, tool_calls, content_parts FROM messages WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2"
         )?;
 
         let messages = stmt
@@ -124,12 +128,15 @@ impl Database {
                 let tool_calls_json: Option<String> = row.get(3)?;
                 let tool_calls: Option<Vec<ToolCallData>> =
                     tool_calls_json.and_then(|json| serde_json::from_str(&json).ok());
+                let content_parts_json: Option<String> = row.get(4)?;
+                let content_parts: Option<Vec<serde_json::Value>> =
+                    content_parts_json.and_then(|json| serde_json::from_str(&json).ok());
                 Ok(Message {
                     role: row.get(0)?,
                     content: row.get(1)?,
                     tool_call_id: row.get(2)?,
                     tool_calls,
-                    content_parts: None,
+                    content_parts,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -144,7 +151,7 @@ impl Database {
     ) -> anyhow::Result<(Vec<Message>, usize)> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_calls FROM messages WHERE user_id = ?1 ORDER BY id DESC",
+            "SELECT role, content, tool_call_id, tool_calls, content_parts FROM messages WHERE user_id = ?1 ORDER BY id DESC",
         )?;
 
         let mut messages = Vec::new();
@@ -153,12 +160,15 @@ impl Database {
             let tool_calls_json: Option<String> = row.get(3)?;
             let tool_calls: Option<Vec<ToolCallData>> =
                 tool_calls_json.and_then(|json| serde_json::from_str(&json).ok());
+            let content_parts_json: Option<String> = row.get(4)?;
+            let content_parts: Option<Vec<serde_json::Value>> =
+                content_parts_json.and_then(|json| serde_json::from_str(&json).ok());
             Ok(Message {
                 role: row.get(0)?,
                 content: row.get(1)?,
                 tool_call_id: row.get(2)?,
                 tool_calls,
-                content_parts: None,
+                content_parts,
             })
         })?;
 

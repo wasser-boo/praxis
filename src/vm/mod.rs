@@ -643,8 +643,8 @@ impl VmManager {
             // Send via QMP input-send-event
             if let Some(ref mut qmp) = instance.qmp {
                 let key_events = Self::keys_to_qmp(keys)?;
-                for (keycode, down) in key_events {
-                    qmp.send_key_event(keycode, down).await?;
+                for (qcode, down) in key_events {
+                    qmp.send_key_event(&qcode, down).await?;
                 }
                 return Ok(format!("Sent special key: {}", keys));
             }
@@ -1100,681 +1100,567 @@ impl VmManager {
         args
     }
 
-    fn keys_to_qmp(key: &str) -> anyhow::Result<Vec<(u32, bool)>> {
-        // Linux input-event-codes.h keycodes
-        const KEY_ESC: u32 = 1;
-        const KEY_1: u32 = 2;
-        const KEY_2: u32 = 3;
-        const KEY_3: u32 = 4;
-        const KEY_4: u32 = 5;
-        const KEY_5: u32 = 6;
-        const KEY_6: u32 = 7;
-        const KEY_7: u32 = 8;
-        const KEY_8: u32 = 9;
-        const KEY_9: u32 = 10;
-        const KEY_0: u32 = 11;
-        const KEY_MINUS: u32 = 12;
-        const KEY_EQUAL: u32 = 13;
-        const KEY_BACKSPACE: u32 = 14;
-        const KEY_TAB: u32 = 15;
-        const KEY_Q: u32 = 16;
-        const KEY_W: u32 = 17;
-        const KEY_E: u32 = 18;
-        const KEY_R: u32 = 19;
-        const KEY_T: u32 = 20;
-        const KEY_Y: u32 = 21;
-        const KEY_U: u32 = 22;
-        const KEY_I: u32 = 23;
-        const KEY_O: u32 = 24;
-        const KEY_P: u32 = 25;
-        const KEY_LEFTBRACE: u32 = 26;
-        const KEY_RIGHTBRACE: u32 = 27;
-        const KEY_ENTER: u32 = 28;
-        const KEY_LEFTCTRL: u32 = 29;
-        const KEY_A: u32 = 30;
-        const KEY_S: u32 = 31;
-        const KEY_D: u32 = 32;
-        const KEY_F: u32 = 33;
-        const KEY_G: u32 = 34;
-        const KEY_H: u32 = 35;
-        const KEY_J: u32 = 36;
-        const KEY_K: u32 = 37;
-        const KEY_L: u32 = 38;
-        const KEY_SEMICOLON: u32 = 39;
-        const KEY_APOSTROPHE: u32 = 40;
-        const KEY_GRAVE: u32 = 41;
-        const KEY_LEFTSHIFT: u32 = 42;
-        const KEY_BACKSLASH: u32 = 43;
-        const KEY_Z: u32 = 44;
-        const KEY_X: u32 = 45;
-        const KEY_C: u32 = 46;
-        const KEY_V: u32 = 47;
-        const KEY_B: u32 = 48;
-        const KEY_N: u32 = 49;
-        const KEY_M: u32 = 50;
-        const KEY_COMMA: u32 = 51;
-        const KEY_DOT: u32 = 52;
-        const KEY_SLASH: u32 = 53;
-        const KEY_RIGHTSHIFT: u32 = 54;
-        const KEY_KPASTERISK: u32 = 55;
-        const KEY_LEFTALT: u32 = 56;
-        const KEY_SPACE: u32 = 57;
-        const KEY_CAPSLOCK: u32 = 58;
-        const KEY_F1: u32 = 59;
-        const KEY_F2: u32 = 60;
-        const KEY_F3: u32 = 61;
-        const KEY_F4: u32 = 62;
-        const KEY_F5: u32 = 63;
-        const KEY_F6: u32 = 64;
-        const KEY_F7: u32 = 65;
-        const KEY_F8: u32 = 66;
-        const KEY_F9: u32 = 67;
-        const KEY_F10: u32 = 68;
-        const KEY_NUMLOCK: u32 = 69;
-        const KEY_SCROLLLOCK: u32 = 70;
-        const KEY_KP7: u32 = 71;
-        const KEY_KP8: u32 = 72;
-        const KEY_KP9: u32 = 73;
-        const KEY_KPMINUS: u32 = 74;
-        const KEY_KP4: u32 = 75;
-        const KEY_KP5: u32 = 76;
-        const KEY_KP6: u32 = 77;
-        const KEY_KPPLUS: u32 = 78;
-        const KEY_KP1: u32 = 79;
-        const KEY_KP2: u32 = 80;
-        const KEY_KP3: u32 = 81;
-        const KEY_KP0: u32 = 82;
-        const KEY_KPDOT: u32 = 83;
-        const KEY_F11: u32 = 87;
-        const KEY_F12: u32 = 88;
-        const KEY_KPENTER: u32 = 96;
-        const KEY_RIGHTCTRL: u32 = 97;
-        const KEY_KPSLASH: u32 = 98;
-        const KEY_RIGHTALT: u32 = 100;
-        const KEY_HOME: u32 = 102;
-        const KEY_UP: u32 = 103;
-        const KEY_PAGEUP: u32 = 104;
-        const KEY_LEFT: u32 = 105;
-        const KEY_RIGHT: u32 = 106;
-        const KEY_END: u32 = 107;
-        const KEY_DOWN: u32 = 108;
-        const KEY_PAGEDOWN: u32 = 109;
-        const KEY_INSERT: u32 = 110;
-        const KEY_DELETE: u32 = 111;
-        const KEY_LEFTMETA: u32 = 125;
-        const KEY_RIGHTMETA: u32 = 126;
-        const KEY_SYSRQ: u32 = 99;
-        const KEY_F13: u32 = 183;
-        const KEY_F14: u32 = 184;
-        const KEY_F15: u32 = 185;
-        const KEY_F16: u32 = 186;
-        const KEY_F17: u32 = 187;
-        const KEY_F18: u32 = 188;
-        const KEY_F19: u32 = 189;
-        const KEY_F20: u32 = 190;
-        const KEY_F21: u32 = 191;
-        const KEY_F22: u32 = 192;
-        const KEY_F23: u32 = 193;
-        const KEY_F24: u32 = 194;
-
-        // Helper: send key down then up
-        let press = |k: u32| vec![(k, true), (k, false)];
+    fn keys_to_qmp(key: &str) -> anyhow::Result<Vec<(String, bool)>> {
+        // QEMU QCode strings from qemu-qmp-ref.html
+        let press = |k: &str| vec![(k.to_string(), true), (k.to_string(), false)];
 
         match key {
             // Basic keys
-            "enter" | "return" => Ok(press(KEY_ENTER)),
-            "esc" | "escape" => Ok(press(KEY_ESC)),
-            "tab" => Ok(press(KEY_TAB)),
-            "backspace" => Ok(press(KEY_BACKSPACE)),
-            "space" => Ok(press(KEY_SPACE)),
-            "capslock" | "caps_lock" => Ok(press(KEY_CAPSLOCK)),
-            "numlock" | "num_lock" => Ok(press(KEY_NUMLOCK)),
-            "scrolllock" | "scroll_lock" => Ok(press(KEY_SCROLLLOCK)),
-            "print" | "print_screen" | "prtsc" | "sysrq" => Ok(press(KEY_SYSRQ)),
+            "enter" | "return" => Ok(press("ret")),
+            "esc" | "escape" => Ok(press("esc")),
+            "tab" => Ok(press("tab")),
+            "backspace" => Ok(press("backspace")),
+            "space" => Ok(press("spc")),
+            "capslock" | "caps_lock" => Ok(press("caps_lock")),
+            "numlock" | "num_lock" => Ok(press("num_lock")),
+            "scrolllock" | "scroll_lock" => Ok(press("scroll_lock")),
+            "print" | "print_screen" | "prtsc" | "sysrq" => Ok(press("print")),
 
             // Arrow keys
-            "arrow_up" | "up" => Ok(press(KEY_UP)),
-            "arrow_down" | "down" => Ok(press(KEY_DOWN)),
-            "arrow_left" | "left" => Ok(press(KEY_LEFT)),
-            "arrow_right" | "right" => Ok(press(KEY_RIGHT)),
+            "arrow_up" | "up" => Ok(press("up")),
+            "arrow_down" | "down" => Ok(press("down")),
+            "arrow_left" | "left" => Ok(press("left")),
+            "arrow_right" | "right" => Ok(press("right")),
 
             // Navigation
-            "pageup" | "page_up" => Ok(press(KEY_PAGEUP)),
-            "pagedown" | "page_down" => Ok(press(KEY_PAGEDOWN)),
-            "home" => Ok(press(KEY_HOME)),
-            "end" => Ok(press(KEY_END)),
-            "insert" => Ok(press(KEY_INSERT)),
-            "delete" | "del" => Ok(press(KEY_DELETE)),
+            "pageup" | "page_up" => Ok(press("pgup")),
+            "pagedown" | "page_down" => Ok(press("pgdn")),
+            "home" => Ok(press("home")),
+            "end" => Ok(press("end")),
+            "insert" => Ok(press("insert")),
+            "delete" | "del" => Ok(press("delete")),
 
             // Function keys
-            "f1" => Ok(press(KEY_F1)),
-            "f2" => Ok(press(KEY_F2)),
-            "f3" => Ok(press(KEY_F3)),
-            "f4" => Ok(press(KEY_F4)),
-            "f5" => Ok(press(KEY_F5)),
-            "f6" => Ok(press(KEY_F6)),
-            "f7" => Ok(press(KEY_F7)),
-            "f8" => Ok(press(KEY_F8)),
-            "f9" => Ok(press(KEY_F9)),
-            "f10" => Ok(press(KEY_F10)),
-            "f11" => Ok(press(KEY_F11)),
-            "f12" => Ok(press(KEY_F12)),
-            "f13" => Ok(press(KEY_F13)),
-            "f14" => Ok(press(KEY_F14)),
-            "f15" => Ok(press(KEY_F15)),
-            "f16" => Ok(press(KEY_F16)),
-            "f17" => Ok(press(KEY_F17)),
-            "f18" => Ok(press(KEY_F18)),
-            "f19" => Ok(press(KEY_F19)),
-            "f20" => Ok(press(KEY_F20)),
-            "f21" => Ok(press(KEY_F21)),
-            "f22" => Ok(press(KEY_F22)),
-            "f23" => Ok(press(KEY_F23)),
-            "f24" => Ok(press(KEY_F24)),
+            "f1" => Ok(press("f1")),
+            "f2" => Ok(press("f2")),
+            "f3" => Ok(press("f3")),
+            "f4" => Ok(press("f4")),
+            "f5" => Ok(press("f5")),
+            "f6" => Ok(press("f6")),
+            "f7" => Ok(press("f7")),
+            "f8" => Ok(press("f8")),
+            "f9" => Ok(press("f9")),
+            "f10" => Ok(press("f10")),
+            "f11" => Ok(press("f11")),
+            "f12" => Ok(press("f12")),
+            "f13" => Ok(press("f13")),
+            "f14" => Ok(press("f14")),
+            "f15" => Ok(press("f15")),
+            "f16" => Ok(press("f16")),
+            "f17" => Ok(press("f17")),
+            "f18" => Ok(press("f18")),
+            "f19" => Ok(press("f19")),
+            "f20" => Ok(press("f20")),
+            "f21" => Ok(press("f21")),
+            "f22" => Ok(press("f22")),
+            "f23" => Ok(press("f23")),
+            "f24" => Ok(press("f24")),
 
             // Numpad
-            "kp0" | "numpad0" => Ok(press(KEY_KP0)),
-            "kp1" | "numpad1" => Ok(press(KEY_KP1)),
-            "kp2" | "numpad2" => Ok(press(KEY_KP2)),
-            "kp3" | "numpad3" => Ok(press(KEY_KP3)),
-            "kp4" | "numpad4" => Ok(press(KEY_KP4)),
-            "kp5" | "numpad5" => Ok(press(KEY_KP5)),
-            "kp6" | "numpad6" => Ok(press(KEY_KP6)),
-            "kp7" | "numpad7" => Ok(press(KEY_KP7)),
-            "kp8" | "numpad8" => Ok(press(KEY_KP8)),
-            "kp9" | "numpad9" => Ok(press(KEY_KP9)),
-            "kp_enter" | "numpad_enter" => Ok(press(KEY_KPENTER)),
-            "kp_plus" | "numpad_plus" => Ok(press(KEY_KPPLUS)),
-            "kp_minus" | "numpad_minus" => Ok(press(KEY_KPMINUS)),
-            "kp_multiply" | "numpad_multiply" => Ok(press(KEY_KPASTERISK)),
-            "kp_divide" | "numpad_divide" => Ok(press(KEY_KPSLASH)),
-            "kp_dot" | "numpad_dot" => Ok(press(KEY_KPDOT)),
+            "kp0" | "numpad0" => Ok(press("kp_0")),
+            "kp1" | "numpad1" => Ok(press("kp_1")),
+            "kp2" | "numpad2" => Ok(press("kp_2")),
+            "kp3" | "numpad3" => Ok(press("kp_3")),
+            "kp4" | "numpad4" => Ok(press("kp_4")),
+            "kp5" | "numpad5" => Ok(press("kp_5")),
+            "kp6" | "numpad6" => Ok(press("kp_6")),
+            "kp7" | "numpad7" => Ok(press("kp_7")),
+            "kp8" | "numpad8" => Ok(press("kp_8")),
+            "kp9" | "numpad9" => Ok(press("kp_9")),
+            "kp_enter" | "numpad_enter" => Ok(press("kp_enter")),
+            "kp_plus" | "numpad_plus" => Ok(press("kp_add")),
+            "kp_minus" | "numpad_minus" => Ok(press("kp_subtract")),
+            "kp_multiply" | "numpad_multiply" => Ok(press("kp_multiply")),
+            "kp_divide" | "numpad_divide" => Ok(press("kp_divide")),
+            "kp_dot" | "numpad_dot" => Ok(press("kp_decimal")),
 
             // Modifier keys (standalone press)
-            "ctrl" | "left_ctrl" => Ok(press(KEY_LEFTCTRL)),
-            "right_ctrl" => Ok(press(KEY_RIGHTCTRL)),
-            "alt" | "left_alt" => Ok(press(KEY_LEFTALT)),
-            "right_alt" => Ok(press(KEY_RIGHTALT)),
-            "shift" | "left_shift" => Ok(press(KEY_LEFTSHIFT)),
-            "right_shift" => Ok(press(KEY_RIGHTSHIFT)),
-            "super" | "meta" | "win" | "left_meta" => Ok(press(KEY_LEFTMETA)),
-            "right_meta" | "right_super" => Ok(press(KEY_RIGHTMETA)),
+            "ctrl" | "left_ctrl" => Ok(press("ctrl")),
+            "right_ctrl" => Ok(press("ctrl_r")),
+            "alt" | "left_alt" => Ok(press("alt")),
+            "right_alt" => Ok(press("alt_r")),
+            "shift" | "left_shift" => Ok(press("shift")),
+            "right_shift" => Ok(press("shift_r")),
+            "super" | "meta" | "win" | "left_meta" => Ok(press("meta_l")),
+            "right_meta" | "right_super" => Ok(press("meta_r")),
 
-            // Single characters (a-z, 0-9, symbols)
-            "a" => Ok(press(KEY_A)),
-            "b" => Ok(press(KEY_B)),
-            "c" => Ok(press(KEY_C)),
-            "d" => Ok(press(KEY_D)),
-            "e" => Ok(press(KEY_E)),
-            "f" => Ok(press(KEY_F)),
-            "g" => Ok(press(KEY_G)),
-            "h" => Ok(press(KEY_H)),
-            "i" => Ok(press(KEY_I)),
-            "j" => Ok(press(KEY_J)),
-            "k" => Ok(press(KEY_K)),
-            "l" => Ok(press(KEY_L)),
-            "m" => Ok(press(KEY_M)),
-            "n" => Ok(press(KEY_N)),
-            "o" => Ok(press(KEY_O)),
-            "p" => Ok(press(KEY_P)),
-            "q" => Ok(press(KEY_Q)),
-            "r" => Ok(press(KEY_R)),
-            "s" => Ok(press(KEY_S)),
-            "t" => Ok(press(KEY_T)),
-            "u" => Ok(press(KEY_U)),
-            "v" => Ok(press(KEY_V)),
-            "w" => Ok(press(KEY_W)),
-            "x" => Ok(press(KEY_X)),
-            "y" => Ok(press(KEY_Y)),
-            "z" => Ok(press(KEY_Z)),
-            "0" => Ok(press(KEY_0)),
-            "1" => Ok(press(KEY_1)),
-            "2" => Ok(press(KEY_2)),
-            "3" => Ok(press(KEY_3)),
-            "4" => Ok(press(KEY_4)),
-            "5" => Ok(press(KEY_5)),
-            "6" => Ok(press(KEY_6)),
-            "7" => Ok(press(KEY_7)),
-            "8" => Ok(press(KEY_8)),
-            "9" => Ok(press(KEY_9)),
+            // Single characters (a-z)
+            "a" => Ok(press("a")),
+            "b" => Ok(press("b")),
+            "c" => Ok(press("c")),
+            "d" => Ok(press("d")),
+            "e" => Ok(press("e")),
+            "f" => Ok(press("f")),
+            "g" => Ok(press("g")),
+            "h" => Ok(press("h")),
+            "i" => Ok(press("i")),
+            "j" => Ok(press("j")),
+            "k" => Ok(press("k")),
+            "l" => Ok(press("l")),
+            "m" => Ok(press("m")),
+            "n" => Ok(press("n")),
+            "o" => Ok(press("o")),
+            "p" => Ok(press("p")),
+            "q" => Ok(press("q")),
+            "r" => Ok(press("r")),
+            "s" => Ok(press("s")),
+            "t" => Ok(press("t")),
+            "u" => Ok(press("u")),
+            "v" => Ok(press("v")),
+            "w" => Ok(press("w")),
+            "x" => Ok(press("x")),
+            "y" => Ok(press("y")),
+            "z" => Ok(press("z")),
+
+            // Digits
+            "0" => Ok(press("0")),
+            "1" => Ok(press("1")),
+            "2" => Ok(press("2")),
+            "3" => Ok(press("3")),
+            "4" => Ok(press("4")),
+            "5" => Ok(press("5")),
+            "6" => Ok(press("6")),
+            "7" => Ok(press("7")),
+            "8" => Ok(press("8")),
+            "9" => Ok(press("9")),
 
             // Symbol keys (unshifted)
-            "-" => Ok(press(KEY_MINUS)),
-            "=" => Ok(press(KEY_EQUAL)),
-            "[" => Ok(press(KEY_LEFTBRACE)),
-            "]" => Ok(press(KEY_RIGHTBRACE)),
-            "\\" => Ok(press(KEY_BACKSLASH)),
-            ";" => Ok(press(KEY_SEMICOLON)),
-            "'" => Ok(press(KEY_APOSTROPHE)),
-            "`" => Ok(press(KEY_GRAVE)),
-            "," => Ok(press(KEY_COMMA)),
-            "." => Ok(press(KEY_DOT)),
-            "/" => Ok(press(KEY_SLASH)),
+            "-" => Ok(press("minus")),
+            "=" => Ok(press("equal")),
+            "[" => Ok(press("bracket_left")),
+            "]" => Ok(press("bracket_right")),
+            "\\" => Ok(press("backslash")),
+            ";" => Ok(press("semicolon")),
+            "'" => Ok(press("apostrophe")),
+            "`" => Ok(press("grave_accent")),
+            "," => Ok(press("comma")),
+            "." => Ok(press("dot")),
+            "/" => Ok(press("slash")),
 
             // Shifted symbol keys (shift + base key)
             "!" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_1, true),
-                (KEY_1, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("1".into(), true),
+                ("1".into(), false),
+                ("shift".into(), false),
             ]),
             "@" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_2, true),
-                (KEY_2, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("2".into(), true),
+                ("2".into(), false),
+                ("shift".into(), false),
             ]),
             "#" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_3, true),
-                (KEY_3, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("3".into(), true),
+                ("3".into(), false),
+                ("shift".into(), false),
             ]),
             "$" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_4, true),
-                (KEY_4, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("4".into(), true),
+                ("4".into(), false),
+                ("shift".into(), false),
             ]),
             "%" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_5, true),
-                (KEY_5, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("5".into(), true),
+                ("5".into(), false),
+                ("shift".into(), false),
             ]),
             "^" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_6, true),
-                (KEY_6, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("6".into(), true),
+                ("6".into(), false),
+                ("shift".into(), false),
             ]),
             "&" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_7, true),
-                (KEY_7, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("7".into(), true),
+                ("7".into(), false),
+                ("shift".into(), false),
             ]),
             "*" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_8, true),
-                (KEY_8, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("8".into(), true),
+                ("8".into(), false),
+                ("shift".into(), false),
             ]),
             "(" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_9, true),
-                (KEY_9, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("9".into(), true),
+                ("9".into(), false),
+                ("shift".into(), false),
             ]),
             ")" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_0, true),
-                (KEY_0, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("0".into(), true),
+                ("0".into(), false),
+                ("shift".into(), false),
             ]),
             "_" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_MINUS, true),
-                (KEY_MINUS, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("minus".into(), true),
+                ("minus".into(), false),
+                ("shift".into(), false),
             ]),
             "+" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_EQUAL, true),
-                (KEY_EQUAL, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("equal".into(), true),
+                ("equal".into(), false),
+                ("shift".into(), false),
             ]),
             "{" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_LEFTBRACE, true),
-                (KEY_LEFTBRACE, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("bracket_left".into(), true),
+                ("bracket_left".into(), false),
+                ("shift".into(), false),
             ]),
             "}" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_RIGHTBRACE, true),
-                (KEY_RIGHTBRACE, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("bracket_right".into(), true),
+                ("bracket_right".into(), false),
+                ("shift".into(), false),
             ]),
             "|" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_BACKSLASH, true),
-                (KEY_BACKSLASH, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("backslash".into(), true),
+                ("backslash".into(), false),
+                ("shift".into(), false),
             ]),
             ":" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_SEMICOLON, true),
-                (KEY_SEMICOLON, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("semicolon".into(), true),
+                ("semicolon".into(), false),
+                ("shift".into(), false),
             ]),
             "\"" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_APOSTROPHE, true),
-                (KEY_APOSTROPHE, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("apostrophe".into(), true),
+                ("apostrophe".into(), false),
+                ("shift".into(), false),
             ]),
             "~" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_GRAVE, true),
-                (KEY_GRAVE, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("grave_accent".into(), true),
+                ("grave_accent".into(), false),
+                ("shift".into(), false),
             ]),
             "<" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_COMMA, true),
-                (KEY_COMMA, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("comma".into(), true),
+                ("comma".into(), false),
+                ("shift".into(), false),
             ]),
             ">" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_DOT, true),
-                (KEY_DOT, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("dot".into(), true),
+                ("dot".into(), false),
+                ("shift".into(), false),
             ]),
             "?" => Ok(vec![
-                (KEY_LEFTSHIFT, true),
-                (KEY_SLASH, true),
-                (KEY_SLASH, false),
-                (KEY_LEFTSHIFT, false),
+                ("shift".into(), true),
+                ("slash".into(), true),
+                ("slash".into(), false),
+                ("shift".into(), false),
             ]),
 
-            // Modifier combos: modifier down, key down, key up, modifier up
+            // Modifier combos
             "ctrl+a" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_A, true),
-                (KEY_A, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("a".into(), true),
+                ("a".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+b" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_B, true),
-                (KEY_B, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("b".into(), true),
+                ("b".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+c" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_C, true),
-                (KEY_C, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("c".into(), true),
+                ("c".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+d" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_D, true),
-                (KEY_D, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("d".into(), true),
+                ("d".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+e" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_E, true),
-                (KEY_E, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("e".into(), true),
+                ("e".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+f" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_F, true),
-                (KEY_F, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("f".into(), true),
+                ("f".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+g" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_G, true),
-                (KEY_G, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("g".into(), true),
+                ("g".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+h" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_H, true),
-                (KEY_H, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("h".into(), true),
+                ("h".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+i" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_I, true),
-                (KEY_I, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("i".into(), true),
+                ("i".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+j" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_J, true),
-                (KEY_J, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("j".into(), true),
+                ("j".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+k" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_K, true),
-                (KEY_K, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("k".into(), true),
+                ("k".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+l" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_L, true),
-                (KEY_L, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("l".into(), true),
+                ("l".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+m" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_M, true),
-                (KEY_M, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("m".into(), true),
+                ("m".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+n" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_N, true),
-                (KEY_N, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("n".into(), true),
+                ("n".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+o" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_O, true),
-                (KEY_O, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("o".into(), true),
+                ("o".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+p" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_P, true),
-                (KEY_P, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("p".into(), true),
+                ("p".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+q" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_Q, true),
-                (KEY_Q, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("q".into(), true),
+                ("q".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+r" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_R, true),
-                (KEY_R, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("r".into(), true),
+                ("r".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+s" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_S, true),
-                (KEY_S, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("s".into(), true),
+                ("s".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+t" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_T, true),
-                (KEY_T, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("t".into(), true),
+                ("t".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+u" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_U, true),
-                (KEY_U, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("u".into(), true),
+                ("u".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+v" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_V, true),
-                (KEY_V, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("v".into(), true),
+                ("v".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+w" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_W, true),
-                (KEY_W, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("w".into(), true),
+                ("w".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+x" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_X, true),
-                (KEY_X, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("x".into(), true),
+                ("x".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+y" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_Y, true),
-                (KEY_Y, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("y".into(), true),
+                ("y".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+z" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_Z, true),
-                (KEY_Z, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("z".into(), true),
+                ("z".into(), false),
+                ("ctrl".into(), false),
             ]),
             "alt+f1" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_F1, true),
-                (KEY_F1, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("f1".into(), true),
+                ("f1".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+f2" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_F2, true),
-                (KEY_F2, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("f2".into(), true),
+                ("f2".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+f3" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_F3, true),
-                (KEY_F3, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("f3".into(), true),
+                ("f3".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+f4" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_F4, true),
-                (KEY_F4, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("f4".into(), true),
+                ("f4".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+f5" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_F5, true),
-                (KEY_F5, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("f5".into(), true),
+                ("f5".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+f6" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_F6, true),
-                (KEY_F6, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("f6".into(), true),
+                ("f6".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+f7" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_F7, true),
-                (KEY_F7, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("f7".into(), true),
+                ("f7".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+f8" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_F8, true),
-                (KEY_F8, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("f8".into(), true),
+                ("f8".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+f9" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_F9, true),
-                (KEY_F9, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("f9".into(), true),
+                ("f9".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+f10" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_F10, true),
-                (KEY_F10, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("f10".into(), true),
+                ("f10".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+f11" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_F11, true),
-                (KEY_F11, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("f11".into(), true),
+                ("f11".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+f12" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_F12, true),
-                (KEY_F12, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("f12".into(), true),
+                ("f12".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+tab" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_TAB, true),
-                (KEY_TAB, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("tab".into(), true),
+                ("tab".into(), false),
+                ("alt".into(), false),
             ]),
             "alt+enter" => Ok(vec![
-                (KEY_LEFTALT, true),
-                (KEY_ENTER, true),
-                (KEY_ENTER, false),
-                (KEY_LEFTALT, false),
+                ("alt".into(), true),
+                ("ret".into(), true),
+                ("ret".into(), false),
+                ("alt".into(), false),
             ]),
             "ctrl+alt+delete" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_LEFTALT, true),
-                (KEY_DELETE, true),
-                (KEY_DELETE, false),
-                (KEY_LEFTALT, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("alt".into(), true),
+                ("delete".into(), true),
+                ("delete".into(), false),
+                ("alt".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+alt+f1" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_LEFTALT, true),
-                (KEY_F1, true),
-                (KEY_F1, false),
-                (KEY_LEFTALT, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("alt".into(), true),
+                ("f1".into(), true),
+                ("f1".into(), false),
+                ("alt".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+alt+f2" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_LEFTALT, true),
-                (KEY_F2, true),
-                (KEY_F2, false),
-                (KEY_LEFTALT, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("alt".into(), true),
+                ("f2".into(), true),
+                ("f2".into(), false),
+                ("alt".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+alt+f3" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_LEFTALT, true),
-                (KEY_F3, true),
-                (KEY_F3, false),
-                (KEY_LEFTALT, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("alt".into(), true),
+                ("f3".into(), true),
+                ("f3".into(), false),
+                ("alt".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+alt+f4" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_LEFTALT, true),
-                (KEY_F4, true),
-                (KEY_F4, false),
-                (KEY_LEFTALT, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("alt".into(), true),
+                ("f4".into(), true),
+                ("f4".into(), false),
+                ("alt".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+alt+f5" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_LEFTALT, true),
-                (KEY_F5, true),
-                (KEY_F5, false),
-                (KEY_LEFTALT, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("alt".into(), true),
+                ("f5".into(), true),
+                ("f5".into(), false),
+                ("alt".into(), false),
+                ("ctrl".into(), false),
             ]),
             "ctrl+alt+f6" => Ok(vec![
-                (KEY_LEFTCTRL, true),
-                (KEY_LEFTALT, true),
-                (KEY_F6, true),
-                (KEY_F6, false),
-                (KEY_LEFTALT, false),
-                (KEY_LEFTCTRL, false),
+                ("ctrl".into(), true),
+                ("alt".into(), true),
+                ("f6".into(), true),
+                ("f6".into(), false),
+                ("alt".into(), false),
+                ("ctrl".into(), false),
             ]),
             _ => anyhow::bail!("Unknown key: {}", key),
         }
