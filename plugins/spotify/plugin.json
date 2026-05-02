@@ -1,0 +1,147 @@
+{
+  "name": "spotify",
+  "description": "Search and retrieve music information from Spotify",
+  "version": "1.0.0",
+  "enabled": true,
+  "context": {},
+  "secrets": [
+    "spotify_client_id",
+    "spotify_client_secret"
+  ],
+  "tools": [
+    {
+      "name": "spotify_search",
+      "description": "Search for tracks, albums, artists, or playlists on Spotify",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query"
+          },
+          "type": {
+            "type": "string",
+            "description": "Type of items to search: track, album, artist, playlist (default: track)",
+            "enum": ["track", "album", "artist", "playlist"]
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max results to return (default 10, max 50)"
+          }
+        },
+        "required": ["query"]
+      },
+      "handler": {
+        "type": "script",
+        "path": "search.py",
+        "interpreter": "python3"
+      }
+    },
+    {
+      "name": "spotify_get_track",
+      "description": "Get details of a specific track by ID or Spotify URI",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "track_id": {
+            "type": "string",
+            "description": "Spotify track ID or URI"
+          }
+        },
+        "required": ["track_id"]
+      },
+      "handler": {
+        "type": "script",
+        "path": "get_track.py",
+        "interpreter": "python3"
+      }
+    },
+    {
+      "name": "spotify_get_album",
+      "description": "Get details of a specific album by ID or Spotify URI",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "album_id": {
+            "type": "string",
+            "description": "Spotify album ID or URI"
+          }
+        },
+        "required": ["album_id"]
+      },
+      "handler": {
+        "type": "script",
+        "path": "get_album.py",
+        "interpreter": "python3"
+      }
+    },
+    {
+      "name": "spotify_get_artist",
+      "description": "Get details of a specific artist by ID or Spotify URI",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "description": "Spotify artist ID or URI"
+          }
+        },
+        "required": ["artist_id"]
+      },
+      "handler": {
+        "type": "script",
+        "path": "get_artist.py",
+        "interpreter": "python3"
+      }
+    },
+    {
+      "name": "spotify_get_playlist",
+      "description": "Get details of a specific playlist by ID or Spotify URI",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "playlist_id": {
+            "type": "string",
+            "description": "Spotify playlist ID or URI"
+          }
+        },
+        "required": ["playlist_id"]
+      },
+      "handler": {
+        "type": "script",
+        "path": "get_playlist.py",
+        "interpreter": "python3"
+      }
+    },
+    {
+      "name": "spotify_get_recommendations",
+      "description": "Get track recommendations based on seed artists, tracks, or genres",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "seed_artists": {
+            "type": "string",
+            "description": "Comma-separated Spotify artist IDs (max 5 seeds total)"
+          },
+          "seed_tracks": {
+            "type": "string",
+            "description": "Comma-separated Spotify track IDs (max 5 seeds total)"
+          },
+          "seed_genres": {
+            "type": "string",
+            "description": "Comma-separated genre names (max 5 seeds total)"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max results to return (default 10, max 100)"
+          }
+        }
+      },
+      "handler": {
+        "type": "script",
+        "path": "get_recommendations.py",
+        "interpreter": "python3"
+      }
+    }
+  ]
+}
