@@ -450,17 +450,17 @@ impl EventHandler for DiscordHandler {
                                     )
                                     .await;
 
-                                    // Check context for deafened setting
+                                    // Check context for deafened and voice_enabled settings
                                     let discord_user_id = command.user.id.to_string();
-                                    let should_deafen =
+                                    let (should_deafen, voice_listening) =
                                         match self.db.get_pairing_by_discord(&discord_user_id) {
                                             Ok(Some(pairing)) => {
                                                 match self.db.load_context(&pairing.user_id) {
-                                                    Ok(ctx) => ctx.settings.voice_deafened,
-                                                    Err(_) => true,
+                                                    Ok(ctx) => (ctx.settings.voice_deafened, ctx.settings.voice_enabled && ctx.settings.use_stt),
+                                                    Err(_) => (true, false),
                                                 }
                                             }
-                                            _ => true,
+                                            _ => (true, false),
                                         };
 
                                     {
@@ -599,6 +599,12 @@ impl EventHandler for DiscordHandler {
                                                     ..Default::default()
                                                 });
                                             let stt_type = ctx.settings.voice_stt_type.clone();
+
+                                            if !ctx.settings.voice_enabled || !ctx.settings.use_stt {
+                                                tracing::debug!("VOICE_PIPELINE: voice_enabled={}, use_stt={} for user {}, skipping transcription", ctx.settings.voice_enabled, ctx.settings.use_stt, user_id);
+                                                continue;
+                                            }
+
                                             let api_key = secrets.elevenlabs_api_key.clone();
                                             let model_path = match stt_type.as_str() {
                                                 "vosk" => {
@@ -762,7 +768,11 @@ impl EventHandler for DiscordHandler {
                                             &ctx.http,
                                             serenity::builder::CreateInteractionResponse::Message(
                                                 serenity::builder::CreateInteractionResponseMessage::new()
-                                                    .content(format!("Joined <#{}> (voice listening active)", voice_channel_id)),
+                                                    .content(if voice_listening {
+                                                        format!("Joined <#{}> (voice listening active)", voice_channel_id)
+                                                    } else {
+                                                        format!("Joined <#{}> (voice listening disabled)", voice_channel_id)
+                                                    }),
                                             ),
                                         )
                                         .await;

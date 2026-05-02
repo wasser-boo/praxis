@@ -14,6 +14,7 @@ pub fn set_context_value(
         "voice_enabled" => ctx.settings.voice_enabled = value.parse().unwrap_or(false),
         "voice_tts_enabled" => ctx.settings.voice_tts_enabled = value.parse().unwrap_or(false),
         "use_tts" => ctx.settings.use_tts = value.parse().unwrap_or(false),
+        "use_stt" => ctx.settings.use_stt = value.parse().unwrap_or(true),
         "voice_muted" => ctx.settings.voice_muted = value.parse().unwrap_or(false),
         "voice_deafened" => ctx.settings.voice_deafened = value.parse().unwrap_or(true),
         "voice_auto_pause_enabled" => {

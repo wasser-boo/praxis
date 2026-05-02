@@ -86,6 +86,8 @@ pub struct ContextSettings {
     pub elevenlabs_tts_language: Option<String>,
     #[serde(default)]
     pub use_tts: bool,
+    #[serde(default = "default_true")]
+    pub use_stt: bool,
     #[serde(default)]
     pub voice_muted: bool,
     #[serde(default = "default_deafened")]
@@ -218,6 +220,9 @@ fn default_elevenlabs_speed() -> Option<f32> {
 fn default_feedback_template() -> String {
     "tasks/feedback".to_string()
 }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for ContextSettings {
     fn default() -> Self {
@@ -243,6 +248,7 @@ impl Default for ContextSettings {
             elevenlabs_speed: default_elevenlabs_speed(),
             elevenlabs_tts_language: None,
             use_tts: false,
+            use_stt: true,
             voice_muted: false,
             voice_deafened: default_deafened(),
             voice_discord_guild_id: None,

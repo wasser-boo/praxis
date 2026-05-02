@@ -14,6 +14,7 @@ pub fn get_context(
         "voice_enabled" => Some(ctx.settings.voice_enabled.to_string()),
         "voice_tts_enabled" => Some(ctx.settings.voice_tts_enabled.to_string()),
         "use_tts" => Some(ctx.settings.use_tts.to_string()),
+        "use_stt" => Some(ctx.settings.use_stt.to_string()),
         "voice_muted" => Some(ctx.settings.voice_muted.to_string()),
         "voice_deafened" => Some(ctx.settings.voice_deafened.to_string()),
         "voice_auto_pause_enabled" => Some(ctx.settings.voice_auto_pause_enabled.to_string()),
