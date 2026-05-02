@@ -339,9 +339,28 @@ impl VmManager {
             }
         }
 
-        // Ensure directories exist
-        let vm_dir = format!("{}/vm/{}", self.data_dir, config.name);
+        // Resolve all paths to absolute (QEMU needs absolute paths for sockets)
+        let abs_data_dir = std::fs::canonicalize(&self.data_dir)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&self.data_dir));
+        let abs_data_dir_str = abs_data_dir.to_string_lossy().to_string();
+        let vm_dir = format!("{}/vm/{}", abs_data_dir_str, config.name);
         std::fs::create_dir_all(&vm_dir)?;
+
+        // Fix relative paths in config
+        let mut config = config.clone();
+        if !std::path::Path::new(&config.disk_path).is_absolute() {
+            config.disk_path = format!("{}/disk.qcow2", vm_dir);
+        }
+        if let Some(ref path) = config.qmp_socket_path {
+            if !std::path::Path::new(path).is_absolute() {
+                config.qmp_socket_path = Some(format!("{}/qmp.sock", vm_dir));
+            }
+        }
+        if let Some(ref path) = config.serial_socket_path {
+            if !std::path::Path::new(path).is_absolute() {
+                config.serial_socket_path = Some(format!("{}/serial.sock", vm_dir));
+            }
+        }
 
         // Create disk if it doesn't exist
         if !std::path::Path::new(&config.disk_path).exists() {
@@ -362,12 +381,18 @@ impl VmManager {
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
+            tracing::info!("Disk created: {}", config.disk_path);
         }
 
         // Build QEMU command
         let args = self.build_qemu_args(&config);
 
-        tracing::info!(name = %config.name, arch = ?config.arch, "Starting VM");
+        tracing::info!(name = %config.name, arch = ?config.arch, binary = %config.arch.qemu_binary(), "Starting VM");
+        tracing::info!(
+            "QEMU args: {} {}",
+            config.arch.qemu_binary(),
+            args.join(" ")
+        );
 
         // Start QEMU process
         let mut cmd = tokio::process::Command::new(config.arch.qemu_binary());
@@ -376,7 +401,7 @@ impl VmManager {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        let child = cmd.spawn().map_err(|e| {
+        let mut child = cmd.spawn().map_err(|e| {
             anyhow::anyhow!(
                 "Failed to start QEMU ({}): {}. Is qemu-system-x86_64 installed?",
                 config.arch.qemu_binary(),
@@ -387,46 +412,98 @@ impl VmManager {
         let pid = child.id();
         tracing::info!(name = %config.name, pid = ?pid, "QEMU process started");
 
-        // Wait for QEMU to start listening
-        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+        // Check if QEMU died immediately (within 500ms)
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // QEMU exited already — capture stderr
+                let stderr = child.stderr.take();
+                let mut stderr_output = String::new();
+                if let Some(mut stderr) = stderr {
+                    use tokio::io::AsyncReadExt;
+                    let _ = stderr.read_to_string(&mut stderr_output).await;
+                }
+                anyhow::bail!(
+                    "QEMU exited immediately with status {}. Command: {} {}\nStderr: {}",
+                    status,
+                    config.arch.qemu_binary(),
+                    args.join(" "),
+                    stderr_output
+                );
+            }
+            Ok(None) => {
+                tracing::info!("QEMU process is running (PID: {:?})", pid);
+            }
+            Err(e) => {
+                tracing::warn!("Could not check QEMU status: {}", e);
+            }
+        }
 
-        // Connect QMP
+        // Wait for QEMU to start listening, with retries
         let qmp_addr = config.qmp_connect_addr();
-        let qmp = match qmp::QmpClient::connect(&qmp_addr).await {
-            Ok(mut client) => {
-                let _ = client.negotiate().await;
-                tracing::info!(
-                    "QMP connected for VM '{}' on port {}",
-                    config.name,
-                    config.qmp_port
-                );
-                Some(client)
-            }
-            Err(e) => {
-                tracing::warn!("QMP connection failed (VM may still be booting): {}", e);
-                None
-            }
-        };
-
-        // Connect serial
         let serial_addr = config.serial_connect_addr();
-        let serial = match serial::SerialShell::connect(&serial_addr).await {
-            Ok(shell) => {
-                tracing::info!(
-                    "Serial connected for VM '{}' on port {}",
-                    config.name,
-                    config.serial_port
-                );
-                Some(shell)
+        let mut qmp = None;
+        let mut serial = None;
+
+        for attempt in 1..=5 {
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+            // Check if QEMU is still alive
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let stderr = child.stderr.take();
+                    let mut stderr_output = String::new();
+                    if let Some(mut stderr) = stderr {
+                        use tokio::io::AsyncReadExt;
+                        let _ = stderr.read_to_string(&mut stderr_output).await;
+                    }
+                    anyhow::bail!(
+                        "QEMU died during startup (exit {}). Stderr:\n{}",
+                        status,
+                        stderr_output
+                    );
+                }
+                _ => {}
             }
-            Err(e) => {
-                tracing::warn!("Serial connection failed: {}", e);
-                None
+
+            tracing::info!(attempt = attempt, qmp = %qmp_addr, "Trying QMP connection...");
+            if qmp.is_none() {
+                match qmp::QmpClient::connect(&qmp_addr).await {
+                    Ok(mut client) => {
+                        let _ = client.negotiate().await;
+                        tracing::info!("QMP connected for VM '{}' at {}", config.name, qmp_addr);
+                        qmp = Some(client);
+                    }
+                    Err(e) => {
+                        tracing::debug!("QMP attempt {} failed: {}", attempt, e);
+                    }
+                }
             }
-        };
+
+            if serial.is_none() {
+                tracing::info!(attempt = attempt, serial = %serial_addr, "Trying Serial connection...");
+                match serial::SerialShell::connect(&serial_addr).await {
+                    Ok(shell) => {
+                        tracing::info!(
+                            "Serial connected for VM '{}' at {}",
+                            config.name,
+                            serial_addr
+                        );
+                        serial = Some(shell);
+                    }
+                    Err(e) => {
+                        tracing::debug!("Serial attempt {} failed: {}", attempt, e);
+                    }
+                }
+            }
+
+            if qmp.is_some() && serial.is_some() {
+                break;
+            }
+        }
 
         // Inject secrets via 9p if configured
-        if let Err(e) = secrets_inject::inject_secrets(&config.name, &self.data_dir).await {
+        if let Err(e) = secrets_inject::inject_secrets(&config.name, &abs_data_dir_str).await {
             tracing::warn!("Secret injection failed (non-fatal): {}", e);
         }
 
@@ -442,8 +519,12 @@ impl VmManager {
         instances.insert(config.name.clone(), instance);
 
         Ok(format!(
-            "VM '{}' started (PID: {:?}, VNC: {}, QMP: 127.0.0.1:{}, Serial: 127.0.0.1:{})",
-            config.name, pid, config.vnc_port, config.qmp_port, config.serial_port
+            "VM '{}' started (PID: {:?}, VNC: {}, QMP: {}, Serial: {})",
+            config.name,
+            pid,
+            config.vnc_port,
+            config.qmp_connect_addr(),
+            config.serial_connect_addr()
         ))
     }
 
@@ -892,17 +973,6 @@ impl VmManager {
             ]);
         }
 
-        // Serial via TCP (cross-platform)
-        args.extend([
-            "-chardev".to_string(),
-            format!(
-                "socket,id=serial0,host=127.0.0.1,port={},server=on,wait=off",
-                config.serial_port
-            ),
-            "-serial".to_string(),
-            "chardev:serial0".to_string(),
-        ]);
-
         // Shared folders: 9p on Linux, SMB on Windows/macOS
         if cfg!(target_os = "linux") {
             for folder in &config.shared_folders {
@@ -911,16 +981,23 @@ impl VmManager {
                 } else {
                     "passthrough"
                 };
+                let abs_host_path = std::fs::canonicalize(&folder.host_path)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| folder.host_path.clone());
                 args.extend([
                     "-virtfs".to_string(),
                     format!(
                         "local,path={},mount_tag={},security_model={}",
-                        folder.host_path, folder.mount_tag, security
+                        abs_host_path, folder.mount_tag, security
                     ),
                 ]);
             }
-            // Secrets 9p mount
-            let secrets_dir = format!("{}/vm/{}/secrets", self.data_dir, config.name);
+            // Secrets 9p mount — absolute path
+            let abs_data = std::fs::canonicalize(&self.data_dir)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| self.data_dir.clone());
+            let secrets_dir = format!("{}/vm/{}/secrets", abs_data, config.name);
+            let _ = std::fs::create_dir_all(&secrets_dir);
             args.extend([
                 "-virtfs".to_string(),
                 format!(
