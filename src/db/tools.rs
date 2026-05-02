@@ -242,7 +242,7 @@ fn get_default_tools() -> Vec<Tool> {
         },
         Tool {
             name: "vm_keys".into(),
-            description: Some("Send keyboard input to the VM. Use this for TUI apps (vim, htop, nano, etc). Special keys: 'enter', 'esc', 'tab', 'ctrl+c', 'ctrl+z', 'ctrl+d', 'arrow_up', 'arrow_down', 'arrow_left', 'arrow_right', 'f1'-'f12', 'pageup', 'pagedown', 'backspace'. Regular text is sent as-is.".into()),
+            description: Some("Send keyboard input to the VM. Use this for TUI apps (vim, htop, nano, etc) and installer menus. Special keys: 'enter', 'esc', 'tab', 'backspace', 'space', 'delete', 'insert', 'home', 'end', 'pageup', 'pagedown', 'capslock', 'numlock', 'print_screen', 'arrow_up', 'arrow_down', 'arrow_left', 'arrow_right', 'f1'-'f24', 'super'/'meta'/'win'. Numpad: 'kp0'-'kp9', 'kp_enter', 'kp_plus', 'kp_minus', 'kp_multiply', 'kp_divide', 'kp_dot'. Symbols: - = [ ] \\ ; ' ` , . / and shifted: ! @ # $ % ^ & * ( ) _ + { } | : \" ~ < > ?. Letters a-z, digits 0-9. Modifier combos: 'ctrl+a'-'ctrl+z', 'alt+f1'-'alt+f12', 'alt+tab', 'alt+enter', 'ctrl+alt+delete', 'ctrl+alt+f1'-'ctrl+alt+f6'. Regular text strings (e.g. 'ls -la', 'hello') are sent as-is via serial.".into()),
             parameters: serde_json::json!({"type":"object","properties":{"keys":{"type":"string","description":"Text or special key to send"},"name":{"type":"string","default":"praxis-vm"}},"required":["keys"]}),
             is_enabled: false,
         },
