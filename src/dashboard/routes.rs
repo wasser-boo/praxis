@@ -1133,10 +1133,27 @@ async fn vm_cd(Json(req): Json<VmCdRequest>) -> Result<Json<serde_json::Value>, 
     }
 
     let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
-    let qmp_sock = format!("{}/vm/{}/qmp.sock", config.data_dir, name);
+
+    // Get QMP port from VM manager
+    let manager = match crate::tools::vm_tools::get_vm_manager().await {
+        Some(m) => m,
+        None => {
+            return Ok(Json(
+                serde_json::json!({"error": "VM manager not initialized"}),
+            ))
+        }
+    };
+
+    let vm_info = match manager.get_vm_info(&name).await {
+        Ok(info) => info,
+        Err(e) => return Ok(Json(serde_json::json!({"error": e.to_string()}))),
+    };
+
+    let qmp_port = vm_info["qmp_port"].as_u64().unwrap_or(44400) as u16;
+    let qmp_addr = format!("127.0.0.1:{}", qmp_port);
 
     match req.iso_path {
-        Some(iso) => match crate::vm::qmp::QmpClient::connect(&qmp_sock).await {
+        Some(iso) => match crate::vm::qmp::QmpClient::connect(&qmp_addr).await {
             Ok(mut client) => {
                 let _ = client.negotiate().await;
                 Ok(Json(

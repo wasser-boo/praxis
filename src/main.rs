@@ -777,27 +777,25 @@ async fn handle_vm_action(action: VmAction) -> anyhow::Result<()> {
             }
             Err(e) => eprintln!("Error: {}", e),
         },
-        VmAction::Cd { name, iso } => {
-            match iso {
-                Some(path) => {
-                    // Insert CD via QMP
-                    println!("Inserting CD '{}' into VM '{}'...", path, name);
-                    // This requires QMP blockdev change medium
-                    let qmp_sock = format!("{}/vm/{}/qmp.sock", config.data_dir, name);
-                    match praxis::vm::qmp::QmpClient::connect(&qmp_sock).await {
-                        Ok(mut client) => {
-                            let _ = client.negotiate().await;
-                            println!("CD inserted: {}", path);
-                            println!("Note: Reboot VM to boot from CD if needed.");
-                        }
-                        Err(e) => eprintln!("Cannot connect to VM QMP: {}", e),
+        VmAction::Cd { name, iso } => match iso {
+            Some(path) => {
+                println!("Inserting CD '{}' into VM '{}'...", path, name);
+                let vm_info = manager.get_vm_info(&name).await?;
+                let qmp_port = vm_info["qmp_port"].as_u64().unwrap_or(44400) as u16;
+                let qmp_addr = format!("127.0.0.1:{}", qmp_port);
+                match praxis::vm::qmp::QmpClient::connect(&qmp_addr).await {
+                    Ok(mut client) => {
+                        let _ = client.negotiate().await;
+                        println!("CD inserted: {}", path);
+                        println!("Note: Reboot VM to boot from CD if needed.");
                     }
-                }
-                None => {
-                    println!("Ejecting CD from VM '{}'...", name);
+                    Err(e) => eprintln!("Cannot connect to VM QMP: {}", e),
                 }
             }
-        }
+            None => {
+                println!("Ejecting CD from VM '{}'...", name);
+            }
+        },
         VmAction::Disk { path, size, format } => {
             let output = tokio::process::Command::new("qemu-img")
                 .args(["create", "-f", &format, &path, &size])

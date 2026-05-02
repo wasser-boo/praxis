@@ -1017,6 +1017,56 @@ async fn execute_tool_call(
                 Err(e) => format!("Error: {}", e),
             }
         }
+        "send_screenshot_to_discord" => {
+            let channel_id = args["channel_id"].as_str().unwrap_or("");
+            let caption = args["caption"].as_str();
+            let vm_name = args["vm_name"].as_str().unwrap_or("praxis-vm");
+            match crate::tools::discord_interactive::send_screenshot_to_discord(
+                channel_id, caption, vm_name,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "screenshot_with_feedback" => {
+            let channel_id = args["channel_id"].as_str().unwrap_or("");
+            let feedback = args["feedback"].as_str().unwrap_or("");
+            let vm_name = args["vm_name"].as_str().unwrap_or("praxis-vm");
+            match crate::tools::discord_interactive::screenshot_with_feedback(
+                channel_id, feedback, vm_name,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "ask_question" => {
+            let channel_id = args["channel_id"].as_str().unwrap_or("");
+            let question = args["question"].as_str().unwrap_or("");
+            let timeout = args["timeout_secs"].as_u64().unwrap_or(300);
+            let suggestions: Vec<String> = args["suggestions"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match crate::tools::discord_interactive::ask_question(
+                channel_id,
+                question,
+                &suggestions,
+                timeout,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => format!("Error: {}", e),
+            }
+        }
         _ => {
             // Check VM tools first
             if tc.function.name.starts_with("vm_") {

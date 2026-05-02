@@ -255,6 +255,24 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
             parameters: serde_json::json!({"type":"object","properties":{"index":{"type":"integer","description":"-1=latest, 0=oldest, N=specific","default":-1},"name":{"type":"string","default":"praxis-vm"}}}),
             is_enabled: false,
         },
+        Tool {
+            name: "send_screenshot_to_discord".into(),
+            description: Some("Take a VM screenshot and send it to a Discord channel. Use this to show the user what's happening on the VM desktop.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"caption":{"type":"string","description":"Optional caption for the screenshot"},"vm_name":{"type":"string","default":"praxis-vm"}},"required":["channel_id"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "screenshot_with_feedback".into(),
+            description: Some("Take a VM screenshot and send it to Discord with a message/feedback. Use this to show progress and ask for input.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"feedback":{"type":"string","description":"Message to send with the screenshot"},"vm_name":{"type":"string","default":"praxis-vm"}},"required":["channel_id","feedback"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "ask_question".into(),
+            description: Some("Ask the user a question via Discord and wait for their response. You can provide emoji-based quick reply suggestions. The tool blocks until the user answers or timeout is reached.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"question":{"type":"string","description":"The question to ask"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options (shown as 1️⃣, 2️⃣, etc.)"},"timeout_secs":{"type":"integer","default":300,"description":"How long to wait for response (seconds)"}},"required":["channel_id","question"]}),
+            is_enabled: false,
+        },
     ];
 
     save_tools(db, &defaults)?;
@@ -295,7 +313,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 30);
     }
 
     #[test]
@@ -304,7 +322,7 @@ mod tool_tests {
         init_default_tools(&db).unwrap();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 30);
     }
 
     #[test]

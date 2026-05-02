@@ -112,6 +112,23 @@ impl EventHandler for DiscordHandler {
             return;
         }
 
+        // Check if this is a response to a pending ask_question
+        let channel_id = msg.channel_id.to_string();
+        {
+            let pending = crate::tools::discord_interactive::PENDING_QUESTIONS
+                .read()
+                .await;
+            if !pending.is_empty() {
+                crate::tools::discord_interactive::handle_message_reply(
+                    &channel_id,
+                    &msg.content,
+                    &msg.author.id.to_string(),
+                )
+                .await;
+                // Don't return — still process the message normally
+            }
+        }
+
         if let Some(guild_id) = msg.guild_id {
             let mentions_me = msg.mentions_me(&ctx).await.unwrap_or(false);
             if !mentions_me {
@@ -953,6 +970,14 @@ impl EventHandler for DiscordHandler {
                 _ => {}
             }
         }
+    }
+
+    async fn reaction_add(&self, _ctx: Context, reaction: serenity::model::channel::Reaction) {
+        let channel_id = reaction.channel_id.to_string();
+        let emoji = reaction.emoji.as_data();
+        let user_id = reaction.user_id.map(|u| u.to_string()).unwrap_or_default();
+
+        crate::tools::discord_interactive::handle_reaction(&channel_id, &emoji, &user_id).await;
     }
 }
 

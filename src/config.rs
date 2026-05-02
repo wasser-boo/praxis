@@ -46,7 +46,8 @@ pub struct Config {
     pub vm_ram_mb: u32,
     pub vm_disk_size: String,
     pub vm_arch: String,
-    pub vm_mode: String, // "shared" (VM + host) or "vm" (VM only, no host access)
+    pub vm_mode: String,        // "shared" or "vm"
+    pub vm_socket_mode: String, // "unix" or "tcp" (auto-detected per OS if empty)
 }
 
 impl Config {
@@ -107,6 +108,13 @@ impl Config {
             vm_disk_size: env::var("VM_DISK_SIZE").unwrap_or_else(|_| "40G".to_string()),
             vm_arch: env::var("VM_ARCH").unwrap_or_else(|_| "x86_64".to_string()),
             vm_mode: env::var("VM_MODE").unwrap_or_else(|_| "shared".to_string()),
+            vm_socket_mode: env::var("VM_SOCKET_MODE").unwrap_or_else(|_| {
+                if cfg!(target_os = "linux") {
+                    "unix".to_string()
+                } else {
+                    "tcp".to_string()
+                }
+            }),
         }
     }
 

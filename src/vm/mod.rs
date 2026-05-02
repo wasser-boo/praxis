@@ -70,16 +70,80 @@ pub struct VmConfig {
     pub disk_size: String,
     pub iso_path: Option<String>,
     pub vnc_port: u16,
-    pub qmp_socket: String,
-    pub serial_socket: String,
+    pub qmp_port: u16,
+    pub serial_port: u16,
+    pub qmp_socket_path: Option<String>, // Unix socket path (only when socket_mode=unix)
+    pub serial_socket_path: Option<String>, // Unix socket path (only when socket_mode=unix)
+    pub socket_mode: String,             // "unix" or "tcp"
     pub shared_folders: Vec<SharedFolder>,
     pub network_mode: String,
     pub audio_enabled: bool,
 }
 
+/// Detect the best acceleration method for the current OS
+fn detect_acceleration() -> &'static str {
+    if cfg!(target_os = "linux") {
+        // Check if KVM is available
+        if std::path::Path::new("/dev/kvm").exists() {
+            return "kvm";
+        }
+    } else if cfg!(target_os = "windows") {
+        // WHPX (Windows Hypervisor Platform) or HAXM
+        return "whpx";
+    } else if cfg!(target_os = "macos") {
+        return "hvf";
+    }
+    "tcg" // fallback: software emulation (slow but works everywhere)
+}
+
+/// Find OVMF firmware for UEFI boot
+fn find_ovmf_firmware() -> Option<String> {
+    let paths = if cfg!(target_os = "windows") {
+        vec![
+            r"C:\Program Files\qemu\share\edk2-x86_64-code.fd",
+            r"C:\Program Files\qemu\share\OVMF_CODE.fd",
+        ]
+    } else if cfg!(target_os = "macos") {
+        vec![
+            "/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
+            "/usr/local/share/qemu/edk2-x86_64-code.fd",
+        ]
+    } else {
+        vec![
+            "/usr/share/OVMF/OVMF_CODE.fd",
+            "/usr/share/edk2/x64/OVMF_CODE.4m.fd",
+            "/usr/share/qemu/OVMF_CODE.fd",
+        ]
+    };
+    for p in paths {
+        if std::path::Path::new(p).exists() {
+            return Some(p.to_string());
+        }
+    }
+    None
+}
+
 impl VmConfig {
     pub fn default_for_name(name: &str, data_dir: &str, vnc_offset: u16, arch: &str) -> Self {
         let vm_dir = format!("{}/vm/{}", data_dir, name);
+        let base_port = 44400u16 + (vnc_offset * 10);
+        let socket_mode = std::env::var("VM_SOCKET_MODE").unwrap_or_else(|_| {
+            if cfg!(target_os = "linux") {
+                "unix".to_string()
+            } else {
+                "tcp".to_string()
+            }
+        });
+
+        let (qmp_socket_path, serial_socket_path) = if socket_mode == "unix" {
+            (
+                Some(format!("{}/qmp.sock", vm_dir)),
+                Some(format!("{}/serial.sock", vm_dir)),
+            )
+        } else {
+            (None, None)
+        };
+
         Self {
             name: name.to_string(),
             arch: VmArch::from_str(arch),
@@ -89,11 +153,34 @@ impl VmConfig {
             disk_size: "40G".to_string(),
             iso_path: None,
             vnc_port: 5900 + vnc_offset,
-            qmp_socket: format!("{}/qmp.sock", vm_dir),
-            serial_socket: format!("{}/serial.sock", vm_dir),
+            qmp_port: base_port,
+            serial_port: base_port + 1,
+            qmp_socket_path,
+            serial_socket_path,
+            socket_mode,
             shared_folders: Vec::new(),
             network_mode: "user".to_string(),
             audio_enabled: false,
+        }
+    }
+
+    pub fn qmp_connect_addr(&self) -> String {
+        if self.socket_mode == "unix" {
+            self.qmp_socket_path
+                .clone()
+                .unwrap_or_else(|| format!("{}.sock", self.name))
+        } else {
+            format!("127.0.0.1:{}", self.qmp_port)
+        }
+    }
+
+    pub fn serial_connect_addr(&self) -> String {
+        if self.socket_mode == "unix" {
+            self.serial_socket_path
+                .clone()
+                .unwrap_or_else(|| format!("{}.serial.sock", self.name))
+        } else {
+            format!("127.0.0.1:{}", self.serial_port)
         }
     }
 }
@@ -182,14 +269,19 @@ impl VmManager {
         let pid = child.id();
         tracing::info!(name = %config.name, pid = ?pid, "QEMU process started");
 
-        // Wait for sockets to appear
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        // Wait for QEMU to start listening
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
 
         // Connect QMP
-        let qmp = match qmp::QmpClient::connect(&config.qmp_socket).await {
+        let qmp_addr = config.qmp_connect_addr();
+        let qmp = match qmp::QmpClient::connect(&qmp_addr).await {
             Ok(mut client) => {
                 let _ = client.negotiate().await;
-                tracing::info!("QMP connected for VM '{}'", config.name);
+                tracing::info!(
+                    "QMP connected for VM '{}' on port {}",
+                    config.name,
+                    config.qmp_port
+                );
                 Some(client)
             }
             Err(e) => {
@@ -199,9 +291,14 @@ impl VmManager {
         };
 
         // Connect serial
-        let serial = match serial::SerialShell::connect(&config.serial_socket).await {
+        let serial_addr = config.serial_connect_addr();
+        let serial = match serial::SerialShell::connect(&serial_addr).await {
             Ok(shell) => {
-                tracing::info!("Serial connected for VM '{}'", config.name);
+                tracing::info!(
+                    "Serial connected for VM '{}' on port {}",
+                    config.name,
+                    config.serial_port
+                );
                 Some(shell)
             }
             Err(e) => {
@@ -227,8 +324,8 @@ impl VmManager {
         instances.insert(config.name.clone(), instance);
 
         Ok(format!(
-            "VM '{}' started (PID: {:?}, VNC: {}, QMP: {})",
-            config.name, pid, config.vnc_port, config.qmp_socket
+            "VM '{}' started (PID: {:?}, VNC: {}, QMP: 127.0.0.1:{}, Serial: 127.0.0.1:{})",
+            config.name, pid, config.vnc_port, config.qmp_port, config.serial_port
         ))
     }
 
@@ -494,7 +591,8 @@ impl VmManager {
             "disk_path": instance.config.disk_path,
             "disk_size": instance.config.disk_size,
             "vnc_port": instance.config.vnc_port,
-            "qmp_socket": instance.config.qmp_socket,
+            "qmp_port": instance.config.qmp_port,
+            "serial_port": instance.config.serial_port,
             "pid": instance.pid,
             "shared_folders": instance.config.shared_folders,
             "network_mode": instance.config.network_mode,
@@ -567,7 +665,8 @@ impl VmManager {
         }
 
         if instance.qmp.is_none() {
-            match qmp::QmpClient::connect(&instance.config.qmp_socket).await {
+            let qmp_addr = instance.config.qmp_connect_addr();
+            match qmp::QmpClient::connect(&qmp_addr).await {
                 Ok(mut client) => {
                     let _ = client.negotiate().await;
                     instance.qmp = Some(client);
@@ -580,7 +679,8 @@ impl VmManager {
         }
 
         if instance.serial.is_none() {
-            match serial::SerialShell::connect(&instance.config.serial_socket).await {
+            let serial_addr = instance.config.serial_connect_addr();
+            match serial::SerialShell::connect(&serial_addr).await {
                 Ok(shell) => {
                     instance.serial = Some(shell);
                     tracing::info!("Serial reconnected for VM '{}'", name);
@@ -595,13 +695,16 @@ impl VmManager {
     }
 
     fn build_qemu_args(&self, config: &VmConfig) -> Vec<String> {
+        let accel = detect_acceleration();
+        let cpu = if accel == "kvm" { "host" } else { "max" };
+
         let mut args = vec![
             "-name".to_string(),
             config.name.clone(),
             "-machine".to_string(),
-            "q35,accel=kvm".to_string(),
+            format!("q35,accel={}", accel),
             "-cpu".to_string(),
-            "host".to_string(),
+            cpu.to_string(),
             "-smp".to_string(),
             config.cpu_cores.to_string(),
             "-m".to_string(),
@@ -614,7 +717,7 @@ impl VmManager {
             format!("file={},format=qcow2,if=virtio", config.disk_path),
         ]);
 
-        // ISO (for installation)
+        // ISO
         if let Some(ref iso) = config.iso_path {
             args.extend([
                 "-cdrom".to_string(),
@@ -624,57 +727,100 @@ impl VmManager {
             ]);
         }
 
-        // VNC display (headless with VNC)
+        // VNC
         let vnc_display = format!(":{}", config.vnc_port - 5900);
         args.extend([
             "-vnc".to_string(),
-            vnc_display.clone(),
+            vnc_display,
             "-display".to_string(),
             "none".to_string(),
         ]);
 
-        // QMP control socket
-        args.extend([
-            "-qmp".to_string(),
-            format!("unix:{},server,nowait", config.qmp_socket),
-        ]);
+        // QMP: Unix socket or TCP based on config
+        if config.socket_mode == "unix" {
+            let qmp_path = config.qmp_socket_path.as_deref().unwrap_or("/tmp/qmp.sock");
+            args.extend([
+                "-qmp".to_string(),
+                format!("unix:{},server,nowait", qmp_path),
+            ]);
+        } else {
+            args.extend([
+                "-qmp".to_string(),
+                format!("tcp:127.0.0.1:{},server,nowait", config.qmp_port),
+            ]);
+        }
 
-        // Serial for shell interaction
+        // Serial: Unix socket or TCP based on config
+        if config.socket_mode == "unix" {
+            let serial_path = config
+                .serial_socket_path
+                .as_deref()
+                .unwrap_or("/tmp/serial.sock");
+            args.extend([
+                "-chardev".to_string(),
+                format!("socket,id=serial0,path={},server=on,wait=off", serial_path),
+                "-serial".to_string(),
+                "chardev:serial0".to_string(),
+            ]);
+        } else {
+            args.extend([
+                "-chardev".to_string(),
+                format!(
+                    "socket,id=serial0,host=127.0.0.1,port={},server=on,wait=off",
+                    config.serial_port
+                ),
+                "-serial".to_string(),
+                "chardev:serial0".to_string(),
+            ]);
+        }
+
+        // Serial via TCP (cross-platform)
         args.extend([
             "-chardev".to_string(),
             format!(
-                "socket,id=serial0,path={},server=on,wait=off",
-                config.serial_socket
+                "socket,id=serial0,host=127.0.0.1,port={},server=on,wait=off",
+                config.serial_port
             ),
             "-serial".to_string(),
             "chardev:serial0".to_string(),
         ]);
 
-        // 9p shared folders
-        for folder in &config.shared_folders {
-            let security = if folder.readonly {
-                "passthrough,readonly"
-            } else {
-                "passthrough"
-            };
+        // Shared folders: 9p on Linux, SMB on Windows/macOS
+        if cfg!(target_os = "linux") {
+            for folder in &config.shared_folders {
+                let security = if folder.readonly {
+                    "passthrough,readonly"
+                } else {
+                    "passthrough"
+                };
+                args.extend([
+                    "-virtfs".to_string(),
+                    format!(
+                        "local,path={},mount_tag={},security_model={}",
+                        folder.host_path, folder.mount_tag, security
+                    ),
+                ]);
+            }
+            // Secrets 9p mount
+            let secrets_dir = format!("{}/vm/{}/secrets", self.data_dir, config.name);
             args.extend([
                 "-virtfs".to_string(),
                 format!(
-                    "local,path={},mount_tag={},security_model={}",
-                    folder.host_path, folder.mount_tag, security
+                    "local,path={},mount_tag=praxis-secrets,security_model=none,readonly",
+                    secrets_dir
                 ),
             ]);
+        } else {
+            // On Windows/macOS: use QEMU's built-in SMB server for shared folders
+            // -smb <dir> exposes the directory as //10.0.2.4/qemu
+            if !config.shared_folders.is_empty() {
+                // Use the first shared folder as the SMB share
+                args.extend([
+                    "-smb".to_string(),
+                    config.shared_folders[0].host_path.clone(),
+                ]);
+            }
         }
-
-        // Secrets 9p mount (always present, invisible to LLM)
-        let secrets_dir = format!("{}/vm/{}/secrets", self.data_dir, config.name);
-        args.extend([
-            "-virtfs".to_string(),
-            format!(
-                "local,path={},mount_tag=praxis-secrets,security_model=none,readonly",
-                secrets_dir
-            ),
-        ]);
 
         // Network
         match config.network_mode.as_str() {
@@ -690,7 +836,6 @@ impl VmManager {
                 ]);
             }
             _ => {
-                // NAT with SSH forwarding
                 args.extend([
                     "-device".to_string(),
                     "virtio-net,netdev=net0".to_string(),
@@ -700,26 +845,21 @@ impl VmManager {
             }
         }
 
-        // Audio (optional)
+        // Audio: platform-aware
         if config.audio_enabled {
-            args.extend([
-                "-audiodev".to_string(),
-                "pa,id=audio0".to_string(),
-                "-device".to_string(),
-                "AC97,audiodev=audio0".to_string(),
-            ]);
+            if cfg!(target_os = "linux") {
+                args.extend(["-audiodev".to_string(), "pa,id=audio0".to_string()]);
+            } else if cfg!(target_os = "windows") {
+                args.extend(["-audiodev".to_string(), "dsound,id=audio0".to_string()]);
+            } else {
+                args.extend(["-audiodev".to_string(), "sdl,id=audio0".to_string()]);
+            }
+            args.extend(["-device".to_string(), "AC97,audiodev=audio0".to_string()]);
         }
 
-        // UEFI firmware (try standard paths)
-        for firmware_path in &[
-            "/usr/share/OVMF/OVMF_CODE.fd",
-            "/usr/share/edk2/x64/OVMF_CODE.4m.fd",
-            "/usr/share/qemu/OVMF_CODE.fd",
-        ] {
-            if std::path::Path::new(firmware_path).exists() {
-                args.extend(["-bios".to_string(), firmware_path.to_string()]);
-                break;
-            }
+        // UEFI firmware (OS-specific paths)
+        if let Some(fw) = find_ovmf_firmware() {
+            args.extend(["-bios".to_string(), fw]);
         }
 
         args

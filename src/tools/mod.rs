@@ -1,5 +1,6 @@
 pub mod agent_control;
 pub mod context_tools;
+pub mod discord_interactive;
 pub mod discord_send_embed;
 pub mod discord_send_message;
 pub mod discord_upload;
