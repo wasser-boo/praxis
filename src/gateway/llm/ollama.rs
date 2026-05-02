@@ -30,6 +30,20 @@ impl LLMProvider for OllamaProvider {
                     "role": m.role,
                     "content": m.content.as_deref().unwrap_or("")
                 });
+                // Handle content_parts (images etc.)
+                if let Some(ref parts) = m.content_parts {
+                    let mut images: Vec<String> = Vec::new();
+                    for p in parts {
+                        if let super::provider::ContentPart::ImageUrl { image_url } = p {
+                            if let Some(b64) = image_url.url.strip_prefix("data:").and_then(|s| s.find(",").map(|i| &s[i+1..])) {
+                                images.push(b64.to_string());
+                            }
+                        }
+                    }
+                    if !images.is_empty() {
+                        msg["images"] = serde_json::json!(images);
+                    }
+                }
                 // Include tool calls in assistant messages
                 if let Some(ref tool_calls) = m.tool_calls {
                     let ollama_calls: Vec<serde_json::Value> = tool_calls.iter().map(|tc| {
@@ -41,6 +55,9 @@ impl LLMProvider for OllamaProvider {
                         })
                     }).collect();
                     msg["tool_calls"] = serde_json::json!(ollama_calls);
+                }
+                if let Some(ref tcid) = m.tool_call_id {
+                    msg["tool_call_id"] = serde_json::json!(tcid);
                 }
                 msg
             })

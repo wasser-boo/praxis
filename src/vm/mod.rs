@@ -642,8 +642,10 @@ impl VmManager {
         {
             // Send via QMP input-send-event
             if let Some(ref mut qmp) = instance.qmp {
-                let (keycode, down, up) = Self::keys_to_qmp(keys)?;
-                qmp.send_key_event(&keycode, down, up).await?;
+                let key_events = Self::keys_to_qmp(keys)?;
+                for (keycode, down) in key_events {
+                    qmp.send_key_event(keycode, down).await?;
+                }
                 return Ok(format!("Sent special key: {}", keys));
             }
             anyhow::bail!("QMP not connected for VM '{}'", name);
@@ -1098,48 +1100,149 @@ impl VmManager {
         args
     }
 
-    fn keys_to_qmp(key: &str) -> anyhow::Result<(String, bool, bool)> {
-        let keycode = match key {
-            "enter" | "return" => "ret",
-            "esc" | "escape" => "esc",
-            "tab" => "tab",
-            "backspace" => "backspace",
-            "space" => "spc",
-            "arrow_up" | "up" => "up",
-            "arrow_down" | "down" => "down",
-            "arrow_left" | "left" => "left",
-            "arrow_right" | "right" => "right",
-            "pageup" => "pgup",
-            "pagedown" => "pgdn",
-            "home" => "home",
-            "end" => "end",
-            "insert" => "insert",
-            "delete" => "delete",
-            "f1" => "f1",
-            "f2" => "f2",
-            "f3" => "f3",
-            "f4" => "f4",
-            "f5" => "f5",
-            "f6" => "f6",
-            "f7" => "f7",
-            "f8" => "f8",
-            "f9" => "f9",
-            "f10" => "f10",
-            "f11" => "f11",
-            "f12" => "f12",
-            "ctrl+c" => "ctrl-c",
-            "ctrl+z" => "ctrl-z",
-            "ctrl+d" => "ctrl-d",
-            "ctrl+l" => "ctrl-l",
-            "ctrl+a" => "ctrl-a",
-            "ctrl+e" => "ctrl-e",
-            "ctrl+x" => "ctrl-x",
-            "ctrl+v" => "ctrl-v",
-            "ctrl+w" => "ctrl-w",
-            "alt+f4" => "alt-f4",
-            "alt+tab" => "alt-tab",
+    fn keys_to_qmp(key: &str) -> anyhow::Result<Vec<(u32, bool)>> {
+        // Linux input-event-codes.h keycodes
+        const KEY_ESC: u32 = 1;
+        const KEY_1: u32 = 2;
+        const KEY_MINUS: u32 = 12;
+        const KEY_BACKSPACE: u32 = 14;
+        const KEY_TAB: u32 = 15;
+        const KEY_Q: u32 = 16;
+        const KEY_ENTER: u32 = 28;
+        const KEY_LEFTCTRL: u32 = 29;
+        const KEY_A: u32 = 30;
+        const KEY_C: u32 = 46;
+        const KEY_D: u32 = 32;
+        const KEY_E: u32 = 18;
+        const KEY_L: u32 = 38;
+        const KEY_V: u32 = 47;
+        const KEY_W: u32 = 17;
+        const KEY_X: u32 = 45;
+        const KEY_Z: u32 = 44;
+        const KEY_SPACE: u32 = 57;
+        const KEY_F1: u32 = 59;
+        const KEY_F2: u32 = 60;
+        const KEY_F3: u32 = 61;
+        const KEY_F4: u32 = 62;
+        const KEY_F5: u32 = 63;
+        const KEY_F6: u32 = 64;
+        const KEY_F7: u32 = 65;
+        const KEY_F8: u32 = 66;
+        const KEY_F9: u32 = 67;
+        const KEY_F10: u32 = 68;
+        const KEY_F11: u32 = 87;
+        const KEY_F12: u32 = 88;
+        const KEY_LEFTALT: u32 = 56;
+        const KEY_HOME: u32 = 102;
+        const KEY_UP: u32 = 103;
+        const KEY_PAGEUP: u32 = 104;
+        const KEY_LEFT: u32 = 105;
+        const KEY_RIGHT: u32 = 106;
+        const KEY_END: u32 = 107;
+        const KEY_DOWN: u32 = 108;
+        const KEY_PAGEDOWN: u32 = 109;
+        const KEY_INSERT: u32 = 110;
+        const KEY_DELETE: u32 = 111;
+
+        // Helper: send key down then up
+        let press = |k: u32| vec![(k, true), (k, false)];
+
+        match key {
+            "enter" | "return" => Ok(press(KEY_ENTER)),
+            "esc" | "escape" => Ok(press(KEY_ESC)),
+            "tab" => Ok(press(KEY_TAB)),
+            "backspace" => Ok(press(KEY_BACKSPACE)),
+            "space" => Ok(press(KEY_SPACE)),
+            "arrow_up" | "up" => Ok(press(KEY_UP)),
+            "arrow_down" | "down" => Ok(press(KEY_DOWN)),
+            "arrow_left" | "left" => Ok(press(KEY_LEFT)),
+            "arrow_right" | "right" => Ok(press(KEY_RIGHT)),
+            "pageup" => Ok(press(KEY_PAGEUP)),
+            "pagedown" => Ok(press(KEY_PAGEDOWN)),
+            "home" => Ok(press(KEY_HOME)),
+            "end" => Ok(press(KEY_END)),
+            "insert" => Ok(press(KEY_INSERT)),
+            "delete" => Ok(press(KEY_DELETE)),
+            "f1" => Ok(press(KEY_F1)),
+            "f2" => Ok(press(KEY_F2)),
+            "f3" => Ok(press(KEY_F3)),
+            "f4" => Ok(press(KEY_F4)),
+            "f5" => Ok(press(KEY_F5)),
+            "f6" => Ok(press(KEY_F6)),
+            "f7" => Ok(press(KEY_F7)),
+            "f8" => Ok(press(KEY_F8)),
+            "f9" => Ok(press(KEY_F9)),
+            "f10" => Ok(press(KEY_F10)),
+            "f11" => Ok(press(KEY_F11)),
+            "f12" => Ok(press(KEY_F12)),
+            // Modifier combos: modifier down, key down, key up, modifier up
+            "ctrl+c" => Ok(vec![
+                (KEY_LEFTCTRL, true),
+                (KEY_C, true),
+                (KEY_C, false),
+                (KEY_LEFTCTRL, false),
+            ]),
+            "ctrl+z" => Ok(vec![
+                (KEY_LEFTCTRL, true),
+                (KEY_Z, true),
+                (KEY_Z, false),
+                (KEY_LEFTCTRL, false),
+            ]),
+            "ctrl+d" => Ok(vec![
+                (KEY_LEFTCTRL, true),
+                (KEY_D, true),
+                (KEY_D, false),
+                (KEY_LEFTCTRL, false),
+            ]),
+            "ctrl+l" => Ok(vec![
+                (KEY_LEFTCTRL, true),
+                (KEY_L, true),
+                (KEY_L, false),
+                (KEY_LEFTCTRL, false),
+            ]),
+            "ctrl+a" => Ok(vec![
+                (KEY_LEFTCTRL, true),
+                (KEY_A, true),
+                (KEY_A, false),
+                (KEY_LEFTCTRL, false),
+            ]),
+            "ctrl+e" => Ok(vec![
+                (KEY_LEFTCTRL, true),
+                (KEY_E, true),
+                (KEY_E, false),
+                (KEY_LEFTCTRL, false),
+            ]),
+            "ctrl+x" => Ok(vec![
+                (KEY_LEFTCTRL, true),
+                (KEY_X, true),
+                (KEY_X, false),
+                (KEY_LEFTCTRL, false),
+            ]),
+            "ctrl+v" => Ok(vec![
+                (KEY_LEFTCTRL, true),
+                (KEY_V, true),
+                (KEY_V, false),
+                (KEY_LEFTCTRL, false),
+            ]),
+            "ctrl+w" => Ok(vec![
+                (KEY_LEFTCTRL, true),
+                (KEY_W, true),
+                (KEY_W, false),
+                (KEY_LEFTCTRL, false),
+            ]),
+            "alt+f4" => Ok(vec![
+                (KEY_LEFTALT, true),
+                (KEY_F4, true),
+                (KEY_F4, false),
+                (KEY_LEFTALT, false),
+            ]),
+            "alt+tab" => Ok(vec![
+                (KEY_LEFTALT, true),
+                (KEY_TAB, true),
+                (KEY_TAB, false),
+                (KEY_LEFTALT, false),
+            ]),
             _ => anyhow::bail!("Unknown key: {}", key),
-        };
-        Ok((keycode.to_string(), true, true))
+        }
     }
 }

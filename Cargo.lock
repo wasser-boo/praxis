@@ -3551,6 +3551,7 @@ dependencies = [
  "lazy_static",
  "minimp3",
  "once_cell",
+ "png",
  "rand 0.8.6",
  "regex",
  "reqwest",

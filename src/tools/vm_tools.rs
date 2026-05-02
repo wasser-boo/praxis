@@ -4,6 +4,81 @@ use tokio::sync::OnceCell;
 
 static VM_MANAGER: OnceCell<Arc<VmManager>> = OnceCell::const_new();
 
+/// Convert raw PPM (P6 binary) bytes to PNG bytes
+fn ppm_to_png(ppm: &[u8]) -> anyhow::Result<Vec<u8>> {
+    // Parse PPM header: P6\n<width> <height>\n<maxval>\n<pixels>
+    if ppm.len() < 3 || ppm[0] != b'P' || ppm[1] != b'6' {
+        anyhow::bail!("Not a P6 PPM file");
+    }
+    let mut pos = 2; // skip "P6"
+                     // Skip whitespace and comments
+    loop {
+        while pos < ppm.len()
+            && (ppm[pos] == b'\n' || ppm[pos] == b'\r' || ppm[pos] == b' ' || ppm[pos] == b'\t')
+        {
+            pos += 1;
+        }
+        if pos < ppm.len() && ppm[pos] == b'#' {
+            while pos < ppm.len() && ppm[pos] != b'\n' {
+                pos += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    // Parse width
+    let width_start = pos;
+    while pos < ppm.len() && ppm[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let width: u32 = std::str::from_utf8(&ppm[width_start..pos])?.parse()?;
+    // Skip whitespace
+    while pos < ppm.len() && (ppm[pos] == b' ' || ppm[pos] == b'\t') {
+        pos += 1;
+    }
+    // Parse height
+    let height_start = pos;
+    while pos < ppm.len() && ppm[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let height: u32 = std::str::from_utf8(&ppm[height_start..pos])?.parse()?;
+    // Skip whitespace
+    while pos < ppm.len()
+        && (ppm[pos] == b' ' || ppm[pos] == b'\t' || ppm[pos] == b'\n' || ppm[pos] == b'\r')
+    {
+        pos += 1;
+    }
+    // Parse maxval
+    let maxval_start = pos;
+    while pos < ppm.len() && ppm[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let _maxval: u32 = std::str::from_utf8(&ppm[maxval_start..pos])?.parse()?;
+    // Skip single whitespace after maxval
+    if pos < ppm.len() && (ppm[pos] == b'\n' || ppm[pos] == b'\r' || ppm[pos] == b' ') {
+        pos += 1;
+    }
+    let pixel_data = &ppm[pos..];
+    let expected = (width as usize) * (height as usize) * 3;
+    if pixel_data.len() < expected {
+        anyhow::bail!(
+            "PPM pixel data too short: got {}, expected {}",
+            pixel_data.len(),
+            expected
+        );
+    }
+    // Encode as PNG
+    let mut buf = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(std::io::Cursor::new(&mut buf), width, height);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&pixel_data[..expected])?;
+    }
+    Ok(buf)
+}
+
 pub async fn get_vm_manager() -> Option<Arc<VmManager>> {
     VM_MANAGER.get().cloned()
 }
@@ -291,15 +366,11 @@ pub async fn save_screenshot_to_disk(vm_name: &str, data_dir: &str) -> Option<St
     if let Some(b64) = screenshot_data.strip_prefix("data:image/ppm;base64,") {
         use base64::Engine;
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
-            // Convert PPM to PNG
-            match image::load_from_memory_with_format(&bytes, image::ImageFormat::Pnm) {
-                Ok(img) => {
-                    let mut png_buf = Vec::new();
-                    let cursor = std::io::Cursor::new(&mut png_buf);
-                    if img.write_to(cursor, image::ImageFormat::Png).is_ok() {
-                        let _ = std::fs::write(&filename, &png_buf);
-                        return Some(filename);
-                    }
+            // Convert PPM to PNG using direct parser (avoids image crate PPM issues)
+            match ppm_to_png(&bytes) {
+                Ok(png_bytes) => {
+                    let _ = std::fs::write(&filename, &png_bytes);
+                    return Some(filename);
                 }
                 Err(e) => {
                     tracing::warn!("PPM to PNG conversion failed: {}, falling back to PPM", e);
@@ -345,7 +416,7 @@ async fn handle_vm_look_screenshot(_manager: &VmManager, args: &serde_json::Valu
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".ppm"))
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".png"))
         .map(|e| e.path().to_string_lossy().to_string())
         .collect();
 
@@ -403,7 +474,7 @@ fn cleanup_screenshot_limit_dir(ss_dir: &str) {
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".ppm"))
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".png"))
         .filter_map(|e| {
             let time = e.metadata().and_then(|m| m.modified()).ok()?;
             Some((e.path(), time))

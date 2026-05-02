@@ -75,10 +75,52 @@ pub fn build_anthropic_messages(messages: &[ChatMessage]) -> (String, Vec<serde_
             continue;
         }
         if m.role == "tool" {
+            let content_value = if let Some(ref parts) = m.content_parts {
+                let mut arr: Vec<serde_json::Value> = Vec::new();
+                if let Some(ref text) = m.content {
+                    if !text.is_empty() {
+                        arr.push(serde_json::json!({"type": "text", "text": text}));
+                    }
+                }
+                for p in parts {
+                    match p {
+                        ContentPart::Text { text } => {
+                            arr.push(serde_json::json!({"type": "text", "text": text}))
+                        }
+                        ContentPart::ImageUrl { image_url } => {
+                            // Anthropic uses source blocks for images
+                            if let Some(base64_data) = image_url
+                                .url
+                                .strip_prefix("data:")
+                                .and_then(|s| s.find(",").map(|i| &s[i + 1..]))
+                            {
+                                let media_type = image_url
+                                    .url
+                                    .split(';')
+                                    .next()
+                                    .unwrap_or("image/png")
+                                    .strip_prefix("data:")
+                                    .unwrap_or("image/png");
+                                arr.push(serde_json::json!({
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": base64_data
+                                    }
+                                }));
+                            }
+                        }
+                    }
+                }
+                serde_json::json!(arr)
+            } else {
+                serde_json::json!(m.content.as_deref().unwrap_or(""))
+            };
             let tool_result_content = serde_json::json!([{
                 "type": "tool_result",
                 "tool_use_id": m.tool_call_id.as_deref().unwrap_or(""),
-                "content": m.content.as_deref().unwrap_or("")
+                "content": content_value
             }]);
             out.push(serde_json::json!({ "role": "user", "content": tool_result_content }));
             continue;
@@ -105,10 +147,50 @@ pub fn build_anthropic_messages(messages: &[ChatMessage]) -> (String, Vec<serde_
                 continue;
             }
         }
-        out.push(serde_json::json!({
-            "role": m.role,
-            "content": m.content.as_deref().unwrap_or("")
-        }));
+        if let Some(ref parts) = m.content_parts {
+            let mut arr: Vec<serde_json::Value> = Vec::new();
+            if let Some(ref text) = m.content {
+                if !text.is_empty() {
+                    arr.push(serde_json::json!({"type": "text", "text": text}));
+                }
+            }
+            for p in parts {
+                match p {
+                    ContentPart::Text { text } => {
+                        arr.push(serde_json::json!({"type": "text", "text": text}))
+                    }
+                    ContentPart::ImageUrl { image_url } => {
+                        if let Some(base64_data) = image_url
+                            .url
+                            .strip_prefix("data:")
+                            .and_then(|s| s.find(",").map(|i| &s[i + 1..]))
+                        {
+                            let media_type = image_url
+                                .url
+                                .split(';')
+                                .next()
+                                .unwrap_or("image/png")
+                                .strip_prefix("data:")
+                                .unwrap_or("image/png");
+                            arr.push(serde_json::json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": base64_data
+                                }
+                            }));
+                        }
+                    }
+                }
+            }
+            out.push(serde_json::json!({ "role": m.role, "content": arr }));
+        } else {
+            out.push(serde_json::json!({
+                "role": m.role,
+                "content": m.content.as_deref().unwrap_or("")
+            }));
+        }
     }
 
     (system_prompt, out)

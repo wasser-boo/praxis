@@ -25,9 +25,49 @@ impl LLMProvider for OpenAIProvider {
         let url = format!("{}/chat/completions", self.base_url);
 
         let model = request.model.as_deref().unwrap_or(&self.model);
+
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(|m| {
+                let mut msg = serde_json::json!({ "role": m.role });
+                if let Some(ref parts) = m.content_parts {
+                    let mut arr: Vec<serde_json::Value> = Vec::new();
+                    if let Some(ref text) = m.content {
+                        if !text.is_empty() {
+                            arr.push(serde_json::json!({ "type": "text", "text": text }));
+                        }
+                    }
+                    for p in parts {
+                        match p {
+                            super::provider::ContentPart::Text { text } => arr.push(serde_json::json!({ "type": "text", "text": text })),
+                            super::provider::ContentPart::ImageUrl { image_url } => arr.push(serde_json::json!({ "type": "image_url", "image_url": { "url": image_url.url, "detail": image_url.detail.as_deref().unwrap_or("auto") } })),
+                        }
+                    }
+                    msg["content"] = serde_json::json!(arr);
+                } else {
+                    msg["content"] = serde_json::json!(m.content.as_deref().unwrap_or(""));
+                }
+                if let Some(ref tool_calls) = m.tool_calls {
+                    let calls: Vec<serde_json::Value> = tool_calls.iter().map(|tc| {
+                        serde_json::json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": { "name": tc.function.name, "arguments": tc.function.arguments }
+                        })
+                    }).collect();
+                    msg["tool_calls"] = serde_json::json!(calls);
+                }
+                if let Some(ref tcid) = m.tool_call_id {
+                    msg["tool_call_id"] = serde_json::json!(tcid);
+                }
+                msg
+            })
+            .collect();
+
         let body = serde_json::json!({
             "model": model,
-            "messages": request.messages,
+            "messages": messages,
             "tools": request.tools,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,

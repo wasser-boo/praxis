@@ -202,21 +202,14 @@ impl QmpClient {
         Ok(())
     }
 
-    pub async fn send_key_event(&mut self, key: &str, down: bool, up: bool) -> anyhow::Result<()> {
-        let mut keys = Vec::new();
-        if down {
-            keys.push(serde_json::json!({ "type": "qcode", "data": key }));
-        }
+    pub async fn send_key_event(&mut self, keycode: u32, down: bool) -> anyhow::Result<()> {
         self.execute(QmpCommand {
             execute: "input-send-event".to_string(),
             arguments: Some(
-                serde_json::json!({ "device": "virtio-keyboard", "head": 0, "events": keys }),
+                serde_json::json!({ "device": "virtio-keyboard", "head": 0, "events": [{ "type": "key", "data": { "key": keycode, "down": down } }] }),
             ),
         })
         .await?;
-        if up {
-            self.execute(QmpCommand { execute: "input-send-event".to_string(), arguments: Some(serde_json::json!({ "device": "virtio-keyboard", "head": 0, "events": [{ "type": "qcode", "data": key }] })) }).await?;
-        }
         Ok(())
     }
 

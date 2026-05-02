@@ -87,11 +87,32 @@ pub fn set_enabled(db: &Database, name: &str, enabled: bool) -> anyhow::Result<(
 
 pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
     let existing = load_tools(db)?;
-    if !existing.is_empty() {
+    if existing.is_empty() {
+        // Fresh install: write all defaults
+        let defaults = get_default_tools();
+        save_tools(db, &defaults)?;
         return Ok(());
     }
 
-    let defaults = vec![
+    // Existing install: add any missing default tools (preserves user customizations)
+    let mut tools = existing;
+    let defaults = get_default_tools();
+    let mut changed = false;
+    for default in &defaults {
+        if !tools.iter().any(|t| t.name == default.name) {
+            tracing::info!("Adding missing default tool: {}", default.name);
+            tools.push(default.clone());
+            changed = true;
+        }
+    }
+    if changed {
+        save_tools(db, &tools)?;
+    }
+    Ok(())
+}
+
+fn get_default_tools() -> Vec<Tool> {
+    vec![
         Tool {
             name: "execute_terminal".into(),
             description: Some("Run shell command".into()),
@@ -285,10 +306,7 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
             parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"question":{"type":"string","description":"The question to ask"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options (shown as 1️⃣, 2️⃣, etc.)"},"timeout_secs":{"type":"integer","default":300,"description":"How long to wait for response (seconds)"}},"required":["channel_id","question"]}),
             is_enabled: false,
         },
-    ];
-
-    save_tools(db, &defaults)?;
-    Ok(())
+    ]
 }
 
 /// Convert enabled tools to LLM tool definitions

@@ -25,6 +25,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 anyhow = "1"
 image = "0.25"
+png = "0.18"
 serenity = { version = "0.12", features = ["voice"] }
 axum = { version = "0.7", features = ["ws", "json"] }
 tokio-stream = "0.1"
