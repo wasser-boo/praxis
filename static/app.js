@@ -302,25 +302,61 @@ async function loadTemplates() {
         const data = await res.json();
         const list = document.getElementById('templates-list');
 
-        if (!data.templates || data.templates.length === 0) {
-            list.innerHTML = '<div class="data-item"><span class="name">No templates found</span></div>';
-            return;
-        }
+        let html = '<div class="data-item" style="margin-bottom:0.5rem"><button class="btn btn-sm btn-primary" onclick="createTemplate()">+ New Template</button></div>';
 
-        list.innerHTML = data.templates.map(t => `
-            <div class="data-item">
-                <div>
-                    <span class="name">${escapeHtml(t.name)}</span>
-                    <span class="meta">${t.is_system ? 'System' : 'User'}</span>
+        if (!data.templates || data.templates.length === 0) {
+            html += '<div class="data-item"><span class="name">No templates found</span></div>';
+        } else {
+            html += data.templates.map(t => `
+                <div class="data-item">
+                    <div>
+                        <span class="name">${escapeHtml(t.name)}</span>
+                        <span class="meta">${t.is_system ? 'System' : 'User'}</span>
+                    </div>
+                    <div class="actions">
+                        <button class="btn btn-sm btn-primary" onclick="editTemplate('${escapeHtml(t.name)}')">Edit</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteTemplate('${escapeHtml(t.name)}')">Delete</button>
+                    </div>
                 </div>
-                <div class="actions">
-                    <button class="btn btn-sm btn-primary" onclick="editTemplate('${escapeHtml(t.name)}')">Edit</button>
-                </div>
-            </div>
-        `).join('');
+            `).join('');
+        }
+        list.innerHTML = html;
     } catch (err) {
         console.error('Failed to load templates:', err);
     }
+}
+
+function createTemplate() {
+    showModal('Create Template', `
+        <div style="margin-bottom:0.5rem">
+            <label style="font-size:0.8rem;color:var(--text-secondary)">Template name:</label>
+            <input id="new-template-name" type="text" placeholder="my_template" style="width:100%;padding:0.3rem;margin-top:0.2rem">
+        </div>
+        <textarea id="template-content" class="code-editor"><poml>
+  <task>
+    <p>Your template content here</p>
+  </task>
+</poml></textarea>
+        <button class="btn btn-primary" style="margin-top:1rem" onclick="saveNewTemplate()">Create</button>
+    `);
+}
+
+async function saveNewTemplate() {
+    const name = document.getElementById('new-template-name').value.trim();
+    const content = document.getElementById('template-content').value;
+    if (!name) { alert('Name is required'); return; }
+    await apiFetch('/api/templates', {
+        method: 'POST',
+        body: JSON.stringify({ name, content })
+    });
+    closeModal();
+    loadTemplates();
+}
+
+async function deleteTemplate(name) {
+    if (!confirm(`Delete template "${name}"?`)) return;
+    await apiFetch(`/api/templates/${name}`, { method: 'DELETE' });
+    loadTemplates();
 }
 
 async function editTemplate(name) {

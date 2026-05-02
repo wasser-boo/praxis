@@ -45,6 +45,13 @@ pub struct TemplateUpdate {
     pub user_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct TemplateCreate {
+    pub name: String,
+    pub content: String,
+    pub description: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct TemplateSaveResult {
     pub success: bool,
@@ -162,8 +169,10 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/contexts/:user_id", axum::routing::put(update_context))
         .route("/messages/:user_id", axum::routing::get(get_messages))
         .route("/templates", axum::routing::get(list_templates))
+        .route("/templates", axum::routing::post(create_template))
         .route("/templates/:name", axum::routing::get(get_template))
         .route("/templates/:name", axum::routing::put(update_template))
+        .route("/templates/:name", axum::routing::delete(delete_template))
         .route("/tools", axum::routing::get(list_tools))
         .route("/tools/:name", axum::routing::put(update_tool))
         .route("/memory/:user_id", axum::routing::get(get_memory))
@@ -529,8 +538,20 @@ async fn update_template(
         } else {
             ctx.custom_data.clone()
         },
-        "user_message": "Preview message",
-        "user_prompt": "Preview message",
+        "user_message": if user_id.is_empty() {
+            "Preview message".to_string()
+        } else {
+            state.db.get_messages(&user_id, 1).ok()
+                .and_then(|msgs| msgs.first().map(|m| m.content.clone()))
+                .unwrap_or_else(|| "Preview message".to_string())
+        },
+        "user_prompt": if user_id.is_empty() {
+            "Preview message".to_string()
+        } else {
+            state.db.get_messages(&user_id, 1).ok()
+                .and_then(|msgs| msgs.first().map(|m| m.content.clone()))
+                .unwrap_or_else(|| "Preview message".to_string())
+        },
         "user_template": ctx.custom_data.get("user_template").cloned().unwrap_or(serde_json::json!("user")),
         "conversation_text": "user: Preview message",
         "tokens_used": tokens_used,
@@ -553,6 +574,43 @@ async fn update_template(
             rendered_preview: None,
         })),
     }
+}
+
+async fn create_template(
+    State(state): State<Arc<DashboardState>>,
+    Json(create): Json<TemplateCreate>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let file_path = format!("templates/{}.poml", create.name);
+    if let Some(parent) = std::path::Path::new(&file_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&file_path, &create.content) {
+        return Ok(Json(serde_json::json!({
+            "success": false,
+            "error": format!("Failed to write template file: {}", e)
+        })));
+    }
+    let _ = state.db.save_template(
+        &create.name,
+        &create.content,
+        create.description.as_deref(),
+        false,
+    );
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+async fn delete_template(
+    State(state): State<Arc<DashboardState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let conn = state.db.conn();
+    let _ = conn.execute(
+        "DELETE FROM templates WHERE name = ?1",
+        rusqlite::params![name],
+    );
+    let file_path = format!("templates/{}.poml", name);
+    let _ = std::fs::remove_file(&file_path);
+    Ok(Json(serde_json::json!({ "success": true })))
 }
 
 // ── Tools ────────────────────────────────────────────────────────────────────
