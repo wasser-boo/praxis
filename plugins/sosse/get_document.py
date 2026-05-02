@@ -29,6 +29,8 @@ def get_config():
     username = sec.get("sosse_username", "")
     password = sec.get("sosse_password", "")
     api_key = sec.get("sosse_api_key", "")
+    if api_key == "CHANGE_ME":
+        api_key = ""
 
     if not sosse_url:
         print(json.dumps({"error": "sosse_url not set. Use set_context to configure it."}))
