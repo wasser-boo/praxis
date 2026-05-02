@@ -1,9 +1,12 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::middleware;
+use axum::response::IntoResponse;
 use axum::Json;
 use axum::Router;
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -217,6 +220,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/logo.svg", axum::routing::get(logo_svg))
         .route("/api/status", axum::routing::get(status))
         .route("/api/auth/login", axum::routing::post(login_handler))
+        .route("/api/vm/vnc/ws", axum::routing::get(vnc_ws_proxy))
         .nest_service("/static", static_service)
         .nest("/api", protected)
         .with_state(state.clone())
@@ -997,9 +1001,11 @@ async fn list_vm_status(
     let mut vms = Vec::new();
 
     if config.vm_enabled {
-        if let Some(manager) = crate::tools::vm_tools::get_vm_manager().await {
-            vms = manager.list_vms().await;
-        }
+        let manager = match crate::tools::vm_tools::get_vm_manager().await {
+            Some(m) => m,
+            None => crate::tools::vm_tools::init_vm_manager(&config.data_dir),
+        };
+        vms = manager.list_vms().await;
     }
 
     Ok(Json(serde_json::json!({
@@ -1192,6 +1198,116 @@ async fn vm_activity(
         .unwrap_or_default();
 
     Ok(Json(serde_json::json!({ "activities": activities })))
+}
+
+async fn vnc_ws_proxy(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let token = params.get("token").cloned().unwrap_or_default();
+    let vm_name = params
+        .get("vm")
+        .cloned()
+        .unwrap_or_else(|| "praxis-vm".to_string());
+
+    ws.on_upgrade(move |socket| async move {
+        if let Err(e) = handle_vnc_proxy(socket, &token, &vm_name).await {
+            tracing::warn!("VNC proxy error: {}", e);
+        }
+    })
+}
+
+async fn handle_vnc_proxy(
+    socket: axum::extract::ws::WebSocket,
+    token: &str,
+    vm_name: &str,
+) -> anyhow::Result<()> {
+    // Verify token
+    let state_secret = {
+        let config = crate::config::Config::from_env();
+        let secrets = crate::db::secrets::get_secrets();
+        secrets.gateway_api_key.unwrap_or(config.gateway_api_key)
+    };
+
+    use jsonwebtoken::{decode, DecodingKey, Validation};
+    let valid = decode::<crate::gateway::auth::Claims>(
+        token,
+        &DecodingKey::from_secret(state_secret.as_bytes()),
+        &Validation::default(),
+    )
+    .is_ok();
+
+    if !valid && token != state_secret {
+        return Err(anyhow::anyhow!("Invalid token"));
+    }
+
+    // Get VNC port from VM manager
+    let manager = crate::tools::vm_tools::get_vm_manager()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("VM manager not initialized"))?;
+
+    let vm_info = manager.get_vm_info(vm_name).await?;
+    let vnc_port = vm_info["vnc_port"]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("VM has no VNC port"))? as u16;
+
+    let vnc_addr = format!("127.0.0.1:{}", vnc_port);
+    tracing::info!("VNC proxy connecting to {}", vnc_addr);
+
+    // Connect to QEMU VNC TCP port
+    let tcp = tokio::net::TcpStream::connect(&vnc_addr).await?;
+    let (tcp_read, tcp_write) = tcp.into_split();
+
+    let (ws_sink, ws_source) = socket.split();
+
+    // TCP -> WebSocket (binary frames)
+    let tcp_to_ws = async move {
+        let mut reader = tokio::io::BufReader::new(tcp_read);
+        let mut ws_sink = ws_sink;
+        let mut buf = vec![0u8; 65536];
+        loop {
+            use tokio::io::AsyncReadExt;
+            let n = match reader.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if ws_sink
+                .send(axum::extract::ws::Message::Binary(buf[..n].to_vec()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    };
+
+    // WebSocket -> TCP (binary frames)
+    let ws_to_tcp = async move {
+        let mut writer = tokio::io::BufWriter::new(tcp_write);
+        let mut ws_source = ws_source;
+        while let Some(msg) = ws_source.next().await {
+            match msg {
+                Ok(axum::extract::ws::Message::Binary(data)) => {
+                    use tokio::io::AsyncWriteExt;
+                    if writer.write_all(&data).await.is_err() {
+                        break;
+                    }
+                    let _ = writer.flush().await;
+                }
+                Ok(axum::extract::ws::Message::Close(_)) => break,
+                Err(_) => break,
+                _ => {}
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = tcp_to_ws => {},
+        _ = ws_to_tcp => {},
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

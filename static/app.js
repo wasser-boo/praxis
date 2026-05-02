@@ -925,6 +925,9 @@ function escapeHtml(str) {
 
 // ── VM ───────────────────────────────────────────────────────────────────────
 
+let vncRfb = null;
+let vncModule = null;
+
 async function loadVM() {
     try {
         await loadVMStatus();
@@ -948,6 +951,7 @@ async function loadVMStatus() {
 
         if (vms.length === 0) {
             container.innerHTML = '<div class="data-item"><span class="name">No VMs running</span></div>';
+            disconnectVNC();
         } else {
             container.innerHTML = vms.map(vm => `
                 <div class="data-item">
@@ -960,6 +964,11 @@ async function loadVMStatus() {
                     </div>
                 </div>
             `).join('');
+
+            const runningVm = vms.find(vm => vm.status === 'running');
+            if (runningVm) {
+                connectVNC(runningVm.name);
+            }
         }
 
         // Config info
@@ -976,6 +985,70 @@ async function loadVMStatus() {
     } catch (err) {
         container.innerHTML = `<div class="data-item"><span class="name" style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`;
     }
+}
+
+async function connectVNC(vmName) {
+    const placeholder = document.getElementById('vm-vnc-placeholder');
+    const canvas = document.getElementById('vm-vnc-canvas');
+    const container = document.getElementById('vm-vnc-container');
+
+    if (!authToken) return;
+
+    try {
+        if (!vncModule) {
+            vncModule = await import('https://cdn.jsdelivr.net/npm/@novnc/novnc/lib/rfb.js');
+        }
+
+        const RFB = vncModule.default || vncModule.RFB || vncModule;
+
+        if (vncRfb) {
+            vncRfb.disconnect();
+            vncRfb = null;
+        }
+
+        const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProto}//${location.host}/api/vm/vnc/ws?token=${encodeURIComponent(authToken)}&vm=${encodeURIComponent(vmName)}`;
+
+        placeholder.textContent = 'Connecting to VNC...';
+
+        vncRfb = new RFB(canvas, wsUrl, {
+            credentials: { password: '' },
+            shared: true,
+            wsProtocols: ['binary'],
+        });
+
+        vncRfb.addEventListener('connect', () => {
+            placeholder.style.display = 'none';
+            canvas.style.display = 'block';
+            console.log('VNC connected');
+        });
+
+        vncRfb.addEventListener('disconnect', (e) => {
+            placeholder.style.display = 'block';
+            canvas.style.display = 'none';
+            placeholder.textContent = 'VNC disconnected. Click Refresh to reconnect.';
+            console.log('VNC disconnected:', e.detail?.reason || '');
+        });
+
+        vncRfb.scaleViewport = true;
+        vncRfb.resizeSession = true;
+
+    } catch (err) {
+        console.error('Failed to connect VNC:', err);
+        placeholder.textContent = 'VNC connection failed: ' + err.message;
+    }
+}
+
+function disconnectVNC() {
+    if (vncRfb) {
+        vncRfb.disconnect();
+        vncRfb = null;
+    }
+    const placeholder = document.getElementById('vm-vnc-placeholder');
+    const canvas = document.getElementById('vm-vnc-canvas');
+    if (placeholder) placeholder.style.display = 'block';
+    if (canvas) canvas.style.display = 'none';
+    if (placeholder) placeholder.textContent = 'VM not running. Click "Start VM" to begin.';
 }
 
 async function loadVMActivity() {
