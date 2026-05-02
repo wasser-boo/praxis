@@ -117,10 +117,11 @@ async fn handle_vm_keys(manager: &VmManager, args: &serde_json::Value) -> String
 
 async fn handle_vm_screenshot(manager: &VmManager, args: &serde_json::Value) -> String {
     let name = args["name"].as_str().unwrap_or("praxis-vm");
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
 
-    match manager.screenshot(name).await {
-        Ok(data_url) => format!("Screenshot captured: {}", data_url),
-        Err(e) => format!("Error taking screenshot: {}", e),
+    match save_screenshot_to_disk(name, &data_dir).await {
+        Some(path) => format!("Screenshot saved to: {}", path),
+        None => "Error: Failed to capture screenshot. Is the VM running?".to_string(),
     }
 }
 
@@ -297,6 +298,14 @@ pub async fn save_screenshot_to_disk(vm_name: &str, data_dir: &str) -> Option<St
     None
 }
 
+/// Read a PPM screenshot file and return a base64 data URL for use as image content_part
+pub fn screenshot_to_data_url(path: &str) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some(format!("data:image/ppm;base64,{}", b64))
+}
+
 async fn handle_vm_look_screenshot(_manager: &VmManager, args: &serde_json::Value) -> String {
     let name = args["name"].as_str().unwrap_or("praxis-vm");
     let index = args["index"].as_i64().map(|v| v as i32); // -1 = latest, 0 = oldest, N = specific
@@ -343,19 +352,9 @@ async fn handle_vm_look_screenshot(_manager: &VmManager, args: &serde_json::Valu
     };
 
     match file_path {
-        Some(path) => match std::fs::read(&path) {
-            Ok(data) => {
-                use base64::Engine;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                format!(
-                    "Screenshot: {}\nTotal screenshots: {}\ndata:image/ppm;base64,{}",
-                    path,
-                    files.len(),
-                    b64
-                )
-            }
-            Err(e) => format!("Error reading screenshot: {}", e),
-        },
+        Some(path) => {
+            format!("Screenshot: {}\nTotal screenshots: {}", path, files.len())
+        }
         None => "No screenshot found at that index.".to_string(),
     }
 }

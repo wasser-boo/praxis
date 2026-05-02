@@ -222,6 +222,7 @@ pub async fn run_agent_loop(
         let mut messages = vec![ChatMessage {
             role: "system".to_string(),
             content: Some(system_prompt),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: None,
         }];
@@ -234,6 +235,7 @@ pub async fn run_agent_loop(
                     "Previous conversation summary: {}",
                     ctx.settings.compaction_summary
                 )),
+                content_parts: None,
                 tool_calls: None,
                 tool_call_id: None,
             });
@@ -268,6 +270,7 @@ pub async fn run_agent_loop(
                 } else {
                     Some(msg.content.clone())
                 },
+                content_parts: None,
                 tool_calls,
                 tool_call_id: msg.tool_call_id.clone(),
             });
@@ -375,32 +378,18 @@ pub async fn run_agent_loop(
                         .and_then(|v| v.as_bool())
                         .unwrap_or(true);
                     if auto_screenshot {
-                        let screenshot_dir = ctx
-                            .custom_data
-                            .get("vm_screenshot_dir")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if let Some(screenshot) =
-                            crate::tools::vm_tools::take_screenshot_for_context("praxis-vm").await
+                        let data_dir =
+                            std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+                        if let Some(path) =
+                            crate::tools::vm_tools::save_screenshot_to_disk("praxis-vm", &data_dir)
+                                .await
                         {
-                            // Save to configurable folder if set
-                            if !screenshot_dir.is_empty() {
-                                let _ = std::fs::create_dir_all(screenshot_dir);
-                                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                                let filename =
-                                    format!("{}/{}_{}.ppm", screenshot_dir, tc.function.name, ts);
-                                // screenshot is data:image/ppm;base64,... so decode
-                                if let Some(b64) = screenshot.strip_prefix("data:image/ppm;base64,")
-                                {
-                                    use base64::Engine;
-                                    if let Ok(bytes) =
-                                        base64::engine::general_purpose::STANDARD.decode(b64)
-                                    {
-                                        let _ = std::fs::write(&filename, bytes);
-                                    }
-                                }
+                            final_result = format!("{}\n\nScreenshot saved to: {}", result, path);
+                            if ctx.custom_data.is_object() {
+                                ctx.custom_data["vm_last_screenshot"] = serde_json::json!(path);
+                            } else {
+                                ctx.custom_data = serde_json::json!({ "vm_last_screenshot": path });
                             }
-                            final_result = format!("{}\n\n[VM Screenshot: {}]", result, screenshot);
                         }
                     }
                 }
@@ -656,6 +645,7 @@ pub async fn generate_compaction_summary(
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: Some(prompt),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: None,
         }],

@@ -948,22 +948,20 @@ impl VmManager {
         ]);
 
         // CD-ROM device (always present for hot-plug support)
-        args.extend([
-            "-device".to_string(),
-            "ide-cd,drive=cd0,bus=ide.1".to_string(),
-        ]);
         if let Some(ref iso) = config.iso_path {
             args.extend([
                 "-drive".to_string(),
                 format!("file={},readonly=on,media=cdrom,if=none,id=cd0", iso),
-                "-boot".to_string(),
-                "d".to_string(),
             ]);
         } else {
             args.extend([
                 "-drive".to_string(),
                 "if=none,id=cd0,media=cdrom".to_string(),
             ]);
+        }
+        args.extend(["-device".to_string(), "ide-cd,drive=cd0".to_string()]);
+        if config.iso_path.is_some() {
+            args.extend(["-boot".to_string(), "d".to_string()]);
         }
 
         // VNC

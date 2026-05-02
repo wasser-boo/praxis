@@ -116,6 +116,7 @@ pub async fn handle_message(
     messages.push(ChatMessage {
         role: "system".to_string(),
         content: Some(system_prompt),
+        content_parts: None,
         tool_calls: None,
         tool_call_id: None,
     });
@@ -143,6 +144,7 @@ pub async fn handle_message(
             } else {
                 Some(msg.content.clone())
             },
+            content_parts: None,
             tool_calls,
             tool_call_id: msg.tool_call_id.clone(),
         });
@@ -202,6 +204,7 @@ pub async fn handle_message(
         followup_messages.push(ChatMessage {
             role: "system".to_string(),
             content: Some(build_system_prompt(state, &ctx).await),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: None,
         });
@@ -227,6 +230,7 @@ pub async fn handle_message(
                 } else {
                     Some(msg.content.clone())
                 },
+                content_parts: None,
                 tool_calls,
                 tool_call_id: msg.tool_call_id.clone(),
             });

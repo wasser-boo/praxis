@@ -383,6 +383,7 @@ mod tests {
         let msg = ChatMessage {
             role: "assistant".to_string(),
             content: Some("Let me check.".to_string()),
+            content_parts: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_123".to_string(),
                 function: FunctionCall {
@@ -405,6 +406,7 @@ mod tests {
         let msg = ChatMessage {
             role: "tool".to_string(),
             content: Some("file contents".to_string()),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: Some("call_123".to_string()),
         };

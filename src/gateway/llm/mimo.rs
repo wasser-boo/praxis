@@ -44,10 +44,26 @@ impl MiMoProvider {
             .messages
             .iter()
             .map(|m| {
-                let mut msg = serde_json::json!({
-                    "role": m.role,
-                    "content": m.content.as_deref().unwrap_or("")
-                });
+                let mut msg = serde_json::json!({ "role": m.role });
+                if let Some(ref parts) = m.content_parts {
+                    let mut arr: Vec<serde_json::Value> = Vec::new();
+                    // Add text content first if present
+                    if let Some(ref text) = m.content {
+                        if !text.is_empty() {
+                            arr.push(serde_json::json!({ "type": "text", "text": text }));
+                        }
+                    }
+                    // Add content parts (images etc.)
+                    for p in parts {
+                        match p {
+                            super::provider::ContentPart::Text { text } => arr.push(serde_json::json!({ "type": "text", "text": text })),
+                            super::provider::ContentPart::ImageUrl { image_url } => arr.push(serde_json::json!({ "type": "image_url", "image_url": { "url": image_url.url, "detail": image_url.detail.as_deref().unwrap_or("auto") } })),
+                        }
+                    }
+                    msg["content"] = serde_json::json!(arr);
+                } else {
+                    msg["content"] = serde_json::json!(m.content.as_deref().unwrap_or(""));
+                }
                 if let Some(ref tool_calls) = m.tool_calls {
                     let calls: Vec<serde_json::Value> = tool_calls.iter().map(|tc| {
                     serde_json::json!({

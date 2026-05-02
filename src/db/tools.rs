@@ -194,6 +194,12 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
             parameters: serde_json::json!({"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}),
             is_enabled: true,
         },
+        Tool {
+            name: "understand_image".into(),
+            description: Some("View and understand an image. Use this to see screenshots, photos, or any visual content. Returns the image for visual analysis.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"Path to the image file (supports PPM, PNG, JPEG)"}},"required":["path"]}),
+            is_enabled: true,
+        },
         // VM Tools (only enabled when VM=true)
         Tool {
             name: "vm_start".into(),

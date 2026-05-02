@@ -166,6 +166,7 @@ impl LLMRouter {
             messages.push(provider::ChatMessage {
                 role: "assistant".to_string(),
                 content: response.content.clone(),
+                content_parts: None,
                 tool_calls: response.tool_calls.clone(),
                 tool_call_id: None,
             });
@@ -314,16 +315,30 @@ impl LLMRouter {
                     other => format!("Unknown tool: {}", other),
                 };
 
+                // Check if this was an image tool that returned content_parts
+                let image_result = if tool_call.function.name == "understand_image" {
+                    Some(crate::tools::understand_image::run(&args).await)
+                } else {
+                    None
+                };
+
+                let (final_result_str, content_parts) = if let Some(img) = image_result {
+                    (img.text, Some(img.content_parts))
+                } else {
+                    (result_str.clone(), None)
+                };
+
                 tool_call_records.push(ToolCallRecord {
                     name: tool_call.function.name.clone(),
                     arguments: tool_call.function.arguments.clone(),
-                    result: result_str.clone(),
+                    result: final_result_str.clone(),
                 });
 
                 // Add tool result to messages
                 messages.push(provider::ChatMessage {
                     role: "tool".to_string(),
-                    content: Some(result_str),
+                    content: Some(final_result_str),
+                    content_parts,
                     tool_calls: None,
                     tool_call_id: Some(tool_call.id.clone()),
                 });

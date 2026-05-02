@@ -163,19 +163,18 @@
                     </div>
                     <div id="vm-status-bar" class="data-list" style="margin-bottom:1rem"></div>
 
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
-                        <div>
-                            <h3>Desktop (VNC)</h3>
-                            <div id="vm-vnc-container" style="background:#000;border:1px solid var(--border);border-radius:8px;min-height:300px;display:flex;align-items:center;justify-content:center;position:relative">
-                                <div id="vm-vnc-placeholder" style="color:var(--text-secondary);font-size:0.9rem">VM not running. Click "Start VM" to begin.</div>
-                                <canvas id="vm-vnc-canvas" style="display:none;width:100%;max-height:400px;border-radius:6px"></canvas>
-                            </div>
+                    <div>
+                        <h3>Desktop (VNC)</h3>
+                        <div id="vm-vnc-container" style="background:#000;border:1px solid var(--border);border-radius:8px;min-height:600px;display:flex;align-items:center;justify-content:center;position:relative">
+                            <div id="vm-vnc-placeholder" style="color:var(--text-secondary);font-size:0.9rem">VM not running. Click "Start VM" to begin.</div>
+                            <canvas id="vm-vnc-canvas" style="visibility:hidden;border-radius:6px" width="1024" height="768"></canvas>
                         </div>
-                        <div>
-                            <h3>LLM Activity Log</h3>
-                            <div id="vm-activity-log" style="background:var(--bg-tertiary,#1a1a2e);border:1px solid var(--border);border-radius:8px;padding:0.75rem;min-height:300px;max-height:400px;overflow-y:auto;font-family:monospace;font-size:0.8rem;line-height:1.6">
-                                <div style="color:var(--text-secondary)">No VM activity yet.</div>
-                            </div>
+                    </div>
+
+                    <div style="margin-top:1rem">
+                        <h3>LLM Activity Log</h3>
+                        <div id="vm-activity-log" style="background:var(--bg-tertiary,#1a1a2e);border:1px solid var(--border);border-radius:8px;padding:0.75rem;min-height:200px;max-height:300px;overflow-y:auto;font-family:monospace;font-size:0.8rem;line-height:1.6">
+                            <div style="color:var(--text-secondary)">No VM activity yet.</div>
                         </div>
                     </div>
 

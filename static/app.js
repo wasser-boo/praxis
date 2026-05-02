@@ -1019,13 +1019,15 @@ async function connectVNC(vmName) {
 
         vncRfb.addEventListener('connect', () => {
             placeholder.style.display = 'none';
-            canvas.style.display = 'block';
+            canvas.style.visibility = 'visible';
+            canvas.style.width = '100%';
+            canvas.style.height = 'auto';
             console.log('VNC connected');
         });
 
         vncRfb.addEventListener('disconnect', (e) => {
             placeholder.style.display = 'block';
-            canvas.style.display = 'none';
+            canvas.style.visibility = 'hidden';
             placeholder.textContent = 'VNC disconnected. Click Refresh to reconnect.';
             console.log('VNC disconnected:', e.detail?.reason || '');
         });
