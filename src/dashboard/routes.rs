@@ -362,19 +362,37 @@ async fn get_messages(
     State(state): State<Arc<DashboardState>>,
     Path(user_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    match state.db.get_messages(&user_id, 100) {
-        Ok(messages) => {
+    let budget = 500000usize;
+    match state.db.get_messages_with_token_budget(&user_id, budget) {
+        Ok((messages, total_tokens)) => {
             let msgs: Vec<serde_json::Value> = messages
                 .iter()
                 .map(|m| {
-                    serde_json::json!({
+                    let mut val = serde_json::json!({
                         "role": m.role,
                         "content": m.content,
                         "tool_call_id": m.tool_call_id,
-                    })
+                    });
+                    if let Some(ref tool_calls) = m.tool_calls {
+                        val["tool_calls"] = serde_json::json!(tool_calls
+                            .iter()
+                            .map(|tc| {
+                                serde_json::json!({
+                                    "id": tc.id,
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                })
+                            })
+                            .collect::<Vec<_>>());
+                    }
+                    val
                 })
                 .collect();
-            Ok(Json(serde_json::json!({ "messages": msgs })))
+            Ok(Json(serde_json::json!({
+                "messages": msgs,
+                "total_tokens": total_tokens,
+                "message_count": messages.len(),
+            })))
         }
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }

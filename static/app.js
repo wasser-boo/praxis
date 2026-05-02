@@ -762,12 +762,24 @@ async function loadMessages() {
             return;
         }
 
-        list.innerHTML = data.messages.map(m => `
+        list.innerHTML = data.messages.map(m => {
+            let toolCallsHtml = '';
+            if (m.tool_calls && m.tool_calls.length > 0) {
+                toolCallsHtml = '<div class="tool-calls">' + m.tool_calls.map(tc =>
+                    `<div class="tool-call"><span class="tool-name">${escapeHtml(tc.name)}</span>: <span class="tool-args">${escapeHtml(tc.arguments)}</span></div>`
+                ).join('') + '</div>';
+            }
+            return `
             <div class="message ${m.role}">
                 <div class="role">${escapeHtml(m.role)}${m.tool_call_id ? ' (tool: ' + escapeHtml(m.tool_call_id) + ')' : ''}</div>
+                ${toolCallsHtml}
                 <div class="content">${escapeHtml(m.content || '')}</div>
-            </div>
-        `).join('');
+            </div>`;
+        }).join('');
+        const info = document.createElement('div');
+        info.className = 'data-item';
+        info.innerHTML = `<span class="name">${data.message_count} messages (~${data.total_tokens} tokens)</span>`;
+        list.prepend(info);
     } catch (err) {
         list.innerHTML = `<div class="data-item"><span class="name" style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`;
     }

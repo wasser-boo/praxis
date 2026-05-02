@@ -43,6 +43,8 @@ pub enum OutgoingMessage {
         content: String,
         channel_id: String,
     },
+    #[serde(rename = "compact")]
+    Compact { user_id: String },
     #[serde(rename = "voice_input_started")]
     VoiceInputStarted { user_id: String },
 }

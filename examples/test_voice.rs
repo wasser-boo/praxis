@@ -60,7 +60,7 @@ async fn test_tts() -> anyhow::Result<()> {
                 let path = tts::save_audio_file(&bytes, ".", "test_elevenlabs")?;
                 println!("  Saved to: {:?}", path);
 
-                let pcm = tts::audio_bytes_to_pcm(&bytes)?;
+                let (pcm, _sample_rate) = tts::audio_bytes_to_pcm(&bytes)?;
                 println!("  PCM samples: {}", pcm.len());
             }
             Err(e) => println!("  ElevenLabs failed: {}", e),
@@ -213,14 +213,16 @@ async fn test_stt() -> anyhow::Result<()> {
 
     // Test the unified transcribe_audio function
     println!("\nTesting unified transcribe_audio...");
-    match voice::transcribe_audio(
-        &wav_data,
-        "elevenlabs",
-        std::env::var("ELEVENLABS_API_KEY").ok().as_deref(),
-        None,
-    )
-    .await
-    {
+    let stt_config = voice::STTConfig {
+        engine: "elevenlabs".to_string(),
+        api_key: std::env::var("ELEVENLABS_API_KEY").ok(),
+        model_path: None,
+        elevenlabs_model: "scribe_v1".to_string(),
+        elevenlabs_language: None,
+        elevenlabs_tag_audio_events: false,
+        elevenlabs_no_verbatim: false,
+    };
+    match voice::transcribe_audio(&wav_data, &stt_config).await {
         Ok(text) => println!("  transcribe_audio result: '{}'", text),
         Err(e) => println!("  transcribe_audio failed: {}", e),
     }

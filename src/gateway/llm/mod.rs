@@ -287,32 +287,6 @@ impl LLMRouter {
                             Err(e) => format!("Error: {}", e),
                         }
                     }
-                    "web_search" => {
-                        let query = args["query"].as_str().unwrap_or("");
-                        match crate::tools::web_search::web_search(query, 5).await {
-                            Ok(results) => {
-                                if results.is_empty() {
-                                    "No results".to_string()
-                                } else {
-                                    results
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, r)| {
-                                            format!(
-                                                "{}. {}\n   {}\n   {}",
-                                                i + 1,
-                                                r.title,
-                                                r.snippet,
-                                                r.url
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n\n")
-                                }
-                            }
-                            Err(e) => format!("Error: {}", e),
-                        }
-                    }
                     "learn_fact" => {
                         let fact = args["fact"].as_str().unwrap_or("");
                         let mut memory = crate::db::memory::load_memory(db, user_id);

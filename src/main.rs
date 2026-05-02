@@ -404,7 +404,11 @@ async fn handle_plugin_action(action: &PluginAction) -> anyhow::Result<()> {
 
             let dest = plugins_path.join(&plugin.name);
             if dest.exists() {
-                anyhow::bail!("Plugin '{}' already installed at '{}'", plugin.name, dest.display());
+                anyhow::bail!(
+                    "Plugin '{}' already installed at '{}'",
+                    plugin.name,
+                    dest.display()
+                );
             }
 
             std::fs::create_dir_all(plugins_path)?;
@@ -457,7 +461,9 @@ async fn handle_plugin_action(action: &PluginAction) -> anyhow::Result<()> {
                         for row in rows {
                             let (user_id, data) = row?;
                             if let Ok(mut ctx) = serde_json::from_str::<serde_json::Value>(&data) {
-                                if let Some(obj) = ctx.get_mut("custom_data").and_then(|v| v.as_object_mut()) {
+                                if let Some(obj) =
+                                    ctx.get_mut("custom_data").and_then(|v| v.as_object_mut())
+                                {
                                     let before = obj.len();
                                     for key in &context_keys {
                                         obj.remove(key);
@@ -473,7 +479,11 @@ async fn handle_plugin_action(action: &PluginAction) -> anyhow::Result<()> {
                             }
                         }
                         if cleaned > 0 {
-                            println!("Cleaned context variables ({}) from {} user(s)", context_keys.join(", "), cleaned);
+                            println!(
+                                "Cleaned context variables ({}) from {} user(s)",
+                                context_keys.join(", "),
+                                cleaned
+                            );
                         }
                     }
                 }
@@ -501,10 +511,19 @@ async fn handle_plugin_action(action: &PluginAction) -> anyhow::Result<()> {
                 match std::fs::read_to_string(&manifest) {
                     Ok(data) => match serde_json::from_str::<praxis::plugins::Plugin>(&data) {
                         Ok(plugin) => {
-                            let status = if plugin.enabled { "enabled" } else { "disabled" };
-                            println!("  {} v{} [{}] — {} tool(s), {} secret(s)",
-                                plugin.name, plugin.version, status,
-                                plugin.tools.len(), plugin.secrets.len());
+                            let status = if plugin.enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            };
+                            println!(
+                                "  {} v{} [{}] — {} tool(s), {} secret(s)",
+                                plugin.name,
+                                plugin.version,
+                                status,
+                                plugin.tools.len(),
+                                plugin.secrets.len()
+                            );
                             found = true;
                         }
                         Err(e) => {

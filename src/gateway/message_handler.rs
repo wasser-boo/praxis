@@ -47,19 +47,63 @@ pub async fn handle_message(
                 ctx.settings.path.clone()
             };
             obj.insert("path".to_string(), serde_json::json!(effective_path));
-            obj.insert("time".to_string(), serde_json::json!(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()));
+            obj.insert(
+                "time".to_string(),
+                serde_json::json!(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+            );
 
-            let user_template = obj.get("user_template").cloned()
+            let user_template = obj
+                .get("user_template")
+                .cloned()
                 .unwrap_or_else(|| serde_json::json!("user"));
             obj.insert("user_template".to_string(), user_template);
 
             let memory = crate::db::memory::load_memory(&state.db, user_id);
-            obj.insert("memory".to_string(), serde_json::json!({
-                "facts": memory.learned_facts,
-                "topics": memory.last_topics,
-                "preferences": memory.user_preferences,
-                "variables": memory.custom_variables,
-            }));
+            obj.insert(
+                "memory".to_string(),
+                serde_json::json!({
+                    "facts": memory.learned_facts,
+                    "topics": memory.last_topics,
+                    "preferences": memory.user_preferences,
+                    "variables": memory.custom_variables,
+                }),
+            );
+
+            let token_budget = ctx.settings.history_token_limit.unwrap_or(120000);
+            let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(120000);
+            let (_all_msgs, tokens_used) = state
+                .db
+                .get_messages_with_token_budget(user_id, usize::MAX)
+                .unwrap_or((vec![], 0));
+            let message_count = state.db.count_messages(user_id).unwrap_or(0);
+            let tokens_pct = if token_budget > 0 {
+                (tokens_used as f64 / token_budget as f64 * 100.0).min(100.0)
+            } else {
+                0.0
+            };
+            let compaction_pct = if compaction_limit > 0 {
+                (tokens_used as f64 / compaction_limit as f64 * 100.0).min(100.0)
+            } else {
+                0.0
+            };
+            obj.insert("tokens_used".to_string(), serde_json::json!(tokens_used));
+            obj.insert("tokens_limit".to_string(), serde_json::json!(token_budget));
+            obj.insert(
+                "tokens_percentage".to_string(),
+                serde_json::json!(format!("{:.1}", tokens_pct)),
+            );
+            obj.insert(
+                "compaction_token_limit".to_string(),
+                serde_json::json!(compaction_limit),
+            );
+            obj.insert(
+                "compaction_percentage".to_string(),
+                serde_json::json!(format!("{:.1}", compaction_pct)),
+            );
+            obj.insert(
+                "message_count".to_string(),
+                serde_json::json!(message_count),
+            );
         }
     }
 
@@ -80,7 +124,10 @@ pub async fn handle_message(
         tool_call_id: None,
     });
 
-    let history = state.db.get_messages(user_id, 50)?;
+    let token_budget = ctx.settings.history_token_limit.unwrap_or(120000);
+    let (history, _tokens) = state
+        .db
+        .get_messages_with_token_budget(user_id, token_budget)?;
     for msg in &history {
         let tool_calls = msg.tool_calls.as_ref().map(|tcs| {
             tcs.iter()
@@ -158,7 +205,9 @@ pub async fn handle_message(
             tool_calls: None,
             tool_call_id: None,
         });
-        let history = state.db.get_messages(user_id, 50)?;
+        let (history, _tokens) = state
+            .db
+            .get_messages_with_token_budget(user_id, token_budget)?;
         for msg in &history {
             let tool_calls = msg.tool_calls.as_ref().map(|tcs| {
                 tcs.iter()
@@ -446,7 +495,8 @@ async fn execute_tool_call(
         Err(e) => return format!("Error parsing arguments: {}", e),
     };
 
-    let ctx_data = db.load_context(user_id)
+    let ctx_data = db
+        .load_context(user_id)
         .ok()
         .map(|ctx| ctx.custom_data)
         .filter(|v| !v.is_null());
@@ -517,29 +567,6 @@ async fn execute_tool_call(
                     }
                 }
                 Err(e) => format!("Error reading file: {}", e),
-            }
-        }
-        "web_search" => {
-            let query = args["query"].as_str().unwrap_or("");
-            match crate::tools::web_search::web_search(query, 5).await {
-                Ok(results) => {
-                    if results.is_empty() {
-                        "No results found".to_string()
-                    } else {
-                        let mut output = String::new();
-                        for (i, r) in results.iter().enumerate() {
-                            output.push_str(&format!(
-                                "{}. {}\n   {}\n   {}\n\n",
-                                i + 1,
-                                r.title,
-                                r.snippet,
-                                r.url
-                            ));
-                        }
-                        output
-                    }
-                }
-                Err(e) => format!("Search error: {}", e),
             }
         }
         "get_context" => match db.load_context(user_id) {
@@ -682,7 +709,15 @@ async fn execute_tool_call(
                 Err(e) => format!("Error: {}", e),
             }
         }
-        _ => match plugins.execute_tool(&tc.function.name, &args, ctx_data.as_ref(), Some(&plugin_secrets)).await {
+        _ => match plugins
+            .execute_tool(
+                &tc.function.name,
+                &args,
+                ctx_data.as_ref(),
+                Some(&plugin_secrets),
+            )
+            .await
+        {
             Ok(result) => result,
             Err(e) => format!("Unknown tool: {} ({})", tc.function.name, e),
         },

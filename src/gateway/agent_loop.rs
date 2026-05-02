@@ -78,19 +78,63 @@ pub async fn run_agent_loop(
                 ctx.settings.path.clone()
             };
             obj.insert("path".to_string(), serde_json::json!(effective_path));
-            obj.insert("time".to_string(), serde_json::json!(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()));
+            obj.insert(
+                "time".to_string(),
+                serde_json::json!(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+            );
 
-            let user_template = obj.get("user_template").cloned()
+            let user_template = obj
+                .get("user_template")
+                .cloned()
                 .unwrap_or_else(|| serde_json::json!("user"));
             obj.insert("user_template".to_string(), user_template);
 
             let memory = crate::db::memory::load_memory(&state.db, user_id);
-            obj.insert("memory".to_string(), serde_json::json!({
-                "facts": memory.learned_facts,
-                "topics": memory.last_topics,
-                "preferences": memory.user_preferences,
-                "variables": memory.custom_variables,
-            }));
+            obj.insert(
+                "memory".to_string(),
+                serde_json::json!({
+                    "facts": memory.learned_facts,
+                    "topics": memory.last_topics,
+                    "preferences": memory.user_preferences,
+                    "variables": memory.custom_variables,
+                }),
+            );
+
+            let token_budget = ctx.settings.history_token_limit.unwrap_or(120000);
+            let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(120000);
+            let (_all_msgs, tokens_used) = state
+                .db
+                .get_messages_with_token_budget(user_id, usize::MAX)
+                .unwrap_or((vec![], 0));
+            let message_count = state.db.count_messages(user_id).unwrap_or(0);
+            let tokens_pct = if token_budget > 0 {
+                (tokens_used as f64 / token_budget as f64 * 100.0).min(100.0)
+            } else {
+                0.0
+            };
+            let compaction_pct = if compaction_limit > 0 {
+                (tokens_used as f64 / compaction_limit as f64 * 100.0).min(100.0)
+            } else {
+                0.0
+            };
+            obj.insert("tokens_used".to_string(), serde_json::json!(tokens_used));
+            obj.insert("tokens_limit".to_string(), serde_json::json!(token_budget));
+            obj.insert(
+                "tokens_percentage".to_string(),
+                serde_json::json!(format!("{:.1}", tokens_pct)),
+            );
+            obj.insert(
+                "compaction_token_limit".to_string(),
+                serde_json::json!(compaction_limit),
+            );
+            obj.insert(
+                "compaction_percentage".to_string(),
+                serde_json::json!(format!("{:.1}", compaction_pct)),
+            );
+            obj.insert(
+                "message_count".to_string(),
+                serde_json::json!(message_count),
+            );
         }
     }
 
@@ -109,7 +153,8 @@ pub async fn run_agent_loop(
     }
 
     // Apply user template
-    let user_template_name = ctx.custom_data
+    let user_template_name = ctx
+        .custom_data
         .get("user_template")
         .and_then(|v| v.as_str())
         .unwrap_or("user");
@@ -119,7 +164,8 @@ pub async fn run_agent_loop(
             "user_prompt": user_message,
             "custom_data": ctx.custom_data,
         });
-        crate::gateway::poml::render(&user_template_path, &tmpl_ctx).await
+        crate::gateway::poml::render(&user_template_path, &tmpl_ctx)
+            .await
             .unwrap_or_else(|_| user_message.to_string())
     } else {
         user_message.to_string()
@@ -163,7 +209,10 @@ pub async fn run_agent_loop(
             });
         }
 
-        let history = state.db.get_messages(user_id, 50)?;
+        let token_budget = ctx.settings.history_token_limit.unwrap_or(120000);
+        let (history, _history_tokens) = state
+            .db
+            .get_messages_with_token_budget(user_id, token_budget)?;
         for msg in &history {
             // Skip tool-call messages if setting is disabled
             if !ctx.settings.history_with_toolcalls
@@ -240,7 +289,8 @@ pub async fn run_agent_loop(
 
             if let Some(ref content) = response.content {
                 if !content.trim().is_empty() {
-                    let send_first = ctx.custom_data
+                    let send_first = ctx
+                        .custom_data
                         .get("send_first_response")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(true);
@@ -394,15 +444,17 @@ pub async fn run_agent_loop(
 
         let _ = state.db.save_context(&ctx);
 
-        // Auto-compact if messages exceed threshold
-        if ctx.settings.compaction_enabled {
-            let message_count = state.db.get_messages(user_id, 200)?.len();
-            if message_count > 50 {
-                tracing::info!(user_id = %user_id, count = message_count, "Auto-compacting conversation");
-                if let Ok(summary) = generate_compaction_summary(state, user_id).await {
-                    ctx.settings.compaction_summary = summary;
-                    let _ = state.db.save_context(&ctx);
-                }
+        // Auto-compact if total history tokens exceed limit
+        let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(120000);
+        let (_all_messages, total_tokens) = state
+            .db
+            .get_messages_with_token_budget(user_id, usize::MAX)?;
+        if total_tokens > compaction_limit {
+            tracing::info!(user_id = %user_id, tokens = total_tokens, limit = compaction_limit, "Auto-compacting conversation");
+            if let Ok(summary) = generate_compaction_summary(state, user_id).await {
+                ctx.settings.compaction_enabled = true;
+                ctx.settings.compaction_summary = summary;
+                let _ = state.db.save_context(&ctx);
             }
         }
 
@@ -432,11 +484,11 @@ pub async fn run_agent_loop(
 
 /// Generate a compaction summary of the conversation using the LLM.
 /// This condenses the conversation into a short summary for context preservation.
-async fn generate_compaction_summary(
+pub async fn generate_compaction_summary(
     state: &GatewayState,
     user_id: &str,
 ) -> anyhow::Result<String> {
-    let messages = state.db.get_messages(user_id, 100)?;
+    let (messages, _tokens) = state.db.get_messages_with_token_budget(user_id, 30000)?;
 
     let conversation_text = messages
         .iter()
@@ -538,13 +590,19 @@ async fn build_system_prompt(
     }
 }
 
-async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCall, plugins: &crate::plugins::PluginRegistry) -> String {
+async fn execute_tool_call(
+    db: &crate::db::Database,
+    user_id: &str,
+    tc: &ToolCall,
+    plugins: &crate::plugins::PluginRegistry,
+) -> String {
     let args: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
         Ok(v) => v,
         Err(e) => return format!("Error parsing arguments: {}", e),
     };
 
-    let ctx_data = db.load_context(user_id)
+    let ctx_data = db
+        .load_context(user_id)
         .ok()
         .map(|ctx| ctx.custom_data)
         .filter(|v| !v.is_null());
@@ -615,29 +673,6 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
                     }
                 }
                 Err(e) => format!("Error reading file: {}", e),
-            }
-        }
-        "web_search" => {
-            let query = args["query"].as_str().unwrap_or("");
-            match crate::tools::web_search::web_search(query, 5).await {
-                Ok(results) => {
-                    if results.is_empty() {
-                        "No results found".to_string()
-                    } else {
-                        let mut output = String::new();
-                        for (i, r) in results.iter().enumerate() {
-                            output.push_str(&format!(
-                                "{}. {}\n   {}\n   {}\n\n",
-                                i + 1,
-                                r.title,
-                                r.snippet,
-                                r.url
-                            ));
-                        }
-                        output
-                    }
-                }
-                Err(e) => format!("Search error: {}", e),
             }
         }
         "get_context" => match db.load_context(user_id) {
@@ -780,7 +815,15 @@ async fn execute_tool_call(db: &crate::db::Database, user_id: &str, tc: &ToolCal
                 Err(e) => format!("Error: {}", e),
             }
         }
-        _ => match plugins.execute_tool(&tc.function.name, &args, ctx_data.as_ref(), Some(&plugin_secrets)).await {
+        _ => match plugins
+            .execute_tool(
+                &tc.function.name,
+                &args,
+                ctx_data.as_ref(),
+                Some(&plugin_secrets),
+            )
+            .await
+        {
             Ok(result) => result,
             Err(e) => format!("Unknown tool: {} ({})", tc.function.name, e),
         },
@@ -815,7 +858,6 @@ mod agent_tests {
         assert!(names.contains(&"write_file"));
         assert!(names.contains(&"edit_file"));
         assert!(names.contains(&"read_file"));
-        assert!(names.contains(&"web_search"));
     }
 
     #[test]

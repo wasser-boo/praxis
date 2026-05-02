@@ -9,7 +9,6 @@ pub mod get_context;
 pub mod rag_ingest;
 pub mod rag_query;
 pub mod vector;
-pub mod web_search;
 pub mod write_file;
 
 use serde::{Deserialize, Serialize};

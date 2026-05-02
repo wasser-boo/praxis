@@ -190,12 +190,18 @@ async fn execute_script(
         .env("PLUGIN_ARGS", &input);
 
     if let Some(ctx) = context {
-        cmd.env("PLUGIN_CONTEXT", serde_json::to_string(ctx).unwrap_or_default());
+        cmd.env(
+            "PLUGIN_CONTEXT",
+            serde_json::to_string(ctx).unwrap_or_default(),
+        );
     }
 
     if let Some(sec) = secrets {
         if !sec.is_empty() {
-            cmd.env("PLUGIN_SECRETS", serde_json::to_string(sec).unwrap_or_default());
+            cmd.env(
+                "PLUGIN_SECRETS",
+                serde_json::to_string(sec).unwrap_or_default(),
+            );
         }
     }
 
@@ -384,7 +390,9 @@ mod plugin_tests {
                 name: "tool1".to_string(),
                 description: "A tool".to_string(),
                 parameters: serde_json::json!({}),
-                handler: PluginHandler::Builtin { name: "test".to_string() },
+                handler: PluginHandler::Builtin {
+                    name: "test".to_string(),
+                },
             }],
             context: HashMap::new(),
             secrets: Vec::new(),
@@ -404,7 +412,9 @@ mod plugin_tests {
                 name: "tool1".to_string(),
                 description: "A tool".to_string(),
                 parameters: serde_json::json!({}),
-                handler: PluginHandler::Builtin { name: "test".to_string() },
+                handler: PluginHandler::Builtin {
+                    name: "test".to_string(),
+                },
             }],
             context: HashMap::new(),
             secrets: Vec::new(),

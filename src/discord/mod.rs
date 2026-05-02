@@ -17,7 +17,8 @@ const DEFAULT_GATEWAY_URL: &str = "ws://localhost:3537/ws";
 
 // ── TTS Playback Channel ─────────────────────────────────────────────────────
 // Dedicated mpsc channel for sequential TTS playback, decoupled from event loop
-static TTS_PLAYBACK_TX: OnceCell<tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>> = OnceCell::new();
+static TTS_PLAYBACK_TX: OnceCell<tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>> =
+    OnceCell::new();
 
 fn get_tts_playback_tx() -> Option<&'static tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>> {
     TTS_PLAYBACK_TX.get()
@@ -355,17 +356,23 @@ async fn play_tts_audio(user_id: String, audio_data: Vec<u8>) {
                             );
                             let wav_data =
                                 crate::voice::pcm_to_wav(&samples, original_sample_rate, 1);
-                            let duration_ms = (samples.len() as u64 * 1000) / original_sample_rate as u64;
+                            let duration_ms =
+                                (samples.len() as u64 * 1000) / original_sample_rate as u64;
                             let source = songbird::input::Input::from(wav_data);
                             {
                                 let mut call = handler.lock().await;
                                 call.play_input(source);
                             }
-                            tracing::info!("TTS audio playing in guild {} ({}ms)", guild_id, duration_ms);
+                            tracing::info!(
+                                "TTS audio playing in guild {} ({}ms)",
+                                guild_id,
+                                duration_ms
+                            );
                             // Wait for estimated duration + small buffer
                             tokio::time::sleep(tokio::time::Duration::from_millis(
                                 duration_ms + 200,
-                            )).await;
+                            ))
+                            .await;
                             tracing::info!("TTS audio finished in guild {}", guild_id);
                         }
                         Ok(_) => tracing::warn!("No audio samples"),

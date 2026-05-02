@@ -15,6 +15,8 @@ enum WsIncoming {
         #[allow(dead_code)]
         channel_id: Option<String>,
     },
+    #[serde(rename = "compact")]
+    Compact { user_id: String },
     #[serde(rename = "ping")]
     Ping,
 }
@@ -115,6 +117,31 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                             }
                         }
                     }
+                    WsIncoming::Compact { user_id } => {
+                        match compact_user_history(&state, &user_id).await {
+                            Ok(summary) => {
+                                let response = WsOutgoing::Response {
+                                    user_id,
+                                    content: format!(
+                                        "Conversation compacted. Summary: {}",
+                                        summary
+                                    ),
+                                };
+                                let _ = sender
+                                    .send(Message::Text(serde_json::to_string(&response).unwrap()))
+                                    .await;
+                            }
+                            Err(e) => {
+                                tracing::error!("Compaction error: {}", e);
+                                let err = WsOutgoing::Error {
+                                    message: format!("Compaction failed: {}", e),
+                                };
+                                let _ = sender
+                                    .send(Message::Text(serde_json::to_string(&err).unwrap()))
+                                    .await;
+                            }
+                        }
+                    }
                     WsIncoming::Ping => {
                         let pong = WsOutgoing::Pong;
                         let _ = sender
@@ -130,6 +157,15 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
             _ => {}
         }
     }
+}
+
+async fn compact_user_history(state: &GatewayState, user_id: &str) -> anyhow::Result<String> {
+    let mut ctx = state.db.load_context(user_id)?;
+    let summary = crate::gateway::agent_loop::generate_compaction_summary(state, user_id).await?;
+    ctx.settings.compaction_enabled = true;
+    ctx.settings.compaction_summary = summary.clone();
+    state.db.save_context(&ctx)?;
+    Ok(summary)
 }
 
 #[cfg(test)]

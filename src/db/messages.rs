@@ -61,6 +61,24 @@ impl Message {
     }
 }
 
+pub fn estimate_message_tokens(msg: &Message) -> usize {
+    let mut tokens = 4usize;
+    tokens += msg.role.len() / 4 + 1;
+    tokens += msg.content.len() / 4 + 1;
+    if let Some(ref tcid) = msg.tool_call_id {
+        tokens += tcid.len() / 4 + 1;
+    }
+    if let Some(ref tool_calls) = msg.tool_calls {
+        for tc in tool_calls {
+            tokens += 4;
+            tokens += tc.id.len() / 4 + 1;
+            tokens += tc.function.name.len() / 4 + 1;
+            tokens += tc.function.arguments.len() / 4 + 1;
+        }
+    }
+    tokens
+}
+
 impl Database {
     pub fn add_message(&self, user_id: &str, msg: &Message) -> anyhow::Result<i64> {
         let tool_calls_json = msg
@@ -96,6 +114,54 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(messages.into_iter().rev().collect())
+    }
+
+    pub fn get_messages_with_token_budget(
+        &self,
+        user_id: &str,
+        token_budget: usize,
+    ) -> anyhow::Result<(Vec<Message>, usize)> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT role, content, tool_call_id, tool_calls FROM messages WHERE user_id = ?1 ORDER BY id DESC",
+        )?;
+
+        let mut messages = Vec::new();
+        let mut total_tokens = 0usize;
+        let rows = stmt.query_map(rusqlite::params![user_id], |row| {
+            let tool_calls_json: Option<String> = row.get(3)?;
+            let tool_calls: Option<Vec<ToolCallData>> =
+                tool_calls_json.and_then(|json| serde_json::from_str(&json).ok());
+            Ok(Message {
+                role: row.get(0)?,
+                content: row.get(1)?,
+                tool_call_id: row.get(2)?,
+                tool_calls,
+            })
+        })?;
+
+        for row in rows {
+            let msg = row?;
+            let tokens = estimate_message_tokens(&msg);
+            if total_tokens + tokens > token_budget && !messages.is_empty() {
+                break;
+            }
+            total_tokens += tokens;
+            messages.push(msg);
+        }
+
+        messages.reverse();
+        Ok((messages, total_tokens))
+    }
+
+    pub fn count_messages(&self, user_id: &str) -> anyhow::Result<usize> {
+        let conn = self.conn();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE user_id = ?1",
+            rusqlite::params![user_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 
     pub fn clear_messages(&self, user_id: &str) -> anyhow::Result<()> {

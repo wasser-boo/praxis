@@ -33,7 +33,9 @@ pub fn create_plugin() -> Plugin {
                     },
                     "required": ["prompt"]
                 }),
-                handler: PluginHandler::Builtin { name: "image_generate".to_string() },
+                handler: PluginHandler::Builtin {
+                    name: "image_generate".to_string(),
+                },
             },
             PluginTool {
                 name: "image_analyze".to_string(),
@@ -54,7 +56,9 @@ pub fn create_plugin() -> Plugin {
                     },
                     "required": ["image_url"]
                 }),
-                handler: PluginHandler::Builtin { name: "image_analyze".to_string() },
+                handler: PluginHandler::Builtin {
+                    name: "image_analyze".to_string(),
+                },
             },
         ],
         enabled: true,

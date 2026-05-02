@@ -26,9 +26,10 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
     let secrets = crate::db::secrets::get_secrets();
     let event_tx = crate::event_channel::init();
 
-    let plugins_dir = std::env::var("PLUGINS_DIR")
-        .unwrap_or_else(|_| "./plugins".to_string());
-    let plugins = Arc::new(crate::plugins::load_all_plugins(std::path::Path::new(&plugins_dir)));
+    let plugins_dir = std::env::var("PLUGINS_DIR").unwrap_or_else(|_| "./plugins".to_string());
+    let plugins = Arc::new(crate::plugins::load_all_plugins(std::path::Path::new(
+        &plugins_dir,
+    )));
 
     let llm = Arc::new(llm::LLMRouter::new(&config, &secrets));
 

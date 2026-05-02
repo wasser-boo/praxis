@@ -104,6 +104,11 @@ pub async fn setup_commands(http: &serenity::http::Http) -> anyhow::Result<()> {
         .dm_permission(false);
     http.create_global_command(&mode_cmd).await?;
 
+    let compact_cmd = serenity::builder::CreateCommand::new("compact")
+        .description("Compact conversation history into a summary")
+        .dm_permission(true);
+    http.create_global_command(&compact_cmd).await?;
+
     tracing::info!("All discord commands registered");
     Ok(())
 }
@@ -263,6 +268,10 @@ pub fn register_commands() -> Vec<serde_json::Value> {
         serde_json::json!({
             "name": "mode",
             "description": "Toggle between chat and agent mode"
+        }),
+        serde_json::json!({
+            "name": "compact",
+            "description": "Compact conversation history into a summary"
         }),
     ]
 }

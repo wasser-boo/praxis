@@ -290,7 +290,7 @@ mod tests {
                     "tool_calls": [{
                         "id": "call_mm1",
                         "type": "function",
-                        "function": { "name": "web_search", "arguments": "{\"query\": \"rust\"}" }
+                        "function": { "name": "execute_terminal", "arguments": "{\"command\": \"ls\"}" }
                     }]
                 },
                 "finish_reason": "tool_calls"
@@ -319,7 +319,7 @@ mod tests {
 
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].id, "call_mm1");
-        assert_eq!(tool_calls[0].function.name, "web_search");
+        assert_eq!(tool_calls[0].function.name, "execute_terminal");
     }
 
     // ── Tool definition format conversion tests ───────────────────────────────

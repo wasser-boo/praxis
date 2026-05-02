@@ -456,7 +456,11 @@ impl EventHandler for DiscordHandler {
                                         match self.db.get_pairing_by_discord(&discord_user_id) {
                                             Ok(Some(pairing)) => {
                                                 match self.db.load_context(&pairing.user_id) {
-                                                    Ok(ctx) => (ctx.settings.voice_deafened, ctx.settings.voice_enabled && ctx.settings.use_stt),
+                                                    Ok(ctx) => (
+                                                        ctx.settings.voice_deafened,
+                                                        ctx.settings.voice_enabled
+                                                            && ctx.settings.use_stt,
+                                                    ),
                                                     Err(_) => (true, false),
                                                 }
                                             }
@@ -600,7 +604,8 @@ impl EventHandler for DiscordHandler {
                                                 });
                                             let stt_type = ctx.settings.voice_stt_type.clone();
 
-                                            if !ctx.settings.voice_enabled || !ctx.settings.use_stt {
+                                            if !ctx.settings.voice_enabled || !ctx.settings.use_stt
+                                            {
                                                 tracing::debug!("VOICE_PIPELINE: voice_enabled={}, use_stt={} for user {}, skipping transcription", ctx.settings.voice_enabled, ctx.settings.use_stt, user_id);
                                                 continue;
                                             }
@@ -739,7 +744,9 @@ impl EventHandler for DiscordHandler {
                                             if let Some(text) = response_text {
                                                 if !text.trim().is_empty() {
                                                     let guild = guild_id;
-                                                    if let Ok(channels) = guild.channels(&http).await {
+                                                    if let Ok(channels) =
+                                                        guild.channels(&http).await
+                                                    {
                                                         if let Some((channel_id, _)) = channels.iter()
                                                             .find(|(_, ch)| ch.kind == serenity::model::channel::ChannelType::Text)
                                                         {
@@ -877,6 +884,70 @@ impl EventHandler for DiscordHandler {
                                 ),
                             )
                             .await;
+                    }
+                }
+                "compact" => {
+                    let discord_user_id = command.user.id.to_string();
+                    let pairing = match self.db.get_pairing_by_discord(&discord_user_id) {
+                        Ok(Some(p)) => p,
+                        _ => {
+                            let _ = command
+                                .create_response(
+                                    &ctx.http,
+                                    serenity::builder::CreateInteractionResponse::Message(
+                                        serenity::builder::CreateInteractionResponseMessage::new()
+                                            .content("Please pair first with /pair"),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let _ = command
+                        .create_response(
+                            &ctx.http,
+                            serenity::builder::CreateInteractionResponse::Defer(
+                                serenity::builder::CreateInteractionResponseMessage::new()
+                                    .content("Compacting conversation..."),
+                            ),
+                        )
+                        .await;
+
+                    let compact_msg = crate::discord::ws_client::OutgoingMessage::Compact {
+                        user_id: pairing.user_id.clone(),
+                    };
+
+                    let ws = self.ws_client.lock().await;
+                    match ws.send_and_recv_until_response(compact_msg, |_| {}).await {
+                        Ok(Ok(response)) => {
+                            let _ = command
+                                .edit_response(
+                                    &ctx.http,
+                                    serenity::builder::EditInteractionResponse::default()
+                                        .content(&response),
+                                )
+                                .await;
+                        }
+                        Ok(Err(e)) => {
+                            let _ = command
+                                .edit_response(
+                                    &ctx.http,
+                                    serenity::builder::EditInteractionResponse::default()
+                                        .content(format!("Compaction failed: {}", e)),
+                                )
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::error!("Compact WS error: {}", e);
+                            let _ = command
+                                .edit_response(
+                                    &ctx.http,
+                                    serenity::builder::EditInteractionResponse::default()
+                                        .content("Failed to compact. Try again."),
+                                )
+                                .await;
+                        }
                     }
                 }
                 _ => {}

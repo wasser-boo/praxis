@@ -4,6 +4,7 @@ import os
 import sys
 import urllib.request
 import urllib.error
+import urllib.parse
 import base64
 
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
@@ -52,7 +53,7 @@ def get_access_token(client_id, client_secret):
 def api_request(endpoint, access_token, params=None):
     url = f"{SPOTIFY_API_BASE}{endpoint}"
     if params:
-        query = "&".join(f"{k}={v}" for k, v in params.items() if v is not None)
+        query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         if query:
             url = f"{url}?{query}"
 
