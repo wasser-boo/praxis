@@ -614,8 +614,9 @@ async fn build_system_prompt(
 
     context_json["custom_data"] = ctx.custom_data.clone();
 
-    let template_path = "templates/system.poml";
-    match crate::gateway::poml::render(template_path, &context_json).await {
+    let template_name = ctx.settings.system_template.as_deref().unwrap_or("system");
+    let template_path = format!("templates/{}.poml", template_name);
+    match crate::gateway::poml::render(&template_path, &context_json).await {
         Ok(rendered) => rendered,
         Err(e) => {
             tracing::warn!("Failed to render POML: {}, using fallback", e);

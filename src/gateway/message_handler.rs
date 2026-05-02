@@ -396,7 +396,8 @@ async fn handle_message_agent_loop(
 }
 
 async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Context) -> String {
-    let template_path = "templates/system.poml";
+    let template_name = ctx.settings.system_template.as_deref().unwrap_or("system");
+    let template_path = format!("templates/{}.poml", template_name);
 
     // Load skills for context
     let mut skills_registry = crate::skills::SkillRegistry::new();
@@ -451,7 +452,7 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
         "custom_data": ctx.custom_data.clone(),
     });
 
-    match crate::gateway::poml::render(template_path, &context).await {
+    match crate::gateway::poml::render(&template_path, &context).await {
         Ok(rendered) => rendered,
         Err(e) => {
             tracing::warn!("Failed to render POML template: {}, using fallback", e);

@@ -1,0 +1,79 @@
+{
+  "name": "mimo_understand",
+  "description": "Multimodal understanding (image, audio, video) using Xiaomi MiMo",
+  "version": "1.0.0",
+  "enabled": true,
+  "context": {},
+  "secrets": ["mimo_api_key"],
+  "tools": [
+    {
+      "name": "understand_image",
+      "description": "Analyze and understand an image using MiMo vision. Describe contents, read text, identify objects, answer questions about the image.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "URL of the image to analyze"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "What to analyze or ask about the image (default: describe the image)"
+          }
+        },
+        "required": ["url"]
+      },
+      "handler": {
+        "type": "script",
+        "path": "understand_image.py",
+        "interpreter": "python3"
+      }
+    },
+    {
+      "name": "understand_audio",
+      "description": "Analyze and understand audio using MiMo. Transcribe speech, identify sounds, describe music, answer questions about audio content.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "URL of the audio to analyze"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "What to analyze or ask about the audio (default: describe the content)"
+          }
+        },
+        "required": ["url"]
+      },
+      "handler": {
+        "type": "script",
+        "path": "understand_audio.py",
+        "interpreter": "python3"
+      }
+    },
+    {
+      "name": "understand_video",
+      "description": "Analyze and understand video using MiMo. Describe actions, identify objects, transcribe speech, answer questions about video content.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "URL of the video to analyze"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "What to analyze or ask about the video (default: describe the content)"
+          }
+        },
+        "required": ["url"]
+      },
+      "handler": {
+        "type": "script",
+        "path": "understand_video.py",
+        "interpreter": "python3"
+      }
+    }
+  ]
+}

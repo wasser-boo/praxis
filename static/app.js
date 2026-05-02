@@ -327,20 +327,51 @@ async function editTemplate(name) {
     const res = await apiFetch(`/api/templates/${name}`);
     const tpl = await res.json();
 
+    // Load users for dropdown
+    let userOptions = '<option value="">No user (skip preview)</option>';
+    try {
+        const ctxRes = await apiFetch('/api/contexts');
+        if (ctxRes.ok) {
+            const ctxData = await ctxRes.json();
+            const users = (ctxData.contexts || []).map(c => c.user_id).filter(Boolean);
+            userOptions += users.map(uid => `<option value="${escapeHtml(uid)}">${escapeHtml(uid)}</option>`).join('');
+        }
+    } catch (e) { /* ignore */ }
+
     showModal('Edit Template: ' + name, `
+        <div style="margin-bottom:0.5rem">
+            <label style="font-size:0.8rem;color:var(--text-secondary)">Preview as user:</label>
+            <select id="template-preview-user" style="width:100%;padding:0.3rem;margin-top:0.2rem">${userOptions}</select>
+        </div>
         <textarea id="template-content" class="code-editor">${tpl.content || ''}</textarea>
-        <button class="btn btn-primary" style="margin-top:1rem" onclick="saveTemplate('${name}')">Save</button>
+        <button class="btn btn-primary" style="margin-top:1rem" onclick="saveTemplate('${name}')">Save & Preview</button>
+        <div id="template-preview" style="margin-top:1rem;display:none"></div>
     `);
 }
 
 async function saveTemplate(name) {
     const content = document.getElementById('template-content').value;
-    await apiFetch(`/api/templates/${name}`, {
+    const userId = document.getElementById('template-preview-user')?.value || '';
+    const previewEl = document.getElementById('template-preview');
+
+    const res = await apiFetch(`/api/templates/${name}`, {
         method: 'PUT',
-        body: JSON.stringify({ content })
+        body: JSON.stringify({ content, user_id: userId })
     });
-    closeModal();
-    loadTemplates();
+    const data = await res.json();
+
+    if (previewEl) {
+        previewEl.style.display = 'block';
+        if (data.rendered_preview) {
+            previewEl.innerHTML = `<div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:0.3rem">Rendered preview:</div><pre style="background:var(--bg-tertiary,#1a1a2e);padding:0.75rem;border-radius:6px;white-space:pre-wrap;font-size:0.8rem;max-height:400px;overflow:auto">${escapeHtml(data.rendered_preview)}</pre>`;
+        } else if (data.error) {
+            previewEl.innerHTML = `<div style="color:var(--error,#f44)">${escapeHtml(data.error)}</div>`;
+        }
+    }
+
+    if (data.success) {
+        loadTemplates();
+    }
 }
 
 async function loadTools() {

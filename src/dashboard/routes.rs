@@ -42,6 +42,7 @@ pub struct MemoryInfo {
 #[derive(Deserialize)]
 pub struct TemplateUpdate {
     pub content: String,
+    pub user_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -446,22 +447,101 @@ async fn update_template(
     Path(name): Path<String>,
     Json(update): Json<TemplateUpdate>,
 ) -> Result<Json<TemplateSaveResult>, StatusCode> {
-    // Try rendering with POML
-    let context = serde_json::json!({});
-    match crate::gateway::poml::render("templates/system.poml", &context).await {
-        Ok(rendered) => {
-            // Save template to DB
-            let _ = state.db.save_template(&name, &update.content, None, false);
-
-            Ok(Json(TemplateSaveResult {
-                success: true,
-                error: None,
-                rendered_preview: Some(rendered.chars().take(500).collect()),
-            }))
-        }
-        Err(e) => Ok(Json(TemplateSaveResult {
+    // Write template to file so POML can render it
+    let file_path = format!("templates/{}.poml", name);
+    if let Some(parent) = std::path::Path::new(&file_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&file_path, &update.content) {
+        return Ok(Json(TemplateSaveResult {
             success: false,
-            error: Some(format!("{}", e)),
+            error: Some(format!("Failed to write template file: {}", e)),
+            rendered_preview: None,
+        }));
+    }
+
+    // Save to DB
+    let _ = state.db.save_template(&name, &update.content, None, false);
+
+    // Load user context for preview
+    let (user_id, ctx) = if let Some(uid) = update.user_id.filter(|s| !s.is_empty()) {
+        let ctx = state.db.load_context(&uid).unwrap_or_default();
+        (uid, ctx)
+    } else {
+        (String::new(), crate::db::contexts::Context::default())
+    };
+
+    let mut skills_registry = crate::skills::SkillRegistry::new();
+    let _ = skills_registry.load_from_dir(std::path::Path::new("skills"));
+    let memory = crate::db::memory::load_memory(&state.db, &user_id);
+
+    let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
+    let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
+    let (messages, tokens_used) = state
+        .db
+        .get_messages_with_token_budget(&user_id, usize::MAX)
+        .unwrap_or((vec![], 0));
+    let message_count = messages.len();
+    let tokens_pct = if token_budget > 0 {
+        (tokens_used as f64 / token_budget as f64 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    let compaction_pct = if compaction_limit > 0 {
+        (tokens_used as f64 / compaction_limit as f64 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+
+    let effective_path = if ctx.settings.path.is_empty() {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "/".to_string())
+    } else {
+        ctx.settings.path.clone()
+    };
+
+    let context = serde_json::json!({
+        "user_id": ctx.user_id,
+        "user_name": ctx.user_name.as_deref().unwrap_or("User"),
+        "mode": ctx.mode,
+        "turn": ctx.turn,
+        "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
+        "skills": skills_registry.to_context_array(),
+        "uptime": "0m",
+        "uptime_secs": 0,
+        "paired_users_count": 0,
+        "paired_users": [],
+        "path": effective_path,
+        "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        "memory": serde_json::json!({
+            "facts": memory.learned_facts,
+            "topics": memory.last_topics,
+            "preferences": memory.user_preferences,
+            "variables": memory.custom_variables,
+        }),
+        "custom_data": ctx.custom_data.clone(),
+        "user_message": "Preview message",
+        "user_prompt": "Preview message",
+        "user_template": ctx.custom_data.get("user_template").cloned().unwrap_or(serde_json::json!("user")),
+        "conversation_text": "user: Preview message",
+        "tokens_used": tokens_used,
+        "tokens_limit": token_budget,
+        "tokens_percentage": format!("{:.1}", tokens_pct),
+        "compaction_token_limit": compaction_limit,
+        "compaction_percentage": format!("{:.1}", compaction_pct),
+        "message_count": message_count,
+    });
+
+    match crate::gateway::poml::render(&file_path, &context).await {
+        Ok(rendered) => Ok(Json(TemplateSaveResult {
+            success: true,
+            error: None,
+            rendered_preview: Some(rendered.chars().take(2000).collect()),
+        })),
+        Err(e) => Ok(Json(TemplateSaveResult {
+            success: true,
+            error: Some(format!("Template saved but preview failed: {}", e)),
             rendered_preview: None,
         })),
     }
