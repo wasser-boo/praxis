@@ -167,6 +167,8 @@ pub struct ContextSettings {
     #[serde(default)]
     pub compaction_token_limit: Option<usize>,
     #[serde(default)]
+    pub compaction_template: Option<String>,
+    #[serde(default)]
     pub agent_name: String,
     #[serde(default)]
     pub voice_wake_words: Vec<String>,
@@ -292,6 +294,7 @@ impl Default for ContextSettings {
             compaction_summary: String::new(),
             history_token_limit: None,
             compaction_token_limit: None,
+            compaction_template: None,
             agent_name: "assistant".to_string(),
             voice_wake_words: vec!["*".to_string()],
             voice_auto_pause_enabled: false,

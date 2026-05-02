@@ -69,8 +69,8 @@ pub async fn handle_message(
                 }),
             );
 
-            let token_budget = ctx.settings.history_token_limit.unwrap_or(120000);
-            let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(120000);
+            let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
+            let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
             let (_all_msgs, tokens_used) = state
                 .db
                 .get_messages_with_token_budget(user_id, usize::MAX)
@@ -124,7 +124,7 @@ pub async fn handle_message(
         tool_call_id: None,
     });
 
-    let token_budget = ctx.settings.history_token_limit.unwrap_or(120000);
+    let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
     let (history, _tokens) = state
         .db
         .get_messages_with_token_budget(user_id, token_budget)?;

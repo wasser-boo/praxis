@@ -1,0 +1,7 @@
+<poml>
+  <task>
+    <p>Summarize the following conversation in 3-5 sentences. Capture the key topics, decisions, and any important context. Reply with only the summary.</p>
+  </task>
+
+  <p>{{conversation_text}}</p>
+</poml>

@@ -100,8 +100,8 @@ pub async fn run_agent_loop(
                 }),
             );
 
-            let token_budget = ctx.settings.history_token_limit.unwrap_or(120000);
-            let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(120000);
+            let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
+            let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
             let (_all_msgs, tokens_used) = state
                 .db
                 .get_messages_with_token_budget(user_id, usize::MAX)
@@ -209,7 +209,7 @@ pub async fn run_agent_loop(
             });
         }
 
-        let token_budget = ctx.settings.history_token_limit.unwrap_or(120000);
+        let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
         let (history, _history_tokens) = state
             .db
             .get_messages_with_token_budget(user_id, token_budget)?;
@@ -446,15 +446,33 @@ pub async fn run_agent_loop(
 
         // Auto-compact if enabled and total history tokens exceed limit
         if ctx.settings.compaction_enabled {
-            let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(120000);
+            let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
             let (_all_messages, total_tokens) = state
                 .db
                 .get_messages_with_token_budget(user_id, usize::MAX)?;
             if total_tokens > compaction_limit {
                 tracing::info!(user_id = %user_id, tokens = total_tokens, limit = compaction_limit, "Auto-compacting conversation");
-                if let Ok(summary) = generate_compaction_summary(state, user_id).await {
+                if let Ok(summary) = generate_compaction_summary(
+                    state,
+                    user_id,
+                    ctx.settings.compaction_template.as_deref(),
+                )
+                .await
+                {
                     ctx.settings.compaction_summary = summary;
                     let _ = state.db.save_context(&ctx);
+
+                    let keep_budget = ctx.settings.history_token_limit.unwrap_or(500000) / 2;
+                    if let Ok((recent, _)) = state
+                        .db
+                        .get_messages_with_token_budget(user_id, keep_budget)
+                    {
+                        let _ = state.db.clear_messages(user_id);
+                        for msg in &recent {
+                            let _ = state.db.add_message(user_id, msg);
+                        }
+                        tracing::info!(user_id = %user_id, kept = recent.len(), "Compaction: kept recent messages, deleted older ones");
+                    }
                 }
             }
         }
@@ -488,6 +506,7 @@ pub async fn run_agent_loop(
 pub async fn generate_compaction_summary(
     state: &GatewayState,
     user_id: &str,
+    compaction_template: Option<&str>,
 ) -> anyhow::Result<String> {
     let (messages, _tokens) = state.db.get_messages_with_token_budget(user_id, 30000)?;
 
@@ -497,10 +516,29 @@ pub async fn generate_compaction_summary(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let prompt = format!(
-        "Summarize this conversation in 3-5 sentences. Reply with only the summary:\n\n{}",
-        conversation_text
-    );
+    let template_name = compaction_template.unwrap_or("compaction");
+    let template_path = format!("templates/{}.poml", template_name);
+    let prompt = if std::path::Path::new(&template_path).exists() {
+        let tmpl_ctx = serde_json::json!({ "conversation_text": conversation_text });
+        crate::gateway::poml::render(&template_path, &tmpl_ctx)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Compaction template render failed: {}, using fallback", e);
+                format!(
+                    "Summarize this conversation in 3-5 sentences. Reply with only the summary:\n\n{}",
+                    conversation_text
+                )
+            })
+    } else {
+        tracing::warn!(
+            "Compaction template '{}' not found, using fallback",
+            template_path
+        );
+        format!(
+            "Summarize this conversation in 3-5 sentences. Reply with only the summary:\n\n{}",
+            conversation_text
+        )
+    };
 
     let request = ChatRequest {
         messages: vec![ChatMessage {

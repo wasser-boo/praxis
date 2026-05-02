@@ -161,7 +161,12 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
 
 async fn compact_user_history(state: &GatewayState, user_id: &str) -> anyhow::Result<String> {
     let mut ctx = state.db.load_context(user_id)?;
-    let summary = crate::gateway::agent_loop::generate_compaction_summary(state, user_id).await?;
+    let summary = crate::gateway::agent_loop::generate_compaction_summary(
+        state,
+        user_id,
+        ctx.settings.compaction_template.as_deref(),
+    )
+    .await?;
     ctx.settings.compaction_enabled = true;
     ctx.settings.compaction_summary = summary.clone();
     state.db.save_context(&ctx)?;
