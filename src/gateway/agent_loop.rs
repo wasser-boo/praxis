@@ -444,17 +444,18 @@ pub async fn run_agent_loop(
 
         let _ = state.db.save_context(&ctx);
 
-        // Auto-compact if total history tokens exceed limit
-        let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(120000);
-        let (_all_messages, total_tokens) = state
-            .db
-            .get_messages_with_token_budget(user_id, usize::MAX)?;
-        if total_tokens > compaction_limit {
-            tracing::info!(user_id = %user_id, tokens = total_tokens, limit = compaction_limit, "Auto-compacting conversation");
-            if let Ok(summary) = generate_compaction_summary(state, user_id).await {
-                ctx.settings.compaction_enabled = true;
-                ctx.settings.compaction_summary = summary;
-                let _ = state.db.save_context(&ctx);
+        // Auto-compact if enabled and total history tokens exceed limit
+        if ctx.settings.compaction_enabled {
+            let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(120000);
+            let (_all_messages, total_tokens) = state
+                .db
+                .get_messages_with_token_budget(user_id, usize::MAX)?;
+            if total_tokens > compaction_limit {
+                tracing::info!(user_id = %user_id, tokens = total_tokens, limit = compaction_limit, "Auto-compacting conversation");
+                if let Ok(summary) = generate_compaction_summary(state, user_id).await {
+                    ctx.settings.compaction_summary = summary;
+                    let _ = state.db.save_context(&ctx);
+                }
             }
         }
 
