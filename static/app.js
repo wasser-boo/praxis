@@ -996,7 +996,7 @@ async function connectVNC(vmName) {
 
     try {
         if (!vncModule) {
-            vncModule = await import('https://cdn.jsdelivr.net/npm/@novnc/novnc/lib/rfb.js');
+            vncModule = await import('/static/novnc/core/rfb.js');
         }
 
         const RFB = vncModule.default || vncModule.RFB || vncModule;
@@ -1031,7 +1031,7 @@ async function connectVNC(vmName) {
         });
 
         vncRfb.scaleViewport = true;
-        vncRfb.resizeSession = true;
+        vncRfb.resizeSession = false;
 
     } catch (err) {
         console.error('Failed to connect VNC:', err);

@@ -855,11 +855,11 @@ impl VmManager {
                 if !std::path::Path::new(path).exists() {
                     anyhow::bail!("ISO file not found: {}", path);
                 }
-                qmp.blockdev_change_medium("ide1-cd0", path).await?;
+                qmp.blockdev_change_medium("cd0", path).await?;
                 Ok(format!("CD '{}' inserted into VM '{}'", path, name))
             }
             None => {
-                qmp.eject("ide1-cd0").await?;
+                qmp.eject("cd0").await?;
                 Ok(format!("CD ejected from VM '{}'", name))
             }
         }
@@ -947,13 +947,22 @@ impl VmManager {
             format!("file={},format=qcow2,if=virtio", config.disk_path),
         ]);
 
-        // ISO
+        // CD-ROM device (always present for hot-plug support)
+        args.extend([
+            "-device".to_string(),
+            "ide-cd,drive=cd0,bus=ide.1".to_string(),
+        ]);
         if let Some(ref iso) = config.iso_path {
             args.extend([
-                "-cdrom".to_string(),
-                iso.clone(),
+                "-drive".to_string(),
+                format!("file={},readonly=on,media=cdrom,if=none,id=cd0", iso),
                 "-boot".to_string(),
                 "d".to_string(),
+            ]);
+        } else {
+            args.extend([
+                "-drive".to_string(),
+                "if=none,id=cd0,media=cdrom".to_string(),
             ]);
         }
 
