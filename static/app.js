@@ -992,8 +992,6 @@ async function connectVNC(vmName) {
     const canvas = document.getElementById('vm-vnc-canvas');
     const container = document.getElementById('vm-vnc-container');
 
-    if (!authToken) return;
-
     try {
         if (!vncModule) {
             vncModule = await import('/static/novnc/core/rfb.js');
@@ -1007,7 +1005,7 @@ async function connectVNC(vmName) {
         }
 
         const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${wsProto}//${location.host}/api/vm/vnc/ws?token=${encodeURIComponent(authToken)}&vm=${encodeURIComponent(vmName)}`;
+        const wsUrl = `${wsProto}//${location.host}/websockify`;
 
         placeholder.textContent = 'Connecting to VNC...';
 

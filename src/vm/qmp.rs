@@ -203,7 +203,9 @@ impl QmpClient {
     }
 
     pub async fn send_key_event(&mut self, keycode: &str, down: bool) -> anyhow::Result<()> {
-        let cmd = serde_json::json!({ "device": "virtio-keyboard", "head": 0, "events": [{ "type": "key", "data": { "key": { "type": "qcode", "data": keycode }, "down": down } }] });
+        // Don't specify device - let QEMU find the keyboard automatically.
+        // "virtio-keyboard" may not exist depending on QEMU config.
+        let cmd = serde_json::json!({ "head": 0, "events": [{ "type": "key", "data": { "key": { "type": "qcode", "data": keycode }, "down": down } }] });
         tracing::debug!(
             keycode = keycode,
             down = down,
@@ -220,7 +222,7 @@ impl QmpClient {
 
     pub async fn mouse_move_absolute(&mut self, x: i32, y: i32) -> anyhow::Result<()> {
         self.execute(QmpCommand { execute: "input-send-event".to_string(), arguments: Some(serde_json::json!({
-            "device": "virtio-mouse", "head": 0,
+            "head": 0,
             "events": [{ "type": "abs", "data": { "axis": "x", "value": x } }, { "type": "abs", "data": { "axis": "y", "value": y } }]
         })) }).await?;
         Ok(())
@@ -228,7 +230,7 @@ impl QmpClient {
 
     pub async fn mouse_move_relative(&mut self, dx: i32, dy: i32) -> anyhow::Result<()> {
         self.execute(QmpCommand { execute: "input-send-event".to_string(), arguments: Some(serde_json::json!({
-            "device": "virtio-mouse", "head": 0,
+            "head": 0,
             "events": [{ "type": "rel", "data": { "axis": "x", "value": dx } }, { "type": "rel", "data": { "axis": "y", "value": dy } }]
         })) }).await?;
         Ok(())
@@ -241,9 +243,13 @@ impl QmpClient {
             2 => "right",
             _ => "left",
         };
-        self.execute(QmpCommand { execute: "input-send-event".to_string(), arguments: Some(serde_json::json!({
-            "device": "virtio-mouse", "head": 0, "events": [{ "type": "btn", "data": { "button": btn, "down": down } }]
-        })) }).await?;
+        self.execute(QmpCommand {
+            execute: "input-send-event".to_string(),
+            arguments: Some(serde_json::json!({
+                "head": 0, "events": [{ "type": "btn", "data": { "button": btn, "down": down } }]
+            })),
+        })
+        .await?;
         Ok(())
     }
 
@@ -257,9 +263,7 @@ impl QmpClient {
         }
         self.execute(QmpCommand {
             execute: "input-send-event".to_string(),
-            arguments: Some(
-                serde_json::json!({ "device": "virtio-mouse", "head": 0, "events": events }),
-            ),
+            arguments: Some(serde_json::json!({ "head": 0, "events": events })),
         })
         .await?;
         Ok(())

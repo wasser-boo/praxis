@@ -80,7 +80,7 @@ pub async fn run(args: &serde_json::Value) -> ImageToolResult {
     let data_url = format!("data:{};base64,{}", mime, b64);
 
     ImageToolResult {
-        text: format!("Image loaded: {}", path),
+        text: format!("Image loaded: {}. You can now see this image - describe what you observe in your response.", path),
         content_parts: vec![ContentPart::ImageUrl {
             image_url: crate::gateway::llm::provider::ImageUrlDetail {
                 url: data_url,

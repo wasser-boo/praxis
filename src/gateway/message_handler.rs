@@ -236,7 +236,22 @@ pub async fn handle_message(
         let (history, _tokens) = state
             .db
             .get_messages_with_token_budget(user_id, token_budget)?;
-        for msg in &history {
+
+        // Only include image data for the last 2 messages with content_parts
+        let mut image_msg_indices: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        let mut found = 0;
+        for (i, msg) in history.iter().enumerate().rev() {
+            if msg.content_parts.as_ref().map_or(false, |p| !p.is_empty()) {
+                image_msg_indices.insert(i);
+                found += 1;
+                if found >= 2 {
+                    break;
+                }
+            }
+        }
+
+        for (msg_idx, msg) in history.iter().enumerate() {
             let tool_calls = msg.tool_calls.as_ref().map(|tcs| {
                 tcs.iter()
                     .map(|tc| crate::gateway::llm::provider::ToolCall {
@@ -255,12 +270,16 @@ pub async fn handle_message(
                 } else {
                     Some(msg.content.clone())
                 },
-                content_parts: msg.content_parts.as_ref().map(|parts| {
-                    parts
-                        .iter()
-                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                        .collect()
-                }),
+                content_parts: if image_msg_indices.contains(&msg_idx) {
+                    msg.content_parts.as_ref().map(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                            .collect()
+                    })
+                } else {
+                    None
+                },
                 tool_calls,
                 tool_call_id: msg.tool_call_id.clone(),
             });
@@ -666,7 +685,15 @@ async fn execute_tool_call(
             .unwrap_or_else(|e| format!("Error: {}", e))
         }
         "discord_upload_file" => {
-            let channel_id = args["channel_id"].as_str().unwrap_or(user_id);
+            let fallback_ch = db
+                .load_context(user_id)
+                .ok()
+                .and_then(|ctx| ctx.settings.feedback_channel_id)
+                .unwrap_or_default();
+            let channel_id = args["channel_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&fallback_ch);
             let filename = args["filename"].as_str().unwrap_or("file");
             let base64_content = args["base64_content"].as_str().unwrap_or("");
             use base64::Engine;
@@ -699,7 +726,15 @@ async fn execute_tool_call(
             }
         }
         "discord_send_message" => {
-            let channel_id = args["channel_id"].as_str().unwrap_or("");
+            let fallback_ch = db
+                .load_context(user_id)
+                .ok()
+                .and_then(|ctx| ctx.settings.feedback_channel_id)
+                .unwrap_or_default();
+            let channel_id = args["channel_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&fallback_ch);
             let message = args["message"].as_str().unwrap_or("");
             match crate::tools::discord_send_message::send_message(channel_id, message).await {
                 Ok(_) => "Message sent".to_string(),
@@ -707,7 +742,15 @@ async fn execute_tool_call(
             }
         }
         "discord_send_embed" => {
-            let channel_id = args["channel_id"].as_str().unwrap_or("");
+            let fallback_ch = db
+                .load_context(user_id)
+                .ok()
+                .and_then(|ctx| ctx.settings.feedback_channel_id)
+                .unwrap_or_default();
+            let channel_id = args["channel_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&fallback_ch);
             let title = args.get("title").and_then(|v| v.as_str());
             let description = args.get("description").and_then(|v| v.as_str());
             let url = args.get("url").and_then(|v| v.as_str());

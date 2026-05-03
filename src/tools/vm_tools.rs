@@ -128,10 +128,8 @@ async fn handle_vm_start(manager: &VmManager, args: &serde_json::Value) -> Strin
 
     let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
 
-    let vnc_offset = {
-        let instances = manager.list_vms().await;
-        instances.len() as u16 + 1
-    };
+    // Use fixed VNC port to avoid port drift on restarts
+    let vnc_offset: u16 = 1;
 
     let mut config = crate::vm::VmConfig::default_for_name(name, &data_dir, vnc_offset, arch);
     config.cpu_cores = cpu_cores;
@@ -148,7 +146,17 @@ async fn handle_vm_start(manager: &VmManager, args: &serde_json::Value) -> Strin
     });
 
     match manager.start_vm(config).await {
-        Ok(msg) => msg,
+        Ok(msg) => {
+            // Clear old screenshots from previous sessions
+            let ss_dir = format!("{}/vm/{}/screenshots", data_dir, name);
+            if let Ok(entries) = std::fs::read_dir(&ss_dir) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+            let _ = std::fs::remove_file(format!("{}/vm/{}/screenshot.ppm", data_dir, name));
+            msg
+        }
         Err(e) => format!("Error starting VM: {}", e),
     }
 }
@@ -353,11 +361,11 @@ pub async fn take_screenshot_for_context(vm_name: &str) -> Option<String> {
 pub async fn save_screenshot_to_disk(vm_name: &str, data_dir: &str) -> Option<String> {
     let manager = get_vm_manager().await?;
     let screenshot_data = manager.screenshot(vm_name).await.ok()?;
+    tracing::info!(vm = %vm_name, data_len = screenshot_data.len(), "Screenshot data received from QMP");
 
     let ss_dir = format!("{}/vm/{}/screenshots", data_dir, vm_name);
     let _ = std::fs::create_dir_all(&ss_dir);
 
-    // Enforce limit before saving
     cleanup_screenshot_limit_dir(&ss_dir);
 
     let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
@@ -366,19 +374,21 @@ pub async fn save_screenshot_to_disk(vm_name: &str, data_dir: &str) -> Option<St
     if let Some(b64) = screenshot_data.strip_prefix("data:image/ppm;base64,") {
         use base64::Engine;
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
-            // Convert PPM to PNG using direct parser (avoids image crate PPM issues)
             match ppm_to_png(&bytes) {
                 Ok(png_bytes) => {
                     let _ = std::fs::write(&filename, &png_bytes);
+                    // Clean up the temporary PPM file
+                    let _ =
+                        std::fs::remove_file(format!("{}/vm/{}/screenshot.ppm", data_dir, vm_name));
                     return Some(filename);
                 }
                 Err(e) => {
                     tracing::warn!("PPM to PNG conversion failed: {}, falling back to PPM", e);
                 }
             }
-            // Fallback: save as PPM if conversion fails
             let ppm_filename = format!("{}/screenshot_{}.ppm", ss_dir, ts);
             let _ = std::fs::write(&ppm_filename, bytes);
+            let _ = std::fs::remove_file(format!("{}/vm/{}/screenshot.ppm", data_dir, vm_name));
             return Some(ppm_filename);
         }
     }

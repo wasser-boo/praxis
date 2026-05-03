@@ -221,6 +221,8 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/api/status", axum::routing::get(status))
         .route("/api/auth/login", axum::routing::post(login_handler))
         .route("/api/vm/vnc/ws", axum::routing::get(vnc_ws_proxy))
+        .route("/websockify", axum::routing::get(vnc_ws_proxy_noauth))
+        .route("/vnc", axum::routing::get(vnc_viewer_page))
         .nest_service("/static", static_service)
         .nest("/api", protected)
         .with_state(state.clone())
@@ -1166,6 +1168,46 @@ async fn vm_activity(
     Ok(Json(serde_json::json!({ "activities": activities })))
 }
 
+async fn vnc_viewer_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Praxis VNC</title>
+<style>
+  body { margin:0; background:#1a1a2e; display:flex; flex-direction:column; height:100vh; }
+  #status { padding:8px; background:#16213e; color:#e94560; font-family:monospace; font-size:14px; }
+  #status.connected { color:#0f3460; background:#e94560; color:white; }
+  #screen { flex:1; display:flex; align-items:center; justify-content:center; }
+  canvas { max-width:100%; max-height:100%; }
+</style>
+</head>
+<body>
+<div id="status">Connecting...</div>
+<div id="screen"></div>
+<script type="module">
+  import RFB from '/static/novnc/core/rfb.js';
+  const screen = document.getElementById('screen');
+  const status = document.getElementById('status');
+  const wsUrl = `ws://${location.host}/websockify`;
+  const rfb = new RFB(screen, wsUrl, { shared: true, credentials: {} });
+  rfb.scaleViewport = true;
+  rfb.resizeSession = false;
+  rfb.addEventListener('connect', () => {
+    status.textContent = 'Connected to VM';
+    status.className = 'connected';
+  });
+  rfb.addEventListener('disconnect', (e) => {
+    status.textContent = `Disconnected: ${e.detail.clean ? 'clean' : 'error'}`;
+    status.className = '';
+  });
+</script>
+</body>
+</html>"#,
+    )
+}
+
 async fn vnc_ws_proxy(
     ws: axum::extract::ws::WebSocketUpgrade,
     Query(params): Query<HashMap<String, String>>,
@@ -1181,6 +1223,111 @@ async fn vnc_ws_proxy(
             tracing::warn!("VNC proxy error: {}", e);
         }
     })
+}
+
+// noVNC /websockify endpoint — no auth required, defaults to praxis-vm
+async fn vnc_ws_proxy_noauth(ws: axum::extract::ws::WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| async move {
+        if let Err(e) = handle_vnc_proxy_noauth(socket).await {
+            tracing::warn!("VNC proxy error: {}", e);
+        }
+    })
+}
+
+async fn handle_vnc_proxy_noauth(socket: axum::extract::ws::WebSocket) -> anyhow::Result<()> {
+    tracing::info!("VNC proxy (noauth) handler called");
+    let manager = match crate::tools::vm_tools::get_vm_manager().await {
+        Some(m) => m,
+        None => {
+            tracing::error!("VNC proxy: VM manager not initialized");
+            return Err(anyhow::anyhow!("VM manager not initialized"));
+        }
+    };
+
+    let vm_info = manager.get_vm_info("praxis-vm").await.map_err(|e| {
+        tracing::error!("VNC proxy: failed to get VM info: {}", e);
+        e
+    })?;
+    let vnc_port = vm_info["vnc_port"]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("VM has no VNC port"))? as u16;
+
+    let vnc_addr = format!("127.0.0.1:{}", vnc_port);
+    tracing::info!("VNC proxy (noauth) connecting to {}", vnc_addr);
+
+    let tcp = tokio::net::TcpStream::connect(&vnc_addr)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "VNC proxy (noauth): TCP connect to {} failed: {}",
+                vnc_addr,
+                e
+            );
+            anyhow::anyhow!("Cannot connect to VM VNC at {}: {}", vnc_addr, e)
+        })?;
+    let (tcp_read, tcp_write) = tcp.into_split();
+    let (ws_sink, ws_source) = socket.split();
+
+    tracing::info!("VNC proxy (noauth) connected, starting relay");
+
+    let tcp_to_ws = async move {
+        let mut reader = tokio::io::BufReader::new(tcp_read);
+        let mut ws_sink = ws_sink;
+        let mut buf = vec![0u8; 65536];
+        loop {
+            use tokio::io::AsyncReadExt;
+            let n = match reader.read(&mut buf).await {
+                Ok(0) => {
+                    tracing::debug!("VNC proxy: TCP read EOF");
+                    break;
+                }
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::debug!("VNC proxy: TCP read error: {}", e);
+                    break;
+                }
+            };
+            let msg = axum::extract::ws::Message::Binary(buf[..n].to_vec());
+            if ws_sink.send(msg).await.is_err() {
+                tracing::debug!("VNC proxy: WS send failed");
+                break;
+            }
+        }
+        let _ = ws_sink.send(axum::extract::ws::Message::Close(None)).await;
+    };
+
+    let ws_to_tcp = async move {
+        let mut ws_source = ws_source;
+        let mut tcp_write = tcp_write;
+        use tokio::io::AsyncWriteExt;
+        while let Some(Ok(msg)) = ws_source.next().await {
+            match msg {
+                axum::extract::ws::Message::Binary(data) => {
+                    if tcp_write.write_all(&data).await.is_err() {
+                        break;
+                    }
+                    let _ = tcp_write.flush().await;
+                }
+                axum::extract::ws::Message::Text(data) => {
+                    if tcp_write.write_all(data.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    let _ = tcp_write.flush().await;
+                }
+                axum::extract::ws::Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = tcp_to_ws => { tracing::debug!("VNC proxy: tcp_to_ws finished"); }
+        _ = ws_to_tcp => { tracing::debug!("VNC proxy: ws_to_tcp finished"); }
+    }
+
+    tracing::info!("VNC proxy (noauth) connection closed");
+
+    Ok(())
 }
 
 async fn handle_vnc_proxy(

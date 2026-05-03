@@ -1,6 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
+
+const DEBOUNCE_SECS: u64 = 3;
+
+const EMOJIS: &[&str] = &[
+    "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟", "🌵", "🦜", "🐙", "🦊", "🐝", "🦎",
+    "🦩", "🐢", "🦉", "🦋",
+];
 
 lazy_static::lazy_static! {
     pub static ref PENDING_QUESTIONS: Arc<RwLock<HashMap<String, PendingQuestion>>> =
@@ -8,7 +15,10 @@ lazy_static::lazy_static! {
 }
 
 pub struct PendingQuestion {
-    pub tx: oneshot::Sender<String>,
+    pub reaction_tx: mpsc::Sender<String>,
+    pub cancel_tx: Option<oneshot::Sender<Option<String>>>,
+    pub channel_id: String,
+    pub paired_discord_user_id: String,
 }
 
 /// Send a VM screenshot to Discord
@@ -18,22 +28,18 @@ pub async fn send_screenshot_to_discord(
     vm_name: &str,
 ) -> anyhow::Result<String> {
     let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
-    let screenshot_path = format!("{}/vm/{}/screenshot.ppm", data_dir, vm_name);
 
-    // Take a fresh screenshot first
-    if let Some(manager) = crate::tools::vm_tools::get_vm_manager().await {
-        let _ = manager.screenshot(vm_name).await;
-    }
-
-    if !std::path::Path::new(&screenshot_path).exists() {
-        return Ok("No screenshot available. Is the VM running?".to_string());
-    }
+    let screenshot_path =
+        match crate::tools::vm_tools::save_screenshot_to_disk(vm_name, &data_dir).await {
+            Some(path) => path,
+            None => return Ok("No screenshot available. Is the VM running?".to_string()),
+        };
 
     let msg = caption.unwrap_or("VM Screenshot");
     match crate::tools::discord_upload::upload_file(
         channel_id,
         &screenshot_path,
-        "vm_screenshot.ppm",
+        "vm_screenshot.png",
         Some(msg),
     )
     .await
@@ -53,24 +59,20 @@ pub async fn screenshot_with_feedback(
     vm_name: &str,
 ) -> anyhow::Result<String> {
     let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
-    let screenshot_path = format!("{}/vm/{}/screenshot.ppm", data_dir, vm_name);
 
-    // Take a fresh screenshot
-    if let Some(manager) = crate::tools::vm_tools::get_vm_manager().await {
-        let _ = manager.screenshot(vm_name).await;
-    }
+    let screenshot_path =
+        match crate::tools::vm_tools::save_screenshot_to_disk(vm_name, &data_dir).await {
+            Some(path) => path,
+            None => {
+                crate::tools::discord_send_message::send_message(channel_id, feedback).await?;
+                return Ok("No screenshot available, sent text only.".to_string());
+            }
+        };
 
-    if !std::path::Path::new(&screenshot_path).exists() {
-        // No screenshot, just send text
-        crate::tools::discord_send_message::send_message(channel_id, feedback).await?;
-        return Ok("No screenshot available, sent text only.".to_string());
-    }
-
-    // Upload screenshot with feedback as caption
     match crate::tools::discord_upload::upload_file(
         channel_id,
         &screenshot_path,
-        "vm_screenshot.ppm",
+        "vm_screenshot.png",
         Some(feedback),
     )
     .await
@@ -84,12 +86,15 @@ pub async fn screenshot_with_feedback(
 }
 
 /// Ask the user a question via Discord with optional reaction-based suggestions.
-/// The tool blocks until the user responds (timeout after timeout_secs).
+/// Supports multiple reactions: each reaction is collected and after a 3-second
+/// pause (debounce) with no new reactions, all collected reactions are returned
+/// as a comma-separated string. A text message reply is accepted immediately.
 pub async fn ask_question(
     channel_id: &str,
     question: &str,
     suggestions: &[String],
     timeout_secs: u64,
+    paired_discord_user_id: &str,
 ) -> anyhow::Result<String> {
     let question_id = uuid::Uuid::new_v4().to_string();
 
@@ -98,48 +103,138 @@ pub async fn ask_question(
 
     if !suggestions.is_empty() {
         message.push_str("\n\n**Quick replies:**");
-        let emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"];
         for (i, suggestion) in suggestions.iter().enumerate() {
-            if i < emojis.len() {
-                message.push_str(&format!("\n{} {}", emojis[i], suggestion));
+            if i < EMOJIS.len() {
+                message.push_str(&format!("\n{} {}", EMOJIS[i], suggestion));
             }
         }
-        message.push_str("\n\nReact with an emoji or type your answer below.");
+        message.push_str(&format!(
+            "\n\nReact with emojis ({}s pause to confirm) or type your answer below.",
+            DEBOUNCE_SECS
+        ));
     } else {
         message.push_str("\n\nType your answer below.");
     }
 
-    // Send the question message
-    crate::tools::discord_send_message::send_message(channel_id, &message).await?;
+    // Send the question message via REST API to get message ID
+    let message_id =
+        crate::tools::discord_send_message::send_message_rest(channel_id, &message).await?;
 
-    // Create a channel to wait for the response
-    let (tx, rx) = oneshot::channel::<String>();
+    // Add emoji reactions for quick replies
+    for (i, _) in suggestions.iter().enumerate() {
+        if i < EMOJIS.len() {
+            let _ = crate::tools::discord_send_message::add_reaction(
+                channel_id,
+                &message_id,
+                EMOJIS[i],
+            )
+            .await;
+        }
+    }
+
+    // Create channels: mpsc for reactions, oneshot for text-cancel
+    let (reaction_tx, mut reaction_rx) = mpsc::channel::<String>(32);
+    let (cancel_tx, cancel_rx) = oneshot::channel::<Option<String>>();
 
     // Store the pending question
     {
         let mut pending = PENDING_QUESTIONS.write().await;
-        pending.insert(question_id.clone(), PendingQuestion { tx });
+        pending.insert(
+            question_id.clone(),
+            PendingQuestion {
+                reaction_tx,
+                cancel_tx: Some(cancel_tx),
+                channel_id: channel_id.to_string(),
+                paired_discord_user_id: paired_discord_user_id.to_string(),
+            },
+        );
     }
 
-    tracing::info!(question_id = %question_id, channel = %channel_id, "Waiting for user response...");
+    tracing::info!(
+        question_id = %question_id,
+        channel = %channel_id,
+        paired_user = %paired_discord_user_id,
+        "Waiting for user response (multi-reaction, {}s debounce)...",
+        DEBOUNCE_SECS
+    );
 
-    // Wait for response with timeout
+    // Spawn the debounce collector task
+    let qid = question_id.clone();
+    let debounce_task = tokio::spawn(async move {
+        let mut collected: Vec<String> = Vec::new();
+        let mut cancel_rx = cancel_rx;
+
+        // Wait for first input: either a reaction or a text cancel
+        tokio::select! {
+            Some(text) = reaction_rx.recv() => {
+                collected.push(text);
+                tracing::info!(question_id = %qid, reactions = ?collected, "First reaction collected");
+            }
+            result = &mut cancel_rx => {
+                // Text message arrived before any reaction
+                return match result {
+                    Ok(Some(text)) => Some(text),
+                    _ => None,
+                };
+            }
+        }
+
+        // Debounce loop: keep collecting reactions, reset timer on each
+        loop {
+            tokio::select! {
+                Some(text) = reaction_rx.recv() => {
+                    collected.push(text);
+                    tracing::info!(question_id = %qid, reactions = ?collected, "Reaction collected, debounce reset");
+                }
+                result = &mut cancel_rx => {
+                    // Text message arrived during debounce
+                    match result {
+                        Ok(Some(text)) => {
+                            // Merge collected reactions with text
+                            if collected.is_empty() {
+                                return Some(text);
+                            } else {
+                                let mut merged = collected.join(", ");
+                                merged.push_str(", ");
+                                merged.push_str(&text);
+                                return Some(merged);
+                            }
+                        }
+                        _ => {
+                            let result = collected.join(", ");
+                            return Some(result);
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(DEBOUNCE_SECS)) => {
+                    // Debounce expired - no more reactions
+                    let result = collected.join(", ");
+                    tracing::info!(question_id = %qid, result = %result, "Debounce expired");
+                    return Some(result);
+                }
+            }
+        }
+    });
+
+    // Wait with overall timeout
     let timeout = std::time::Duration::from_secs(timeout_secs);
-    match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(response)) => {
+    let result = tokio::time::timeout(timeout, debounce_task).await;
+
+    // Clean up
+    {
+        let mut pending = PENDING_QUESTIONS.write().await;
+        pending.remove(&question_id);
+    }
+
+    match result {
+        Ok(Ok(Some(response))) => {
             tracing::info!(question_id = %question_id, response = %response, "Got user response");
             Ok(format!("User responded: {}", response))
         }
-        Ok(Err(_)) => {
-            // Channel was dropped (question cancelled)
-            let mut pending = PENDING_QUESTIONS.write().await;
-            pending.remove(&question_id);
-            Ok("Question was cancelled.".to_string())
-        }
+        Ok(Ok(None)) => Ok("Question was cancelled.".to_string()),
+        Ok(Err(_)) => Ok("Question was cancelled.".to_string()),
         Err(_) => {
-            // Timeout
-            let mut pending = PENDING_QUESTIONS.write().await;
-            pending.remove(&question_id);
+            // Timeout - clean up any dangling cancel_tx
             let timeout_msg = format!(
                 "Question timed out after {}s. No response received.",
                 timeout_secs
@@ -151,48 +246,105 @@ pub async fn ask_question(
     }
 }
 
-/// Called by the Discord handler when a user reacts to a question message
-pub async fn handle_reaction(channel_id: &str, emoji: &str, _user_id: &str) {
-    let emoji_to_text: HashMap<&str, &str> = [
-        ("1️⃣", "1"),
-        ("2️⃣", "2"),
-        ("3️⃣", "3"),
-        ("4️⃣", "4"),
-        ("5️⃣", "5"),
-        ("6️⃣", "6"),
-        ("7️⃣", "7"),
-        ("8️⃣", "8"),
-        ("9️⃣", "9"),
-        ("✅", "yes"),
-        ("❌", "no"),
-        ("👍", "yes"),
-        ("👎", "no"),
-    ]
-    .iter()
-    .cloned()
-    .collect();
+/// Called by the Discord handler when a user reacts to a question message.
+/// Each reaction is sent to the debounce collector. The question stays active
+/// until the debounce timer expires.
+pub async fn handle_reaction(channel_id: &str, emoji: &str, user_id: &str) {
+    // Build emoji-to-text map from the global EMOJIS list
+    let emoji_to_text: HashMap<&str, String> = EMOJIS
+        .iter()
+        .enumerate()
+        .map(|(i, &e)| (e, (i + 1).to_string()))
+        .chain(
+            [
+                ("✅", "yes".to_string()),
+                ("❌", "no".to_string()),
+                ("👍", "yes".to_string()),
+                ("👎", "no".to_string()),
+            ]
+            .into_iter(),
+        )
+        .collect();
 
-    let text = emoji_to_text.get(emoji).unwrap_or(&emoji).to_string();
+    let text = emoji_to_text
+        .get(emoji)
+        .cloned()
+        .unwrap_or_else(|| emoji.to_string());
 
-    // Respond to the first pending question in this channel
-    let mut pending = PENDING_QUESTIONS.write().await;
-    let keys: Vec<String> = pending.keys().cloned().collect();
-    for key in keys {
-        if let Some(q) = pending.remove(&key) {
-            let _ = q.tx.send(text);
+    let pending = PENDING_QUESTIONS.read().await;
+    for q in pending.values() {
+        if q.channel_id == channel_id && q.paired_discord_user_id == user_id {
+            let _ = q.reaction_tx.send(text).await;
             return;
         }
     }
 }
 
-/// Called by the Discord handler when a user sends a message that's a reply to a question
-pub async fn handle_message_reply(channel_id: &str, content: &str, _user_id: &str) {
+/// Called by the Discord handler when a user sends a text message reply.
+/// Cancels the debounce timer and delivers the text immediately.
+pub async fn handle_message_reply(channel_id: &str, content: &str, user_id: &str) {
     let mut pending = PENDING_QUESTIONS.write().await;
     let keys: Vec<String> = pending.keys().cloned().collect();
     for key in keys {
-        if let Some(q) = pending.remove(&key) {
-            let _ = q.tx.send(content.to_string());
-            return;
+        if let Some(q) = pending.get(&key) {
+            if q.channel_id == channel_id && q.paired_discord_user_id == user_id {
+                // Take the cancel sender and send the text content
+                if let Some(mut q) = pending.remove(&key) {
+                    if let Some(cancel_tx) = q.cancel_tx.take() {
+                        let _ = cancel_tx.send(Some(content.to_string()));
+                    }
+                }
+                return;
+            }
         }
     }
+}
+
+/// Ask multiple questions sequentially. Each question is sent as a separate
+/// Discord message, the user can react with emojis (3s debounce), and after
+/// all questions are answered, returns a JSON object mapping question labels
+/// to their answers.
+pub async fn ask_questions(
+    channel_id: &str,
+    questions: &[(String, String, Vec<String>)], // (label, question_text, suggestions)
+    timeout_secs: u64,
+    paired_discord_user_id: &str,
+) -> anyhow::Result<String> {
+    let mut answers = serde_json::Map::new();
+
+    for (idx, (label, question_text, suggestions)) in questions.iter().enumerate() {
+        let progress = format!("**[{}/{}]**", idx + 1, questions.len());
+        let full_question = format!("{} {}", progress, question_text);
+
+        match ask_question(
+            channel_id,
+            &full_question,
+            suggestions,
+            timeout_secs,
+            paired_discord_user_id,
+        )
+        .await
+        {
+            Ok(response) => {
+                // Strip "User responded: " prefix if present
+                let answer = response
+                    .strip_prefix("User responded: ")
+                    .unwrap_or(&response);
+                answers.insert(label.clone(), serde_json::Value::String(answer.to_string()));
+            }
+            Err(e) => {
+                answers.insert(
+                    label.clone(),
+                    serde_json::Value::String(format!("Error: {}", e)),
+                );
+            }
+        }
+
+        // Small pause between questions so the user sees the transition
+        if idx + 1 < questions.len() {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    Ok(serde_json::to_string(&answers).unwrap_or_else(|_| "{}".to_string()))
 }

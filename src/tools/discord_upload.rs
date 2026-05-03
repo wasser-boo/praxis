@@ -4,8 +4,11 @@ pub async fn upload_file(
     file_name: &str,
     message: Option<&str>,
 ) -> anyhow::Result<String> {
-    let token = std::env::var("DISCORD_BOT_TOKEN")
-        .map_err(|_| anyhow::anyhow!("DISCORD_BOT_TOKEN not set"))?;
+    let secrets = crate::db::secrets::get_secrets();
+    let token = secrets
+        .discord_bot_token
+        .or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok())
+        .ok_or_else(|| anyhow::anyhow!("DISCORD_BOT_TOKEN not set (configure via secrets)"))?;
 
     let file_bytes = tokio::fs::read(file_path)
         .await

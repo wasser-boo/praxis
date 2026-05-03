@@ -121,6 +121,7 @@ impl DiscordBot {
                 | GatewayIntents::MESSAGE_CONTENT
                 | GatewayIntents::DIRECT_MESSAGES
                 | GatewayIntents::GUILD_MESSAGES
+                | GatewayIntents::GUILD_MESSAGE_REACTIONS
                 | GatewayIntents::GUILD_VOICE_STATES
                 | GatewayIntents::GUILD_MEMBERS,
         )

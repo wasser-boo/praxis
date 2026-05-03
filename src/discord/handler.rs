@@ -200,8 +200,14 @@ impl EventHandler for DiscordHandler {
                     for mid in &thinking_msg_ids {
                         let _ = msg.channel_id.delete_message(&ctx.http, mid).await;
                     }
-                    if let Err(e) = send_message_split(&ctx.http, msg.channel_id, &content).await {
-                        tracing::error!("Failed to send response: {}", e);
+                    let trimmed = content.trim();
+                    if !trimmed.is_empty() {
+                        if let Err(e) = send_message_split(&ctx.http, msg.channel_id, trimmed).await
+                        {
+                            tracing::error!("Failed to send response: {}", e);
+                        }
+                    } else {
+                        tracing::warn!("LLM returned empty response, skipping send");
                     }
                     break;
                 }
@@ -990,7 +996,10 @@ impl EventHandler for DiscordHandler {
 
     async fn reaction_add(&self, _ctx: Context, reaction: serenity::model::channel::Reaction) {
         let channel_id = reaction.channel_id.to_string();
-        let emoji = reaction.emoji.as_data();
+        let emoji_raw = reaction.emoji.as_data();
+        let emoji = urlencoding::decode(&emoji_raw)
+            .unwrap_or_default()
+            .into_owned();
         let user_id = reaction.user_id.map(|u| u.to_string()).unwrap_or_default();
 
         crate::tools::discord_interactive::handle_reaction(&channel_id, &emoji, &user_id).await;

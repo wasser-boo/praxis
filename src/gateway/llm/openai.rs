@@ -26,12 +26,27 @@ impl LLMProvider for OpenAIProvider {
 
         let model = request.model.as_deref().unwrap_or(&self.model);
 
-        let messages: Vec<serde_json::Value> = request
-            .messages
-            .iter()
-            .map(|m| {
-                let mut msg = serde_json::json!({ "role": m.role });
-                if let Some(ref parts) = m.content_parts {
+        let mut messages: Vec<serde_json::Value> = Vec::new();
+        for m in &request.messages {
+            let mut msg = serde_json::json!({ "role": m.role });
+            if let Some(ref parts) = m.content_parts {
+                if m.role == "tool" {
+                    // Send text as tool message, image as separate user message
+                    msg["content"] = serde_json::json!(m.content.as_deref().unwrap_or(""));
+                    if let Some(ref tcid) = m.tool_call_id {
+                        msg["tool_call_id"] = serde_json::json!(tcid);
+                    }
+                    messages.push(msg);
+                    let mut img_arr: Vec<serde_json::Value> = Vec::new();
+                    img_arr.push(serde_json::json!({ "type": "text", "text": "Here is the screenshot from the VM:" }));
+                    for p in parts {
+                        if let super::provider::ContentPart::ImageUrl { image_url } = p {
+                            img_arr.push(serde_json::json!({ "type": "image_url", "image_url": { "url": image_url.url, "detail": image_url.detail.as_deref().unwrap_or("auto") } }));
+                        }
+                    }
+                    messages.push(serde_json::json!({ "role": "user", "content": img_arr }));
+                    continue;
+                } else {
                     let mut arr: Vec<serde_json::Value> = Vec::new();
                     if let Some(ref text) = m.content {
                         if !text.is_empty() {
@@ -45,25 +60,25 @@ impl LLMProvider for OpenAIProvider {
                         }
                     }
                     msg["content"] = serde_json::json!(arr);
-                } else {
-                    msg["content"] = serde_json::json!(m.content.as_deref().unwrap_or(""));
                 }
-                if let Some(ref tool_calls) = m.tool_calls {
-                    let calls: Vec<serde_json::Value> = tool_calls.iter().map(|tc| {
-                        serde_json::json!({
-                            "id": tc.id,
-                            "type": "function",
-                            "function": { "name": tc.function.name, "arguments": tc.function.arguments }
-                        })
-                    }).collect();
-                    msg["tool_calls"] = serde_json::json!(calls);
-                }
-                if let Some(ref tcid) = m.tool_call_id {
-                    msg["tool_call_id"] = serde_json::json!(tcid);
-                }
-                msg
-            })
-            .collect();
+            } else {
+                msg["content"] = serde_json::json!(m.content.as_deref().unwrap_or(""));
+            }
+            if let Some(ref tool_calls) = m.tool_calls {
+                let calls: Vec<serde_json::Value> = tool_calls.iter().map(|tc| {
+                    serde_json::json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": { "name": tc.function.name, "arguments": tc.function.arguments }
+                    })
+                }).collect();
+                msg["tool_calls"] = serde_json::json!(calls);
+            }
+            if let Some(ref tcid) = m.tool_call_id {
+                msg["tool_call_id"] = serde_json::json!(tcid);
+            }
+            messages.push(msg);
+        }
 
         let body = serde_json::json!({
             "model": model,

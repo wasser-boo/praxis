@@ -339,6 +339,29 @@ impl VmManager {
             }
         }
 
+        // Kill any orphaned QEMU processes for this VM (from previous app sessions)
+        let vm_dir = format!("{}/vm/{}", self.data_dir, config.name);
+        let qmp_sock = format!("{}/qmp.sock", vm_dir);
+        let serial_sock = format!("{}/serial.sock", vm_dir);
+        // Find and kill QEMU processes that reference this VM's sockets or name
+        if let Ok(output) = std::process::Command::new("pgrep")
+            .args(["-f", &format!("qemu.*{}", config.name)])
+            .output()
+        {
+            let pids = String::from_utf8_lossy(&output.stdout);
+            for pid_str in pids.lines() {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    tracing::warn!(vm = %config.name, pid = pid, "Killing orphaned QEMU process");
+                    let _ = std::process::Command::new("kill")
+                        .args(["-9", &pid.to_string()])
+                        .output();
+                }
+            }
+        }
+        // Clean up stale sockets
+        let _ = std::fs::remove_file(&qmp_sock);
+        let _ = std::fs::remove_file(&serial_sock);
+
         // Resolve all paths to absolute (QEMU needs absolute paths for sockets)
         let abs_data_dir = std::fs::canonicalize(&self.data_dir)
             .unwrap_or_else(|_| std::path::PathBuf::from(&self.data_dir));
@@ -387,12 +410,22 @@ impl VmManager {
         // Build QEMU command
         let args = self.build_qemu_args(&config);
 
-        tracing::info!(name = %config.name, arch = ?config.arch, binary = %config.arch.qemu_binary(), "Starting VM");
+        let vnc_port = config.vnc_port;
+        let vnc_display_num = vnc_port - 5900;
+
+        tracing::info!("=== VM START SEQUENCE ===");
+        tracing::info!(vm = %config.name, arch = ?config.arch, binary = %config.arch.qemu_binary());
+        tracing::info!("VNC: display :{} (port {})", vnc_display_num, vnc_port);
+        tracing::info!("QMP socket: {:?}", config.qmp_socket_path);
+        tracing::info!("Serial socket: {:?}", config.serial_socket_path);
+        tracing::info!("Disk: {}", config.disk_path);
+        tracing::info!("ISO: {:?}", config.iso_path);
         tracing::info!(
-            "QEMU args: {} {}",
+            "QEMU command: {} {}",
             config.arch.qemu_binary(),
             args.join(" ")
         );
+        tracing::info!("========================");
 
         // Start QEMU process
         let mut cmd = tokio::process::Command::new(config.arch.qemu_binary());
@@ -410,7 +443,13 @@ impl VmManager {
         })?;
 
         let pid = child.id();
-        tracing::info!(name = %config.name, pid = ?pid, "QEMU process started");
+        tracing::info!(vm = %config.name, pid = ?pid, "QEMU process started (PID: {:?})", pid);
+        tracing::info!(
+            "VNC available at: localhost:{} (display :{})",
+            vnc_port,
+            vnc_display_num
+        );
+        tracing::info!("VNC viewer: http://localhost:1337/vnc");
 
         // Check if QEMU died immediately (within 500ms)
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -575,7 +614,7 @@ impl VmManager {
         Ok(format!("VM '{}' was not running", name))
     }
 
-    /// Execute a shell command in a VM
+    /// Execute a shell command in a VM via QMP keystrokes (visible in VNC)
     pub async fn shell_exec(
         &self,
         name: &str,
@@ -591,15 +630,43 @@ impl VmManager {
             anyhow::bail!("VM '{}' is not running", name);
         }
 
+        // Send command via QMP keystrokes (visible in VNC)
+        if let Some(ref mut qmp) = instance.qmp {
+            // Type each character via QMP key events
+            for ch in command.chars() {
+                let events = Self::char_to_qmp_events(ch)?;
+                for (qcode, down) in events {
+                    qmp.send_key_event(&qcode, down).await?;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            // Send enter
+            qmp.send_key_event("ret", true).await?;
+            qmp.send_key_event("ret", false).await?;
+
+            // Wait for command to execute, then take screenshot
+            tokio::time::sleep(std::time::Duration::from_millis(timeout_secs.min(5) * 1000)).await;
+
+            let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+            let screenshot_path = format!("{}/vm/{}/screenshot.ppm", data_dir, name);
+            let _ = qmp.screendump(&screenshot_path).await;
+
+            return Ok(format!(
+                "Command '{}' sent via QMP keystrokes. Output visible in VNC / screenshot.",
+                command
+            ));
+        }
+
+        // Fallback: use serial (not visible in VNC)
         let serial = instance
             .serial
             .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Serial not connected for VM '{}'", name))?;
+            .ok_or_else(|| anyhow::anyhow!("Neither QMP nor Serial connected for VM '{}'", name))?;
 
         serial.execute(command, timeout_secs).await
     }
 
-    /// Send raw keystrokes to a VM
+    /// Send raw keystrokes to a VM (all input via QMP so it's visible in VNC)
     pub async fn send_keys(&self, name: &str, keys: &str) -> anyhow::Result<String> {
         let mut instances = self.instances.write().await;
         let instance = instances
@@ -610,56 +677,17 @@ impl VmManager {
             anyhow::bail!("VM '{}' is not running", name);
         }
 
-        // Use serial for regular text, QMP for special keys
-        if keys.starts_with("ctrl+")
-            || keys.starts_with("alt+")
-            || keys == "enter"
-            || keys == "esc"
-            || keys == "tab"
-            || keys.starts_with("f1")
-            || keys.starts_with("f2")
-            || keys.starts_with("f3")
-            || keys.starts_with("f4")
-            || keys.starts_with("f5")
-            || keys.starts_with("f6")
-            || keys.starts_with("f7")
-            || keys.starts_with("f8")
-            || keys.starts_with("f9")
-            || keys.starts_with("f10")
-            || keys.starts_with("f11")
-            || keys.starts_with("f12")
-            || keys == "arrow_up"
-            || keys == "arrow_down"
-            || keys == "arrow_left"
-            || keys == "arrow_right"
-            || keys == "pageup"
-            || keys == "pagedown"
-            || keys == "home"
-            || keys == "end"
-            || keys == "insert"
-            || keys == "delete"
-            || keys == "backspace"
-        {
-            // Send via QMP input-send-event
-            if let Some(ref mut qmp) = instance.qmp {
-                let key_events = Self::keys_to_qmp(keys)?;
-                tracing::info!(keys = keys, events = ?key_events, "Sending QMP key events");
-                for (qcode, down) in key_events {
-                    qmp.send_key_event(&qcode, down).await?;
-                }
-                return Ok(format!("Sent special key: {}", keys));
-            }
-            tracing::warn!(vm = name, "QMP not connected for VM");
-            anyhow::bail!("QMP not connected for VM '{}'", name);
-        } else {
-            // Regular text — send via serial
-            let serial = instance
-                .serial
-                .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("Serial not connected for VM '{}'", name))?;
-            serial.send_raw(keys).await?;
-            return Ok(format!("Sent keys: {}", keys));
+        let qmp = instance
+            .qmp
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("QMP not connected for VM '{}'", name))?;
+
+        let key_events = Self::keys_to_qmp(keys)?;
+        tracing::info!(keys = keys, events = ?key_events, "Sending QMP key events");
+        for (qcode, down) in key_events {
+            qmp.send_key_event(&qcode, down).await?;
         }
+        Ok(format!("Sent keys: {}", keys))
     }
 
     /// Send mouse input to the VM
@@ -768,10 +796,16 @@ impl VmManager {
         let vm_dir = format!("{}/vm/{}", self.data_dir, name);
         let screenshot_path = format!("{}/screenshot.ppm", vm_dir);
 
+        tracing::debug!(vm = %name, path = %screenshot_path, "Taking screenshot via QMP screendump");
+
+        // Small delay to let the display framebuffer update after input events
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
         qmp.screendump(&screenshot_path).await?;
 
-        // Read and convert PPM to base64 PNG if possible, otherwise return PPM base64
         let data = std::fs::read(&screenshot_path)?;
+        tracing::debug!(vm = %name, size = data.len(), "Screenshot captured");
+
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
 
@@ -968,14 +1002,9 @@ impl VmManager {
             args.extend(["-boot".to_string(), "d".to_string()]);
         }
 
-        // VNC
+        // VNC with explicit VGA device
         let vnc_display = format!(":{}", config.vnc_port - 5900);
-        args.extend([
-            "-vnc".to_string(),
-            vnc_display,
-            "-display".to_string(),
-            "none".to_string(),
-        ]);
+        args.extend(["-vnc".to_string(), vnc_display]);
 
         // QMP: Unix socket or TCP based on config
         if config.socket_mode == "unix" {
@@ -1665,6 +1694,172 @@ impl VmManager {
                 ("ctrl".into(), false),
             ]),
             _ => anyhow::bail!("Unknown key: {}", key),
+        }
+    }
+
+    /// Convert a single character to QMP key events (for typing text via QMP)
+    fn char_to_qmp_events(ch: char) -> anyhow::Result<Vec<(String, bool)>> {
+        let press = |k: &str| vec![(k.to_string(), true), (k.to_string(), false)];
+
+        match ch {
+            'a'..='z' => Ok(press(&ch.to_string())),
+            '0'..='9' => Ok(press(&ch.to_string())),
+            ' ' => Ok(press("spc")),
+            '\n' => Ok(press("ret")),
+            '\t' => Ok(press("tab")),
+            '-' => Ok(press("minus")),
+            '=' => Ok(press("equal")),
+            '[' => Ok(press("bracket_left")),
+            ']' => Ok(press("bracket_right")),
+            '\\' => Ok(press("backslash")),
+            ';' => Ok(press("semicolon")),
+            '\'' => Ok(press("apostrophe")),
+            '`' => Ok(press("grave_accent")),
+            ',' => Ok(press("comma")),
+            '.' => Ok(press("dot")),
+            '/' => Ok(press("slash")),
+
+            // Shifted characters
+            'A'..='Z' => {
+                let lower = ch.to_lowercase().to_string();
+                Ok(vec![
+                    ("shift".into(), true),
+                    (lower.clone(), true),
+                    (lower, false),
+                    ("shift".into(), false),
+                ])
+            }
+            '!' => Ok(vec![
+                ("shift".into(), true),
+                ("1".into(), true),
+                ("1".into(), false),
+                ("shift".into(), false),
+            ]),
+            '@' => Ok(vec![
+                ("shift".into(), true),
+                ("2".into(), true),
+                ("2".into(), false),
+                ("shift".into(), false),
+            ]),
+            '#' => Ok(vec![
+                ("shift".into(), true),
+                ("3".into(), true),
+                ("3".into(), false),
+                ("shift".into(), false),
+            ]),
+            '$' => Ok(vec![
+                ("shift".into(), true),
+                ("4".into(), true),
+                ("4".into(), false),
+                ("shift".into(), false),
+            ]),
+            '%' => Ok(vec![
+                ("shift".into(), true),
+                ("5".into(), true),
+                ("5".into(), false),
+                ("shift".into(), false),
+            ]),
+            '^' => Ok(vec![
+                ("shift".into(), true),
+                ("6".into(), true),
+                ("6".into(), false),
+                ("shift".into(), false),
+            ]),
+            '&' => Ok(vec![
+                ("shift".into(), true),
+                ("7".into(), true),
+                ("7".into(), false),
+                ("shift".into(), false),
+            ]),
+            '*' => Ok(vec![
+                ("shift".into(), true),
+                ("8".into(), true),
+                ("8".into(), false),
+                ("shift".into(), false),
+            ]),
+            '(' => Ok(vec![
+                ("shift".into(), true),
+                ("9".into(), true),
+                ("9".into(), false),
+                ("shift".into(), false),
+            ]),
+            ')' => Ok(vec![
+                ("shift".into(), true),
+                ("0".into(), true),
+                ("0".into(), false),
+                ("shift".into(), false),
+            ]),
+            '_' => Ok(vec![
+                ("shift".into(), true),
+                ("minus".into(), true),
+                ("minus".into(), false),
+                ("shift".into(), false),
+            ]),
+            '+' => Ok(vec![
+                ("shift".into(), true),
+                ("equal".into(), true),
+                ("equal".into(), false),
+                ("shift".into(), false),
+            ]),
+            '{' => Ok(vec![
+                ("shift".into(), true),
+                ("bracket_left".into(), true),
+                ("bracket_left".into(), false),
+                ("shift".into(), false),
+            ]),
+            '}' => Ok(vec![
+                ("shift".into(), true),
+                ("bracket_right".into(), true),
+                ("bracket_right".into(), false),
+                ("shift".into(), false),
+            ]),
+            '|' => Ok(vec![
+                ("shift".into(), true),
+                ("backslash".into(), true),
+                ("backslash".into(), false),
+                ("shift".into(), false),
+            ]),
+            ':' => Ok(vec![
+                ("shift".into(), true),
+                ("semicolon".into(), true),
+                ("semicolon".into(), false),
+                ("shift".into(), false),
+            ]),
+            '"' => Ok(vec![
+                ("shift".into(), true),
+                ("apostrophe".into(), true),
+                ("apostrophe".into(), false),
+                ("shift".into(), false),
+            ]),
+            '~' => Ok(vec![
+                ("shift".into(), true),
+                ("grave_accent".into(), true),
+                ("grave_accent".into(), false),
+                ("shift".into(), false),
+            ]),
+            '<' => Ok(vec![
+                ("shift".into(), true),
+                ("comma".into(), true),
+                ("comma".into(), false),
+                ("shift".into(), false),
+            ]),
+            '>' => Ok(vec![
+                ("shift".into(), true),
+                ("dot".into(), true),
+                ("dot".into(), false),
+                ("shift".into(), false),
+            ]),
+            '?' => Ok(vec![
+                ("shift".into(), true),
+                ("slash".into(), true),
+                ("slash".into(), false),
+                ("shift".into(), false),
+            ]),
+
+            _ => {
+                tracing::warn!(char = %ch, "Unsupported character for QMP, skipping");
+                Ok(vec![])
+            }
         }
     }
 }

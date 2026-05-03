@@ -217,7 +217,7 @@ fn get_default_tools() -> Vec<Tool> {
         },
         Tool {
             name: "understand_image".into(),
-            description: Some("View and understand an image. Use this to see screenshots, photos, or any visual content. Returns the image for visual analysis.".into()),
+            description: Some("Load an image for visual analysis. The image is sent to the vision API - you WILL see and understand the image content in your next response. After calling this tool, describe what you see in the image. Use for screenshots, photos, or any visual content.".into()),
             parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"Path to the image file (supports PPM, PNG, JPEG)"}},"required":["path"]}),
             is_enabled: true,
         },
@@ -304,6 +304,12 @@ fn get_default_tools() -> Vec<Tool> {
             name: "ask_question".into(),
             description: Some("Ask the user a question via Discord and wait for their response. You can provide emoji-based quick reply suggestions. The tool blocks until the user answers or timeout is reached.".into()),
             parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"question":{"type":"string","description":"The question to ask"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options (shown as 1️⃣, 2️⃣, etc.)"},"timeout_secs":{"type":"integer","default":300,"description":"How long to wait for response (seconds)"}},"required":["channel_id","question"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "ask_questions".into(),
+            description: Some("Ask the user MULTIPLE questions sequentially via Discord. Each question is asked one after another. The user can react with multiple emojis per question (3s debounce). Returns a JSON object mapping each label to its answer. Use this instead of ask_question when you have multiple related questions.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"questions":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string","description":"Short label for this answer (e.g. 'partition', 'username')"},"question":{"type":"string","description":"The question text"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options"}},"required":["label","question"]},"description":"Array of questions to ask sequentially"},"timeout_secs":{"type":"integer","default":120,"description":"Timeout per individual question (seconds)"}},"required":["channel_id","questions"]}),
             is_enabled: false,
         },
     ]

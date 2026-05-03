@@ -241,11 +241,53 @@ pub async fn run_agent_loop(
             });
         }
 
+        // Inject latest VM screenshot so the LLM always sees the current state
+        if let Some(ss_path) = ctx
+            .custom_data
+            .get("vm_last_screenshot")
+            .and_then(|v| v.as_str())
+        {
+            if let Some(data_url) = crate::tools::vm_tools::screenshot_to_data_url(ss_path) {
+                messages.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: Some(
+                        "[Current VM screenshot — this is what is on screen right now]".to_string(),
+                    ),
+                    content_parts: Some(vec![
+                        crate::gateway::llm::provider::ContentPart::ImageUrl {
+                            image_url: crate::gateway::llm::provider::ImageUrlDetail {
+                                url: data_url,
+                                detail: Some("high".to_string()),
+                            },
+                        },
+                    ]),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+        }
+
         let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
         let (history, _history_tokens) = state
             .db
             .get_messages_with_token_budget(user_id, token_budget)?;
-        for msg in &history {
+
+        // Find the indices of the last 2 messages that have content_parts
+        // Only those will get image data sent to the LLM
+        let mut image_msg_indices: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        let mut found = 0;
+        for (i, msg) in history.iter().enumerate().rev() {
+            if msg.content_parts.as_ref().map_or(false, |p| !p.is_empty()) {
+                image_msg_indices.insert(i);
+                found += 1;
+                if found >= 2 {
+                    break;
+                }
+            }
+        }
+
+        for (msg_idx, msg) in history.iter().enumerate() {
             // Skip tool-call messages if setting is disabled
             if !ctx.settings.history_with_toolcalls
                 && (msg.role == "tool" || msg.tool_calls.is_some())
@@ -271,21 +313,19 @@ pub async fn run_agent_loop(
                     Some(msg.content.clone())
                 },
                 content_parts: {
-                    let cp = msg.content_parts.as_ref().map(|parts| {
-                        let converted: Vec<crate::gateway::llm::provider::ContentPart> = parts
-                            .iter()
-                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                            .collect();
-                        converted
-                    });
-                    if cp.as_ref().map_or(false, |v| !v.is_empty()) {
-                        tracing::info!(
-                            "Message {} has {} content_parts",
-                            msg.role,
-                            cp.as_ref().map(|v| v.len()).unwrap_or(0)
-                        );
+                    // Only include image data for the last 2 messages with content_parts
+                    if image_msg_indices.contains(&msg_idx) {
+                        let cp = msg.content_parts.as_ref().map(|parts| {
+                            let converted: Vec<crate::gateway::llm::provider::ContentPart> = parts
+                                .iter()
+                                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                                .collect();
+                            converted
+                        });
+                        cp
+                    } else {
+                        None
                     }
-                    cp
                 },
                 tool_calls,
                 tool_call_id: msg.tool_call_id.clone(),
@@ -600,11 +640,35 @@ pub async fn run_agent_loop(
                         .db
                         .get_messages_with_token_budget(user_id, keep_budget)
                     {
-                        let _ = state.db.clear_messages(user_id);
+                        // Filter out orphaned tool results (tool messages without preceding tool_calls)
+                        let mut valid_tool_call_ids: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
                         for msg in &recent {
+                            if let Some(ref tcs) = msg.tool_calls {
+                                for tc in tcs {
+                                    valid_tool_call_ids.insert(tc.id.clone());
+                                }
+                            }
+                        }
+                        let filtered: Vec<_> = recent
+                            .into_iter()
+                            .filter(|msg| {
+                                if msg.role == "tool" {
+                                    msg.tool_call_id
+                                        .as_ref()
+                                        .map(|id| valid_tool_call_ids.contains(id))
+                                        .unwrap_or(false)
+                                } else {
+                                    true
+                                }
+                            })
+                            .collect();
+
+                        let _ = state.db.clear_messages(user_id);
+                        for msg in &filtered {
                             let _ = state.db.add_message(user_id, msg);
                         }
-                        tracing::info!(user_id = %user_id, kept = recent.len(), "Compaction: kept recent messages, deleted older ones");
+                        tracing::info!(user_id = %user_id, kept = filtered.len(), "Compaction: kept recent messages, deleted older ones");
                     }
                 }
             }
@@ -631,12 +695,17 @@ pub async fn run_agent_loop(
         break;
     }
 
-    let final_response = state
-        .db
-        .get_messages(user_id, 1)?
-        .first()
+    // Find the last assistant message with actual content
+    let all_msgs = state.db.get_messages(user_id, 50)?;
+    let final_response = all_msgs
+        .iter()
+        .rev()
+        .find(|m| m.role == "assistant" && !m.content.is_empty() && m.tool_calls.is_none())
         .map(|m| m.content.clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            tracing::warn!(user_id = %user_id, "No assistant response found after agent loop");
+            "I processed your request but have no text response to share.".to_string()
+        });
 
     Ok(AgentLoopResult {
         response: final_response,
@@ -1004,7 +1073,15 @@ async fn execute_tool_call(
             .unwrap_or_else(|e| format!("Error: {}", e))
         }
         "discord_upload_file" => {
-            let channel_id = args["channel_id"].as_str().unwrap_or(user_id);
+            let fallback_ch = db
+                .load_context(user_id)
+                .ok()
+                .and_then(|ctx| ctx.settings.feedback_channel_id)
+                .unwrap_or_default();
+            let channel_id = args["channel_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&fallback_ch);
             let filename = args["filename"].as_str().unwrap_or("file");
             let base64_content = args["base64_content"].as_str().unwrap_or("");
             // Decode base64 to temp file, then upload
@@ -1038,7 +1115,15 @@ async fn execute_tool_call(
             }
         }
         "discord_send_message" => {
-            let channel_id = args["channel_id"].as_str().unwrap_or("");
+            let fallback_ch = db
+                .load_context(user_id)
+                .ok()
+                .and_then(|ctx| ctx.settings.feedback_channel_id)
+                .unwrap_or_default();
+            let channel_id = args["channel_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&fallback_ch);
             let message = args["message"].as_str().unwrap_or("");
             match crate::tools::discord_send_message::send_message(channel_id, message).await {
                 Ok(_) => "Message sent".to_string(),
@@ -1046,7 +1131,15 @@ async fn execute_tool_call(
             }
         }
         "discord_send_embed" => {
-            let channel_id = args["channel_id"].as_str().unwrap_or("");
+            let fallback_ch = db
+                .load_context(user_id)
+                .ok()
+                .and_then(|ctx| ctx.settings.feedback_channel_id)
+                .unwrap_or_default();
+            let channel_id = args["channel_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&fallback_ch);
             let title = args.get("title").and_then(|v| v.as_str());
             let description = args.get("description").and_then(|v| v.as_str());
             let url = args.get("url").and_then(|v| v.as_str());
@@ -1119,7 +1212,15 @@ async fn execute_tool_call(
             .to_string();
         }
         "send_screenshot_to_discord" => {
-            let channel_id = args["channel_id"].as_str().unwrap_or("");
+            let fallback_ch = db
+                .load_context(user_id)
+                .ok()
+                .and_then(|ctx| ctx.settings.feedback_channel_id)
+                .unwrap_or_default();
+            let channel_id = args["channel_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&fallback_ch);
             let caption = args["caption"].as_str();
             let vm_name = args["vm_name"].as_str().unwrap_or("praxis-vm");
             match crate::tools::discord_interactive::send_screenshot_to_discord(
@@ -1156,11 +1257,56 @@ async fn execute_tool_call(
                         .collect()
                 })
                 .unwrap_or_default();
+            let paired_discord_user_id = db
+                .get_pairing_by_internal_user(user_id)
+                .ok()
+                .flatten()
+                .map(|p| p.discord_user_id)
+                .unwrap_or_default();
             match crate::tools::discord_interactive::ask_question(
                 channel_id,
                 question,
                 &suggestions,
                 timeout,
+                &paired_discord_user_id,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "ask_questions" => {
+            let channel_id = args["channel_id"].as_str().unwrap_or("");
+            let timeout = args["timeout_secs"].as_u64().unwrap_or(300);
+            let paired_discord_user_id = db
+                .get_pairing_by_internal_user(user_id)
+                .ok()
+                .flatten()
+                .map(|p| p.discord_user_id)
+                .unwrap_or_default();
+            let questions_raw = args["questions"].as_array();
+            let mut questions: Vec<(String, String, Vec<String>)> = Vec::new();
+            if let Some(arr) = questions_raw {
+                for q in arr {
+                    let label = q["label"].as_str().unwrap_or("").to_string();
+                    let text = q["question"].as_str().unwrap_or("").to_string();
+                    let suggestions: Vec<String> = q["suggestions"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    questions.push((label, text, suggestions));
+                }
+            }
+            match crate::tools::discord_interactive::ask_questions(
+                channel_id,
+                &questions,
+                timeout,
+                &paired_discord_user_id,
             )
             .await
             {
