@@ -169,6 +169,7 @@ impl LLMRouter {
                 content_parts: None,
                 tool_calls: response.tool_calls.clone(),
                 tool_call_id: None,
+                tool_name: None,
             });
 
             // If no tool calls, we're done
@@ -379,6 +380,7 @@ impl LLMRouter {
                     content_parts,
                     tool_calls: None,
                     tool_call_id: Some(tool_call.id.clone()),
+                    tool_name: Some(tool_call.function.name.clone()),
                 });
             }
 

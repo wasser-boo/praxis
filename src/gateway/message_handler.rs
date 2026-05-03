@@ -65,6 +65,16 @@ pub async fn handle_message(
                 }),
             );
 
+            let tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
+            let tools_context: Vec<serde_json::Value> = tools.iter().map(|t| {
+                serde_json::json!({
+                    "name": t.function.name,
+                    "description": t.function.description,
+                    "parameters": t.function.parameters
+                })
+            }).collect();
+            obj.insert("tools".to_string(), serde_json::json!(tools_context));
+
             let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
             let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
             let (_all_msgs, tokens_used) = state
@@ -119,6 +129,7 @@ pub async fn handle_message(
         content_parts: None,
         tool_calls: None,
         tool_call_id: None,
+        tool_name: None,
     });
 
     let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
@@ -147,11 +158,16 @@ pub async fn handle_message(
             content_parts: None,
             tool_calls,
             tool_call_id: msg.tool_call_id.clone(),
+            tool_name: msg.tool_name.clone(),
         });
     }
 
     let mut tool_defs = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
     tool_defs.extend(state.plugins.tool_definitions());
+
+    // Clone tool names and definitions for validation before moving tool_defs into request
+    let tool_names: Vec<String> = tool_defs.iter().map(|t| t.function.name.clone()).collect();
+    let tools_for_validation = tool_defs.clone();
 
     let request = ChatRequest {
         messages,
@@ -192,6 +208,34 @@ pub async fn handle_message(
 
         let mut results = Vec::new();
         for tc in tool_calls {
+            // Validate tool exists before executing
+            if !tool_names.contains(&tc.function.name) {
+                let result = format!("Error: Unknown tool '{}'. Check the tool name and try again.", tc.function.name);
+                tracing::warn!(user_id = %user_id, tool = %tc.function.name, "Unknown tool called");
+                
+                // Add error as tool result so LLM can recover
+                let msg = crate::db::messages::Message::tool(result.clone(), tc.id.clone());
+                let mut msg = msg;
+                msg.tool_name = Some(tc.function.name.clone());
+                state.db.add_message(user_id, &msg)?;
+                results.push((tc.id.clone(), result));
+                continue;
+            }
+
+            // Validate required parameters
+            let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+            if let Err(e) = crate::gateway::agent_loop::validate_tool_params(&tc.function.name, &args, &tools_for_validation) {
+                let result = format!("Error: {}", e);
+                tracing::warn!(user_id = %user_id, tool = %tc.function.name, error = %e, "Invalid tool parameters");
+                
+                let msg = crate::db::messages::Message::tool(result.clone(), tc.id.clone());
+                let mut msg = msg;
+                msg.tool_name = Some(tc.function.name.clone());
+                state.db.add_message(user_id, &msg)?;
+                results.push((tc.id.clone(), result));
+                continue;
+            }
+
             let result = execute_tool_call(&state.db, user_id, tc, &state.plugins).await;
             let mut image_content_parts: Option<Vec<serde_json::Value>> = None;
             let mut final_result = result.clone();
@@ -221,6 +265,9 @@ pub async fn handle_message(
             } else {
                 crate::db::messages::Message::tool(final_result.clone(), tc.id.clone())
             };
+            // Set tool_name for Ollama compatibility
+            let mut msg = msg;
+            msg.tool_name = Some(tc.function.name.clone());
             state.db.add_message(user_id, &msg)?;
             results.push((tc.id.clone(), final_result));
         }
@@ -232,6 +279,7 @@ pub async fn handle_message(
             content_parts: None,
             tool_calls: None,
             tool_call_id: None,
+            tool_name: None,
         });
         let (history, _tokens) = state
             .db
@@ -282,6 +330,7 @@ pub async fn handle_message(
                 },
                 tool_calls,
                 tool_call_id: msg.tool_call_id.clone(),
+                tool_name: msg.tool_name.clone(),
             });
         }
 
@@ -464,6 +513,18 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
     // Load memory
     let memory = crate::db::memory::load_memory(&state.db, &ctx.user_id);
 
+    // Load tools for context
+    let tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
+    tracing::debug!(target: "message_handler", "Loaded {} tool definitions", tools.len());
+    let tools_context: Vec<serde_json::Value> = tools.iter().map(|t| {
+        serde_json::json!({
+            "name": t.function.name,
+            "description": t.function.description,
+            "parameters": t.function.parameters
+        })
+    }).collect();
+    tracing::debug!(target: "message_handler", "Tools context: {}", serde_json::to_string(&tools_context).unwrap_or_default());
+
     // Calculate uptime
     let uptime_secs = state.start_time.elapsed().as_secs();
     let uptime = format_uptime(uptime_secs);
@@ -488,6 +549,7 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
         "turn": ctx.turn,
         "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
         "skills": skills,
+        "tools": tools_context,
         "uptime": uptime,
         "uptime_secs": uptime_secs,
         "paired_users_count": paired_count,
@@ -510,7 +572,10 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
     });
 
     match crate::gateway::poml::render(&template_path, &context).await {
-        Ok(rendered) => rendered,
+        Ok(rendered) => {
+            tracing::debug!(target: "message_handler", "Rendered system prompt (first 2000 chars): {}", &rendered[..rendered.len().min(2000)]);
+            rendered
+        },
         Err(e) => {
             tracing::warn!("Failed to render POML template: {}, using fallback", e);
             format!(

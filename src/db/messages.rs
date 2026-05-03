@@ -20,6 +20,8 @@ pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallData>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_parts: Option<Vec<serde_json::Value>>,
@@ -31,6 +33,7 @@ impl Message {
             role: "user".to_string(),
             content,
             tool_call_id: None,
+            tool_name: None,
             tool_calls: None,
             content_parts: None,
         }
@@ -41,6 +44,7 @@ impl Message {
             role: "assistant".to_string(),
             content,
             tool_call_id: None,
+            tool_name: None,
             tool_calls: None,
             content_parts: None,
         }
@@ -51,6 +55,7 @@ impl Message {
             role: "assistant".to_string(),
             content,
             tool_call_id: None,
+            tool_name: None,
             tool_calls: Some(tool_calls),
             content_parts: None,
         }
@@ -61,6 +66,7 @@ impl Message {
             role: "tool".to_string(),
             content,
             tool_call_id: Some(tool_call_id),
+            tool_name: None,
             tool_calls: None,
             content_parts: None,
         }
@@ -75,6 +81,7 @@ impl Message {
             role: "tool".to_string(),
             content,
             tool_call_id: Some(tool_call_id),
+            tool_name: None,
             tool_calls: None,
             content_parts: Some(content_parts),
         }
@@ -111,8 +118,8 @@ impl Database {
             .map(|cp| serde_json::to_string(cp).unwrap_or_default());
         let conn = self.conn();
         let id = conn.execute(
-            "INSERT INTO messages (user_id, role, content, tool_call_id, tool_calls, content_parts) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![user_id, msg.role, msg.content, msg.tool_call_id, tool_calls_json, content_parts_json],
+            "INSERT INTO messages (user_id, role, content, tool_call_id, tool_name, tool_calls, content_parts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![user_id, msg.role, msg.content, msg.tool_call_id, msg.tool_name, tool_calls_json, content_parts_json],
         )?;
         Ok(id as i64)
     }
@@ -120,21 +127,22 @@ impl Database {
     pub fn get_messages(&self, user_id: &str, limit: i32) -> anyhow::Result<Vec<Message>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_calls, content_parts FROM messages WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2"
+            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts FROM messages WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2"
         )?;
 
         let messages = stmt
             .query_map(rusqlite::params![user_id, limit], |row| {
-                let tool_calls_json: Option<String> = row.get(3)?;
+                let tool_calls_json: Option<String> = row.get(4)?;
                 let tool_calls: Option<Vec<ToolCallData>> =
                     tool_calls_json.and_then(|json| serde_json::from_str(&json).ok());
-                let content_parts_json: Option<String> = row.get(4)?;
+                let content_parts_json: Option<String> = row.get(5)?;
                 let content_parts: Option<Vec<serde_json::Value>> =
                     content_parts_json.and_then(|json| serde_json::from_str(&json).ok());
                 Ok(Message {
                     role: row.get(0)?,
                     content: row.get(1)?,
                     tool_call_id: row.get(2)?,
+                    tool_name: row.get(3)?,
                     tool_calls,
                     content_parts,
                 })
@@ -151,22 +159,23 @@ impl Database {
     ) -> anyhow::Result<(Vec<Message>, usize)> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_calls, content_parts FROM messages WHERE user_id = ?1 ORDER BY id DESC",
+            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts FROM messages WHERE user_id = ?1 ORDER BY id DESC",
         )?;
 
         let mut messages = Vec::new();
         let mut total_tokens = 0usize;
         let rows = stmt.query_map(rusqlite::params![user_id], |row| {
-            let tool_calls_json: Option<String> = row.get(3)?;
+            let tool_calls_json: Option<String> = row.get(4)?;
             let tool_calls: Option<Vec<ToolCallData>> =
                 tool_calls_json.and_then(|json| serde_json::from_str(&json).ok());
-            let content_parts_json: Option<String> = row.get(4)?;
+            let content_parts_json: Option<String> = row.get(5)?;
             let content_parts: Option<Vec<serde_json::Value>> =
                 content_parts_json.and_then(|json| serde_json::from_str(&json).ok());
             Ok(Message {
                 role: row.get(0)?,
                 content: row.get(1)?,
                 tool_call_id: row.get(2)?,
+                tool_name: row.get(3)?,
                 tool_calls,
                 content_parts,
             })

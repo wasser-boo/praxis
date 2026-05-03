@@ -302,7 +302,7 @@ fn get_default_tools() -> Vec<Tool> {
         },
         Tool {
             name: "ask_questions".into(),
-            description: Some("Ask the user one or more questions sequentially via Discord and wait for responses. Each question is asked one after another. The user can react with emojis (3s debounce) or type their answer. Returns a JSON object mapping each label to its answer. Works for a single question too - just provide one entry in the questions array.".into()),
+            description: Some("Ask the user questions via Discord. REQUIRED format: {\"channel_id\": \"123\", \"questions\": [{\"label\": \"name\", \"question\": \"What is your name?\"}, {\"label\": \"color\", \"question\": \"Pick a color\", \"suggestions\": [\"red\", \"blue\", \"green\"]}]}. Each question needs 'label' (short key) and 'question' (the text). 'suggestions' are optional emoji buttons.".into()),
             parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"questions":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string","description":"Short label for this answer (e.g. 'username', 'choice')"},"question":{"type":"string","description":"The question text"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options (shown as emoji buttons)"}},"required":["label","question"]},"description":"Array of one or more questions to ask sequentially"},"timeout_secs":{"type":"integer","default":120,"description":"Timeout per individual question (seconds)"}},"required":["channel_id","questions"]}),
             is_enabled: false,
         },

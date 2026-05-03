@@ -130,6 +130,16 @@ pub async fn run_agent_loop(
                 }),
             );
 
+            let tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
+            let tools_context: Vec<serde_json::Value> = tools.iter().map(|t| {
+                serde_json::json!({
+                    "name": t.function.name,
+                    "description": t.function.description,
+                    "parameters": t.function.parameters
+                })
+            }).collect();
+            obj.insert("tools".to_string(), serde_json::json!(tools_context));
+
             let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
             let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
             let (_all_msgs, tokens_used) = state
@@ -225,6 +235,7 @@ pub async fn run_agent_loop(
             content_parts: None,
             tool_calls: None,
             tool_call_id: None,
+            tool_name: None,
         }];
 
         // Add compaction summary if available
@@ -238,6 +249,7 @@ pub async fn run_agent_loop(
                 content_parts: None,
                 tool_calls: None,
                 tool_call_id: None,
+                tool_name: None,
             });
         }
 
@@ -263,6 +275,7 @@ pub async fn run_agent_loop(
                     ]),
                     tool_calls: None,
                     tool_call_id: None,
+                    tool_name: None,
                 });
             }
         }
@@ -329,6 +342,7 @@ pub async fn run_agent_loop(
                 },
                 tool_calls,
                 tool_call_id: msg.tool_call_id.clone(),
+                tool_name: msg.tool_name.clone(),
             });
         }
 
@@ -336,8 +350,12 @@ pub async fn run_agent_loop(
         let mut tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
         tools.extend(state.plugins.tool_definitions());
 
+        // Clone tool names and definitions for validation before moving tools into request
+        let tool_names: Vec<String> = tools.iter().map(|t| t.function.name.clone()).collect();
+        let tools_for_validation = tools.clone();
+
         let request = ChatRequest {
-            messages,
+            messages: messages.clone(),
             tools: if tools.is_empty() { None } else { Some(tools) },
             temperature: Some(0.7),
             max_tokens: Some(4096),
@@ -401,6 +419,40 @@ pub async fn run_agent_loop(
                 if tool_call_count >= config.max_tool_calls {
                     tracing::warn!(user_id = %user_id, "Max tool calls reached");
                     break;
+                }
+
+                // Validate tool exists before executing
+                if !tool_names.contains(&tc.function.name) {
+                    let result = format!("Error: Unknown tool '{}'. Check the tool name and try again.", tc.function.name);
+                    tracing::warn!(user_id = %user_id, tool = %tc.function.name, "Unknown tool called");
+                    
+                    // Add error as tool result so LLM can recover
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(result.clone()),
+                        content_parts: None,
+                        tool_calls: None,
+                        tool_call_id: Some(tc.id.clone()),
+                        tool_name: Some(tc.function.name.clone()),
+                    });
+                    continue;
+                }
+
+                // Validate required parameters
+                let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                if let Err(e) = validate_tool_params(&tc.function.name, &args, &tools_for_validation) {
+                    let result = format!("Error: {}", e);
+                    tracing::warn!(user_id = %user_id, tool = %tc.function.name, error = %e, "Invalid tool parameters");
+                    
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(result.clone()),
+                        content_parts: None,
+                        tool_calls: None,
+                        tool_call_id: Some(tc.id.clone()),
+                        tool_name: Some(tc.function.name.clone()),
+                    });
+                    continue;
                 }
 
                 if let Some(ref tx) = feedback_tx {
@@ -482,6 +534,9 @@ pub async fn run_agent_loop(
                 } else {
                     crate::db::messages::Message::tool(final_result, tc.id.clone())
                 };
+                // Set tool_name for Ollama compatibility
+                let mut msg = msg;
+                msg.tool_name = Some(tc.function.name.clone());
                 state.db.add_message(user_id, &msg)?;
                 tool_call_count += 1;
             }
@@ -762,6 +817,7 @@ pub async fn generate_compaction_summary(
             content_parts: None,
             tool_calls: None,
             tool_call_id: None,
+            tool_name: None,
         }],
         tools: None,
         temperature: Some(0.3),
@@ -823,16 +879,32 @@ async fn build_system_prompt(
         "variables": memory.custom_variables,
     });
 
+    // Load tools for context (so system prompt can list them)
+    let tools = crate::db::tools::to_tool_definitions(&_state.db).unwrap_or_default();
+    tracing::debug!(target: "agent_loop", "Loaded {} tool definitions", tools.len());
+    let tools_context: Vec<serde_json::Value> = tools.iter().map(|t| {
+        serde_json::json!({
+            "name": t.function.name,
+            "description": t.function.description,
+            "parameters": t.function.parameters
+        })
+    }).collect();
+    tracing::debug!(target: "agent_loop", "Tools context: {}", serde_json::to_string(&tools_context).unwrap_or_default());
+    context_json["tools"] = serde_json::json!(tools_context);
+
     context_json["custom_data"] = if ctx.custom_data.is_null() {
         serde_json::json!({})
     } else {
         ctx.custom_data.clone()
     };
 
-    let template_name = ctx.settings.system_template.as_deref().unwrap_or("system");
-    let template_path = format!("templates/{}.poml", template_name);
-    match crate::gateway::poml::render(&template_path, &context_json).await {
-        Ok(rendered) => rendered,
+        let template_name = ctx.settings.system_template.as_deref().unwrap_or("system");
+        let template_path = format!("templates/{}.poml", template_name);
+        match crate::gateway::poml::render(&template_path, &context_json).await {
+            Ok(rendered) => {
+                tracing::debug!(target: "agent_loop", "Rendered system prompt (first 2000 chars): {}", &rendered[..rendered.len().min(2000)]);
+                rendered
+            },
         Err(e) => {
             tracing::warn!("Failed to render POML: {}, using fallback", e);
             format!(
@@ -1337,6 +1409,35 @@ async fn execute_tool_call(
             }
         }
     }
+}
+
+/// Validate tool parameters against the tool definition
+pub fn validate_tool_params(
+    tool_name: &str,
+    args: &serde_json::Value,
+    tool_defs: &[crate::gateway::llm::provider::ToolDefinition],
+) -> Result<(), String> {
+    let tool_def = tool_defs.iter().find(|t| t.function.name == tool_name);
+    if let Some(def) = tool_def {
+        let params = &def.function.parameters;
+        if let Some(required) = params.get("required").and_then(|r| r.as_array()) {
+            let mut missing = Vec::new();
+            for req in required {
+                if let Some(key) = req.as_str() {
+                    if args.get(key).is_none() || args.get(key).unwrap().is_null() {
+                        missing.push(key.to_string());
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                return Err(format!(
+                    "Missing required parameters: {}. Provide these in the arguments.",
+                    missing.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

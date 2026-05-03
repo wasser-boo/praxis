@@ -7,6 +7,7 @@
     <section if="mode == 'agent'">
       <p>You have access to tools. Use them when needed to accomplish tasks.</p>
       <p>Always explain what you're doing before using a tool.</p>
+      <p>To use a tool, respond with a tool call in the format: <code inline="true">{"name": "tool_name", "arguments": {...}}</code></p>
     </section>
 
     <section if="mode == 'chat'">
@@ -19,6 +20,12 @@
     <list>
       <item for="skill in skills"><b>{{ skill.name }}</b>: {{ skill.description }}</item>
     </list>
+  </cp>
+
+  <cp caption="Available Tools" if="mode == 'agent'">
+    <p>You have access to the following tools. Use them to accomplish tasks:</p>
+    <p>{{tools}}</p>
+    <p>To use a tool, you MUST call it using the tool calling mechanism. Do NOT just describe what you would do - actually call the tool.</p>
   </cp>
 
   <cp caption="Rules">
