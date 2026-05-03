@@ -2049,8 +2049,14 @@ impl VmManager {
         ];
 
         match ch {
-            'a'..='z' => Ok(press(&ch.to_string())),
-            'A'..='Z' => Ok(shift_press(&ch.to_lowercase().to_string())),
+            // German layout: Y and Z are swapped (QWERTZ vs QWERTY)
+            'y' => Ok(press("z")),  // German 'y' is on physical 'z' key
+            'z' => Ok(press("y")),  // German 'z' is on physical 'y' key
+            'Y' => Ok(shift_press("z")),
+            'Z' => Ok(shift_press("y")),
+            // Other letters (a-x are the same)
+            'a'..='x' => Ok(press(&ch.to_string())),
+            'A'..='X' => Ok(shift_press(&ch.to_lowercase().to_string())),
             '0'..='9' => Ok(press(&ch.to_string())),
             ' ' => Ok(press("spc")),
             '\n' | '\r' => Ok(press("ret")),
