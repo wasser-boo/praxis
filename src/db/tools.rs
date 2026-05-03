@@ -343,7 +343,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 31);
+        assert_eq!(tools.len(), 32);
     }
 
     #[test]
@@ -352,7 +352,7 @@ mod tool_tests {
         init_default_tools(&db).unwrap();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 31);
+        assert_eq!(tools.len(), 32);
     }
 
     #[test]
