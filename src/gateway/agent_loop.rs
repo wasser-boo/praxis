@@ -2,6 +2,31 @@ use crate::cl;
 use crate::gateway::llm::provider::{ChatMessage, ChatRequest, ToolCall};
 use crate::gateway::GatewayState;
 use crate::tags::{self, TagExecution};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+/// Global registry of active agent loops and their user input channels
+static ACTIVE_LOOPS: once_cell::sync::Lazy<Arc<RwLock<HashMap<String, UserInputChannel>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+
+/// Get a sender for injecting user input into an active agent loop
+pub async fn get_user_input_sender(user_id: &str) -> Option<tokio::sync::mpsc::UnboundedSender<String>> {
+    let loops = ACTIVE_LOOPS.read().await;
+    loops.get(user_id).map(|ch| ch.sender())
+}
+
+/// Register an active agent loop
+async fn register_active_loop(user_id: &str, channel: UserInputChannel) {
+    let mut loops = ACTIVE_LOOPS.write().await;
+    loops.insert(user_id.to_string(), channel);
+}
+
+/// Unregister an active agent loop
+async fn unregister_active_loop(user_id: &str) {
+    let mut loops = ACTIVE_LOOPS.write().await;
+    loops.remove(user_id);
+}
 
 #[derive(Debug)]
 pub struct AgentLoopResult {
@@ -34,10 +59,32 @@ impl Default for AgentLoopConfig {
     }
 }
 
+/// Channel for injecting user messages into a running agent loop
+pub struct UserInputChannel {
+    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+impl UserInputChannel {
+    pub fn new() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self { rx, tx }
+    }
+
+    pub fn sender(&self) -> tokio::sync::mpsc::UnboundedSender<String> {
+        self.tx.clone()
+    }
+
+    /// Try to receive a user message without blocking
+    pub fn try_recv(&mut self) -> Option<String> {
+        self.rx.try_recv().ok()
+    }
+}
+
 pub async fn run_agent_loop(
     state: &GatewayState,
     user_id: &str,
-    user_message: &str,
+    user_message_input: &str,
     config: AgentLoopConfig,
     feedback_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> anyhow::Result<AgentLoopResult> {
@@ -45,6 +92,12 @@ pub async fn run_agent_loop(
     let mut completed = false;
     let mut advanced = false;
     let mut last_tag_execution = None;
+    let mut user_message = user_message_input.to_string();
+
+    // Create user input channel and register it globally
+    let mut user_input = UserInputChannel::new();
+    let user_input_tx = user_input.sender();
+    register_active_loop(user_id, UserInputChannel::new()).await;
 
     // Load context
     let mut ctx = state.db.load_context(user_id)?;
@@ -218,6 +271,30 @@ pub async fn run_agent_loop(
     )?;
 
     loop {
+        // Check for user input during execution
+        if let Some(user_msg) = user_input.try_recv() {
+            tracing::info!(user_id = %user_id, turn = turn, "Received user input during agent loop: {}", user_msg);
+            
+            // Store user message in history
+            state.db.add_message(
+                user_id,
+                &crate::db::messages::Message::user(user_msg.clone()),
+            )?;
+            
+            // Reset turn counter to allow more turns
+            turn = 0;
+            
+            // Send feedback if enabled
+            if let Some(ref tx) = feedback_tx {
+                let _ = tx.send(format!("User input received: {}", &user_msg));
+            }
+            
+            // Update user_message for the next system prompt build
+            user_message = user_msg;
+            
+            continue;
+        }
+
         if turn >= config.max_turns {
             tracing::warn!(user_id = %user_id, turn = turn, "Max turns reached");
             break;
@@ -228,7 +305,7 @@ pub async fn run_agent_loop(
         let _ = state.db.save_context(&ctx);
 
         // Build messages
-        let system_prompt = build_system_prompt(state, &ctx, user_message).await;
+        let system_prompt = build_system_prompt(state, &ctx, &user_message).await;
         let mut messages = vec![ChatMessage {
             role: "system".to_string(),
             content: Some(system_prompt),
@@ -749,6 +826,9 @@ pub async fn run_agent_loop(
         // If no tool calls and not completed, we're done with this message
         break;
     }
+
+    // Unregister this loop
+    unregister_active_loop(user_id).await;
 
     // Find the last assistant message with actual content
     let all_msgs = state.db.get_messages(user_id, 50)?;

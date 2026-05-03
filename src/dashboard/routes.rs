@@ -210,6 +210,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/vm/cd", axum::routing::post(vm_cd))
         .route("/vm/activity", axum::routing::get(vm_activity))
         .route("/vm/vnc", axum::routing::get(vm_vnc_viewer))
+        .route("/agent/input", axum::routing::post(send_agent_input))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             dashboard_auth_middleware,
@@ -1173,6 +1174,33 @@ async fn vm_activity(
         .unwrap_or_default();
 
     Ok(Json(serde_json::json!({ "activities": activities })))
+}
+
+#[derive(Deserialize)]
+struct AgentInputRequest {
+    user_id: String,
+    message: String,
+}
+
+async fn send_agent_input(
+    Json(req): Json<AgentInputRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match crate::gateway::agent_loop::get_user_input_sender(&req.user_id).await {
+        Some(sender) => {
+            if let Err(e) = sender.send(req.message.clone()) {
+                return Ok(Json(serde_json::json!({
+                    "error": format!("Failed to send message: {}", e)
+                })));
+            }
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "message": format!("Message sent to agent loop: {}", req.message)
+            })))
+        }
+        None => Ok(Json(serde_json::json!({
+            "error": "No active agent loop found for this user"
+        }))),
+    }
 }
 
 async fn vnc_viewer_page() -> axum::response::Html<&'static str> {

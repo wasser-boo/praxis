@@ -15,6 +15,11 @@ enum WsIncoming {
         #[allow(dead_code)]
         channel_id: Option<String>,
     },
+    #[serde(rename = "agent_input")]
+    AgentInput {
+        user_id: String,
+        content: String,
+    },
     #[serde(rename = "compact")]
     Compact { user_id: String },
     #[serde(rename = "ping")]
@@ -135,6 +140,36 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                                 tracing::error!("Compaction error: {}", e);
                                 let err = WsOutgoing::Error {
                                     message: format!("Compaction failed: {}", e),
+                                };
+                                let _ = sender
+                                    .send(Message::Text(serde_json::to_string(&err).unwrap()))
+                                    .await;
+                            }
+                        }
+                    }
+                    WsIncoming::AgentInput { user_id, content } => {
+                        match crate::gateway::agent_loop::get_user_input_sender(&user_id).await {
+                            Some(input_sender) => {
+                                if let Err(e) = input_sender.send(content.clone()) {
+                                    let err = WsOutgoing::Error {
+                                        message: format!("Failed to send input: {}", e),
+                                    };
+                                    let _ = sender
+                                        .send(Message::Text(serde_json::to_string(&err).unwrap()))
+                                        .await;
+                                } else {
+                                    let response = WsOutgoing::Feedback {
+                                        user_id,
+                                        content: format!("Input sent: {}", content),
+                                    };
+                                    let _ = sender
+                                        .send(Message::Text(serde_json::to_string(&response).unwrap()))
+                                        .await;
+                                }
+                            }
+                            None => {
+                                let err = WsOutgoing::Error {
+                                    message: "No active agent loop found for this user".to_string(),
                                 };
                                 let _ = sender
                                     .send(Message::Text(serde_json::to_string(&err).unwrap()))

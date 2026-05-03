@@ -177,6 +177,17 @@ impl EventHandler for DiscordHandler {
             }
         };
 
+        // Check if there's an active agent loop for this user - inject message if so
+        if let Some(sender) = crate::gateway::agent_loop::get_user_input_sender(&pairing.user_id).await {
+            tracing::info!("Injecting Discord message into active agent loop for user {}", pairing.user_id);
+            if let Err(e) = sender.send(msg.content.clone()) {
+                tracing::warn!("Failed to inject message into agent loop: {}", e);
+            } else {
+                let _ = msg.reply(&ctx.http, "Message received - continuing...").await;
+            }
+            return;
+        }
+
         if !self.check_channel_allowed(&msg).await {
             tracing::warn!("Message from guild/channel not in allowed list, ignoring");
             return;
