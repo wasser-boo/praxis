@@ -692,6 +692,10 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
                     .unwrap_or("")
                     .to_string()
             }),
+        ollama_api_key: env_lines
+            .iter()
+            .find(|l| l.starts_with("OLLAMA_API_KEY="))
+            .map(|l| l.strip_prefix("OLLAMA_API_KEY=").unwrap_or("").to_string()),
         minimax_api_key: env_lines
             .iter()
             .find(|l| l.starts_with("MINIMAX_API_KEY="))
@@ -971,8 +975,15 @@ fn select_provider(
                 "Ollama Model",
                 &get_existing(existing, "OLLAMA_MODEL", "llama3"),
             );
+            let api_key = prompt_with_default(
+                "Ollama API Key (optional, for Ollama Cloud)",
+                &get_existing(existing, "OLLAMA_API_KEY", ""),
+            );
             env_lines.push(format!("OLLAMA_API_BASE={}", base_url));
             env_lines.push(format!("OLLAMA_MODEL={}", model));
+            if !api_key.is_empty() {
+                env_lines.push(format!("OLLAMA_API_KEY={}", api_key));
+            }
             Ok("ollama".to_string())
         }
         "4" => {

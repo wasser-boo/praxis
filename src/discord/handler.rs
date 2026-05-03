@@ -104,8 +104,26 @@ impl EventHandler for DiscordHandler {
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
+        tracing::debug!(
+            author = %msg.author.id,
+            channel = %msg.channel_id,
+            content_len = msg.content.len(),
+            content = %msg.content,
+            "Received message"
+        );
+
         if msg.author.bot {
             return;
+        }
+
+        // Check for empty content which indicates missing MESSAGE_CONTENT intent
+        if msg.content.is_empty() {
+            tracing::warn!(
+                author = %msg.author.id,
+                channel = %msg.channel_id,
+                "Message has empty content - ensure MESSAGE_CONTENT intent is enabled in Discord Developer Portal (Bot -> Privileged Gateway Intents)"
+            );
+            // Don't return early - still process reactions and other interactions
         }
 
         if msg.content.starts_with('/') {
@@ -114,19 +132,21 @@ impl EventHandler for DiscordHandler {
 
         // Check if this is a response to a pending ask_question
         let channel_id = msg.channel_id.to_string();
-        {
-            let pending = crate::tools::discord_interactive::PENDING_QUESTIONS
-                .read()
-                .await;
-            if !pending.is_empty() {
-                crate::tools::discord_interactive::handle_message_reply(
-                    &channel_id,
-                    &msg.content,
-                    &msg.author.id.to_string(),
-                )
-                .await;
-                // Don't return — still process the message normally
-            }
+        let is_question_response = if !msg.content.is_empty() {
+            // Don't hold the lock while calling handle_message_reply
+            crate::tools::discord_interactive::handle_message_reply(
+                &channel_id,
+                &msg.content,
+                &msg.author.id.to_string(),
+            )
+            .await
+        } else {
+            false
+        };
+
+        // If this was a question response, don't process it as a normal message
+        if is_question_response {
+            return;
         }
 
         if let Some(guild_id) = msg.guild_id {

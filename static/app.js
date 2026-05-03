@@ -1005,7 +1005,7 @@ async function connectVNC(vmName) {
         }
 
         const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${wsProto}//${location.host}/websockify`;
+        const wsUrl = `${wsProto}//${location.host}/websockify?vm=${encodeURIComponent(vmName)}`;
 
         placeholder.textContent = 'Connecting to VNC...';
 

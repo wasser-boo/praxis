@@ -682,12 +682,104 @@ impl VmManager {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("QMP not connected for VM '{}'", name))?;
 
-        let key_events = Self::keys_to_qmp(keys)?;
+        // Check if it's a single special key name
+        let key_events = if Self::is_special_key(keys) {
+            Self::keys_to_qmp(keys)?
+        } else {
+            // It's a string - send each character individually
+            Self::string_to_qmp(keys)?
+        };
+        
         tracing::info!(keys = keys, events = ?key_events, "Sending QMP key events");
         for (qcode, down) in key_events {
             qmp.send_key_event(&qcode, down).await?;
+            // Small delay between characters for reliability
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         Ok(format!("Sent keys: {}", keys))
+    }
+
+    /// Check if the input is a known special key name
+    fn is_special_key(key: &str) -> bool {
+        // Check for modifier combinations like "ctrl+a", "alt+tab", etc.
+        if key.contains('+') {
+            return true;
+        }
+        matches!(key, 
+            "enter" | "return" | "esc" | "escape" | "tab" | "backspace" | "space" |
+            "capslock" | "caps_lock" | "numlock" | "num_lock" | "scrolllock" | "scroll_lock" |
+            "print" | "print_screen" | "prtsc" | "sysrq" |
+            "arrow_up" | "up" | "arrow_down" | "down" | "arrow_left" | "left" | "arrow_right" | "right" |
+            "pageup" | "page_up" | "pagedown" | "page_down" | "home" | "end" | "insert" | "delete" | "del" |
+            "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11" | "f12" |
+            "f13" | "f14" | "f15" | "f16" | "f17" | "f18" | "f19" | "f20" | "f21" | "f22" | "f23" | "f24" |
+            "kp0" | "numpad0" | "kp1" | "numpad1" | "kp2" | "numpad2" | "kp3" | "numpad3" |
+            "kp4" | "numpad4" | "kp5" | "numpad5" | "kp6" | "numpad6" | "kp7" | "numpad7" |
+            "kp8" | "numpad8" | "kp9" | "numpad9" | "kp_enter" | "numpad_enter" |
+            "kp_plus" | "numpad_plus" | "kp_minus" | "numpad_minus" |
+            "kp_multiply" | "numpad_multiply" | "kp_divide" | "numpad_divide" |
+            "kp_dot" | "numpad_dot" |
+            "ctrl" | "left_ctrl" | "right_ctrl" | "alt" | "left_alt" | "right_alt" |
+            "shift" | "left_shift" | "right_shift" | "super" | "meta" | "win" | "left_meta" | "right_meta"
+        )
+    }
+
+    /// Convert a string to QMP key events, handling special characters and modifier combos
+    fn string_to_qmp(s: &str) -> anyhow::Result<Vec<(String, bool)>> {
+        let mut events = Vec::new();
+        
+        // Check for modifier combinations like "ctrl+a", "alt+tab", "ctrl+alt+delete"
+        if s.contains('+') {
+            let parts: Vec<&str> = s.split('+').collect();
+            let mut modifiers = Vec::new();
+            let mut main_key = None;
+            
+            for part in &parts {
+                let part_lower = part.to_lowercase();
+                match part_lower.as_str() {
+                    "ctrl" | "control" => modifiers.push("ctrl"),
+                    "alt" => modifiers.push("alt"),
+                    "shift" => modifiers.push("shift"),
+                    "super" | "meta" | "win" => modifiers.push("meta_l"),
+                    _ => main_key = Some(part_lower),
+                }
+            }
+            
+            // Press all modifiers down
+            for mod_key in &modifiers {
+                events.push((mod_key.to_string(), true));
+            }
+            
+            // Press the main key
+            if let Some(key) = main_key {
+                let key_events = Self::keys_to_qmp(&key)?;
+                events.extend(key_events);
+            }
+            
+            // Release all modifiers (in reverse order)
+            for mod_key in modifiers.iter().rev() {
+                events.push((mod_key.to_string(), false));
+            }
+            
+            return Ok(events);
+        }
+        
+        // Regular string - send each character
+        for c in s.chars() {
+            let char_events = match c {
+                '\n' | '\r' => Self::keys_to_qmp("enter")?,
+                '\t' => Self::keys_to_qmp("tab")?,
+                ' ' => Self::keys_to_qmp("space")?,
+                '\x08' => Self::keys_to_qmp("backspace")?,
+                '\x1b' => Self::keys_to_qmp("esc")?,
+                _ => {
+                    let key = c.to_string();
+                    Self::keys_to_qmp(&key)?
+                }
+            };
+            events.extend(char_events);
+        }
+        Ok(events)
     }
 
     /// Send mouse input to the VM

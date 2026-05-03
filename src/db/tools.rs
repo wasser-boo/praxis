@@ -218,7 +218,7 @@ fn get_default_tools() -> Vec<Tool> {
         Tool {
             name: "understand_image".into(),
             description: Some("Load an image for visual analysis. The image is sent to the vision API - you WILL see and understand the image content in your next response. After calling this tool, describe what you see in the image. Use for screenshots, photos, or any visual content.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"Path to the image file (supports PPM, PNG, JPEG)"}},"required":["path"]}),
+            parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"Path to the image file (supports PPM, PNG, JPEG)"},"prompt":{"type":"string","description":"What to look for in the image. E.g. 'What menu options are shown?' or 'Describe the installation step shown'."}},"required":["path","prompt"]}),
             is_enabled: true,
         },
         // VM Tools (only enabled when VM=true)
@@ -302,8 +302,8 @@ fn get_default_tools() -> Vec<Tool> {
         },
         Tool {
             name: "ask_questions".into(),
-            description: Some("Ask the user questions via Discord. REQUIRED format: {\"channel_id\": \"123\", \"questions\": [{\"label\": \"name\", \"question\": \"What is your name?\"}, {\"label\": \"color\", \"question\": \"Pick a color\", \"suggestions\": [\"red\", \"blue\", \"green\"]}]}. Each question needs 'label' (short key) and 'question' (the text). 'suggestions' are optional emoji buttons.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"questions":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string","description":"Short label for this answer (e.g. 'username', 'choice')"},"question":{"type":"string","description":"The question text"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options (shown as emoji buttons)"}},"required":["label","question"]},"description":"Array of one or more questions to ask sequentially"},"timeout_secs":{"type":"integer","default":120,"description":"Timeout per individual question (seconds)"}},"required":["channel_id","questions"]}),
+            description: Some("Ask the user questions via Discord. Each question needs 'label' (short key for the answer), 'question' (the text to ask), and optionally 'suggestions' (array of plain strings like [\"yes\", \"no\", \"maybe\"] shown as emoji buttons). Do NOT use 'options' or objects - use 'suggestions' with simple strings only.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"questions":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string","description":"Short key for answer, e.g. 'color', 'choice'"},"question":{"type":"string","description":"The question text to ask"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options as plain strings, e.g. [\"red\", \"blue\", \"green\"]"}},"required":["label","question"]},"description":"Array of questions to ask"},"timeout_secs":{"type":"integer","default":120,"description":"Timeout per question in seconds"}},"required":["channel_id","questions"]}),
             is_enabled: false,
         },
     ]

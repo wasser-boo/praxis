@@ -358,6 +358,7 @@ async fn run_services(
             discord_bot_token: std::env::var("DISCORD_BOT_TOKEN").ok(),
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            ollama_api_key: std::env::var("OLLAMA_API_KEY").ok(),
             minimax_api_key: std::env::var("MINIMAX_API_KEY").ok(),
             mimo_api_key: std::env::var("MIMO_API_KEY").ok(),
             elevenlabs_api_key: std::env::var("ELEVENLABS_API_KEY").ok(),

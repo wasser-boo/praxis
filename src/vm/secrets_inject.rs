@@ -32,6 +32,9 @@ pub async fn inject_secrets(vm_name: &str, data_dir: &str) -> anyhow::Result<()>
     if write_secret("ANTHROPIC_API_KEY", &secrets.anthropic_api_key) {
         count += 1;
     }
+    if write_secret("OLLAMA_API_KEY", &secrets.ollama_api_key) {
+        count += 1;
+    }
     if write_secret("MINIMAX_API_KEY", &secrets.minimax_api_key) {
         count += 1;
     }
@@ -159,6 +162,9 @@ pub fn list_injected_keys() -> Vec<String> {
     }
     if secrets.anthropic_api_key.is_some() {
         keys.push("ANTHROPIC_API_KEY".into());
+    }
+    if secrets.ollama_api_key.is_some() {
+        keys.push("OLLAMA_API_KEY".into());
     }
     if secrets.minimax_api_key.is_some() {
         keys.push("MINIMAX_API_KEY".into());

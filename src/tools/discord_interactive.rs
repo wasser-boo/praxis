@@ -19,6 +19,7 @@ pub struct PendingQuestion {
     pub cancel_tx: Option<oneshot::Sender<Option<String>>>,
     pub channel_id: String,
     pub paired_discord_user_id: String,
+    pub suggestions: Vec<String>,
 }
 
 /// Send a VM screenshot to Discord
@@ -146,6 +147,7 @@ pub async fn ask_question(
                 cancel_tx: Some(cancel_tx),
                 channel_id: channel_id.to_string(),
                 paired_discord_user_id: paired_discord_user_id.to_string(),
+                suggestions: suggestions.to_vec(),
             },
         );
     }
@@ -154,6 +156,8 @@ pub async fn ask_question(
         question_id = %question_id,
         channel = %channel_id,
         paired_user = %paired_discord_user_id,
+        timeout_secs = timeout_secs,
+        suggestions = ?suggestions,
         "Waiting for user response (multi-reaction, {}s debounce)...",
         DEBOUNCE_SECS
     );
@@ -250,30 +254,26 @@ pub async fn ask_question(
 /// Each reaction is sent to the debounce collector. The question stays active
 /// until the debounce timer expires.
 pub async fn handle_reaction(channel_id: &str, emoji: &str, user_id: &str) {
-    // Build emoji-to-text map from the global EMOJIS list
-    let emoji_to_text: HashMap<&str, String> = EMOJIS
-        .iter()
-        .enumerate()
-        .map(|(i, &e)| (e, (i + 1).to_string()))
-        .chain(
-            [
-                ("✅", "yes".to_string()),
-                ("❌", "no".to_string()),
-                ("👍", "yes".to_string()),
-                ("👎", "no".to_string()),
-            ]
-            .into_iter(),
-        )
-        .collect();
-
-    let text = emoji_to_text
-        .get(emoji)
-        .cloned()
-        .unwrap_or_else(|| emoji.to_string());
-
     let pending = PENDING_QUESTIONS.read().await;
     for q in pending.values() {
         if q.channel_id == channel_id && q.paired_discord_user_id == user_id {
+            // Map emoji to suggestion text
+            let text = if let Some(idx) = EMOJIS.iter().position(|&e| e == emoji) {
+                if idx < q.suggestions.len() {
+                    q.suggestions[idx].clone()
+                } else {
+                    emoji.to_string()
+                }
+            } else {
+                // Handle special emojis
+                match emoji {
+                    "✅" => "yes".to_string(),
+                    "❌" => "no".to_string(),
+                    "👍" => "yes".to_string(),
+                    "👎" => "no".to_string(),
+                    _ => emoji.to_string(),
+                }
+            };
             let _ = q.reaction_tx.send(text).await;
             return;
         }
@@ -282,22 +282,46 @@ pub async fn handle_reaction(channel_id: &str, emoji: &str, user_id: &str) {
 
 /// Called by the Discord handler when a user sends a text message reply.
 /// Cancels the debounce timer and delivers the text immediately.
-pub async fn handle_message_reply(channel_id: &str, content: &str, user_id: &str) {
+/// Returns true if the message was consumed as a question response.
+pub async fn handle_message_reply(channel_id: &str, content: &str, user_id: &str) -> bool {
     let mut pending = PENDING_QUESTIONS.write().await;
     let keys: Vec<String> = pending.keys().cloned().collect();
+    tracing::info!(
+        channel = %channel_id,
+        user = %user_id,
+        content = %content,
+        pending_count = keys.len(),
+        "handle_message_reply called"
+    );
     for key in keys {
         if let Some(q) = pending.get(&key) {
-            if q.channel_id == channel_id && q.paired_discord_user_id == user_id {
+            let channel_match = q.channel_id == channel_id;
+            let user_match = q.paired_discord_user_id == user_id;
+            tracing::info!(
+                question_id = %key,
+                q_channel = %q.channel_id,
+                channel_match = channel_match,
+                q_user = %q.paired_discord_user_id,
+                user_match = user_match,
+                "Checking pending question"
+            );
+            if channel_match && user_match {
+                tracing::info!(
+                    question_id = %key,
+                    content = %content,
+                    "Matched pending question, delivering response"
+                );
                 // Take the cancel sender and send the text content
                 if let Some(mut q) = pending.remove(&key) {
                     if let Some(cancel_tx) = q.cancel_tx.take() {
                         let _ = cancel_tx.send(Some(content.to_string()));
                     }
                 }
-                return;
+                return true;
             }
         }
     }
+    false
 }
 
 /// Ask multiple questions sequentially. Each question is sent as a separate

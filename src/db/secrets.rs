@@ -16,6 +16,8 @@ pub struct Secrets {
     #[serde(default)]
     pub anthropic_api_key: Option<String>,
     #[serde(default)]
+    pub ollama_api_key: Option<String>,
+    #[serde(default)]
     pub elevenlabs_api_key: Option<String>,
     #[serde(default)]
     pub gateway_api_key: Option<String>,

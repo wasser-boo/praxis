@@ -4,14 +4,16 @@ use async_trait::async_trait;
 pub struct OllamaProvider {
     base_url: String,
     model: String,
+    api_key: Option<String>,
     client: reqwest::Client,
 }
 
 impl OllamaProvider {
-    pub fn new(base_url: String, model: String) -> Self {
+    pub fn new(base_url: String, model: String, api_key: Option<String>) -> Self {
         Self {
             base_url,
             model,
+            api_key,
             client: reqwest::Client::new(),
         }
     }
@@ -112,7 +114,13 @@ impl LLMProvider for OllamaProvider {
 
         tracing::debug!(target: "ollama", "Request body: {}", serde_json::to_string_pretty(&body).unwrap_or_default());
 
-        let resp = self.client.post(&url).json(&body).send().await?;
+        let mut req = self.client.post(&url).json(&body);
+        if let Some(ref key) = self.api_key {
+            if !key.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", key));
+            }
+        }
+        let resp = req.send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();

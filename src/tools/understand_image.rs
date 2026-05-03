@@ -9,10 +9,11 @@ pub struct ImageToolResult {
 /// Read an image file, convert to PNG if needed, and return as content_part
 pub async fn run(args: &serde_json::Value) -> ImageToolResult {
     let path = args["path"].as_str().unwrap_or("");
+    let prompt = args["prompt"].as_str().unwrap_or("");
 
-    if path.is_empty() {
+    if path.is_empty() || prompt.is_empty() {
         return ImageToolResult {
-            text: "Error: path is required".to_string(),
+            text: "Error: path and prompt are required".to_string(),
             content_parts: Vec::new(),
         };
     }
@@ -79,8 +80,10 @@ pub async fn run(args: &serde_json::Value) -> ImageToolResult {
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
     let data_url = format!("data:{};base64,{}", mime, b64);
 
+    let text = format!("Image loaded: {}. {}", path, prompt);
+
     ImageToolResult {
-        text: format!("Image loaded: {}. You can now see this image - describe what you observe in your response.", path),
+        text,
         content_parts: vec![ContentPart::ImageUrl {
             image_url: crate::gateway::llm::provider::ImageUrlDetail {
                 url: data_url,

@@ -1320,7 +1320,13 @@ async fn execute_tool_call(
         "ask_question" => {
             let channel_id = args["channel_id"].as_str().unwrap_or("");
             let question = args["question"].as_str().unwrap_or("");
-            let timeout = args["timeout_secs"].as_u64().unwrap_or(300);
+            // Get timeout from args, then context, then default to 120
+            let default_timeout = ctx_data
+                .as_ref()
+                .and_then(|c| c.get("question_timeout_secs"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(120);
+            let timeout = args["timeout_secs"].as_u64().unwrap_or(default_timeout);
             let suggestions: Vec<String> = args["suggestions"]
                 .as_array()
                 .map(|arr| {
@@ -1350,7 +1356,13 @@ async fn execute_tool_call(
         }
         "ask_questions" => {
             let channel_id = args["channel_id"].as_str().unwrap_or("");
-            let timeout = args["timeout_secs"].as_u64().unwrap_or(300);
+            // Get timeout from args, then context, then default to 120
+            let default_timeout = ctx_data
+                .as_ref()
+                .and_then(|c| c.get("question_timeout_secs"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(120);
+            let timeout = args["timeout_secs"].as_u64().unwrap_or(default_timeout);
             let paired_discord_user_id = db
                 .get_pairing_by_internal_user(user_id)
                 .ok()
@@ -1359,8 +1371,14 @@ async fn execute_tool_call(
                 .unwrap_or_default();
             let questions_raw = args["questions"].as_array();
             let mut questions: Vec<(String, String, Vec<String>)> = Vec::new();
+            let mut format_error = None;
             if let Some(arr) = questions_raw {
                 for q in arr {
+                    // Check for invalid 'options' field
+                    if q.get("options").is_some() {
+                        format_error = Some("Invalid format: use 'suggestions' with plain strings, not 'options' with objects. Example: \"suggestions\": [\"yes\", \"no\", \"maybe\"]".to_string());
+                        break;
+                    }
                     let label = q["label"].as_str().unwrap_or("").to_string();
                     let text = q["question"].as_str().unwrap_or("").to_string();
                     let suggestions: Vec<String> = q["suggestions"]
@@ -1374,16 +1392,21 @@ async fn execute_tool_call(
                     questions.push((label, text, suggestions));
                 }
             }
-            match crate::tools::discord_interactive::ask_questions(
-                channel_id,
-                &questions,
-                timeout,
-                &paired_discord_user_id,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(e) => format!("Error: {}", e),
+            if let Some(error) = format_error {
+                error
+            } else {
+                tracing::info!(timeout_secs = timeout, "ask_questions: waiting for responses");
+                match crate::tools::discord_interactive::ask_questions(
+                    channel_id,
+                    &questions,
+                    timeout,
+                    &paired_discord_user_id,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => format!("Error: {}", e),
+                }
             }
         }
         _ => {

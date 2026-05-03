@@ -67,6 +67,7 @@ pub struct SecretsInfo {
     pub discord_bot_token: String,
     pub openai_api_key: String,
     pub anthropic_api_key: String,
+    pub ollama_api_key: String,
     pub minimax_api_key: String,
     pub mimo_api_key: String,
     pub elevenlabs_api_key: String,
@@ -81,6 +82,7 @@ pub struct SecretsUpdate {
     pub discord_bot_token: Option<String>,
     pub openai_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
+    pub ollama_api_key: Option<String>,
     pub minimax_api_key: Option<String>,
     pub mimo_api_key: Option<String>,
     pub elevenlabs_api_key: Option<String>,
@@ -207,6 +209,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/vm/shared-folder", axum::routing::post(vm_shared_folder))
         .route("/vm/cd", axum::routing::post(vm_cd))
         .route("/vm/activity", axum::routing::get(vm_activity))
+        .route("/vm/vnc", axum::routing::get(vm_vnc_viewer))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             dashboard_auth_middleware,
@@ -695,6 +698,7 @@ async fn get_secrets() -> Result<Json<SecretsInfo>, StatusCode> {
         discord_bot_token: crate::db::secrets::mask_secret(&secrets.discord_bot_token),
         openai_api_key: crate::db::secrets::mask_secret(&secrets.openai_api_key),
         anthropic_api_key: crate::db::secrets::mask_secret(&secrets.anthropic_api_key),
+        ollama_api_key: crate::db::secrets::mask_secret(&secrets.ollama_api_key),
         minimax_api_key: crate::db::secrets::mask_secret(&secrets.minimax_api_key),
         mimo_api_key: crate::db::secrets::mask_secret(&secrets.mimo_api_key),
         elevenlabs_api_key: crate::db::secrets::mask_secret(&secrets.elevenlabs_api_key),
@@ -717,6 +721,9 @@ async fn update_secrets(Json(update): Json<SecretsUpdate>) -> Result<String, Sta
     }
     if let Some(v) = update.anthropic_api_key {
         secrets.anthropic_api_key = Some(v);
+    }
+    if let Some(v) = update.ollama_api_key {
+        secrets.ollama_api_key = Some(v);
     }
     if let Some(v) = update.minimax_api_key {
         secrets.minimax_api_key = Some(v);
@@ -1208,6 +1215,78 @@ async fn vnc_viewer_page() -> axum::response::Html<&'static str> {
     )
 }
 
+async fn vm_vnc_viewer(
+    Query(params): Query<HashMap<String, String>>,
+) -> axum::response::Html<String> {
+    let vm_name = params
+        .get("vm")
+        .cloned()
+        .unwrap_or_else(|| "praxis-vm".to_string());
+    // Get auth token from cookie or query param
+    let token = params.get("token").cloned().unwrap_or_default();
+
+    axum::response::Html(format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Praxis VNC - {0}</title>
+<style>
+  body {{ margin:0; background:#1a1a2e; display:flex; flex-direction:column; height:100vh; font-family:monospace; }}
+  #toolbar {{ padding:8px 12px; background:#16213e; display:flex; align-items:center; gap:12px; }}
+  #status {{ color:#e94560; font-size:14px; }}
+  #status.connected {{ color:#4ecca3; }}
+  #vm-name {{ color:#eee; font-size:14px; font-weight:bold; }}
+  #screen {{ flex:1; display:flex; align-items:center; justify-content:center; }}
+  canvas {{ max-width:100%; max-height:100%; }}
+  .btn {{ padding:4px 12px; background:#0f3460; color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px; }}
+  .btn:hover {{ background:#e94560; }}
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <span id="vm-name">{0}</span>
+  <span id="status">Connecting...</span>
+  <button class="btn" onclick="location.reload()">Reconnect</button>
+  <button class="btn" onclick="toggleFullscreen()">Fullscreen</button>
+</div>
+<div id="screen"></div>
+<script type="module">
+  import RFB from '/static/novnc/core/rfb.js';
+  const screen = document.getElementById('screen');
+  const status = document.getElementById('status');
+  const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const token = '{1}';
+  const vmName = '{0}';
+  const wsUrl = token
+    ? `${{wsProto}}//${{location.host}}/api/vm/vnc/ws?token=${{token}}&vm=${{vmName}}`
+    : `${{wsProto}}//${{location.host}}/websockify?vm=${{vmName}}`;
+  const rfb = new RFB(screen, wsUrl, {{ shared: true, credentials: {{}} }});
+  rfb.scaleViewport = true;
+  rfb.resizeSession = false;
+  rfb.addEventListener('connect', () => {{
+    status.textContent = 'Connected';
+    status.className = 'connected';
+  }});
+  rfb.addEventListener('disconnect', (e) => {{
+    status.textContent = `Disconnected: ${{e.detail.clean ? 'clean' : 'error'}}`;
+    status.className = '';
+  }});
+  window.toggleFullscreen = function() {{
+    const el = document.getElementById('screen');
+    if (document.fullscreenElement) {{
+      document.exitFullscreen();
+    }} else {{
+      el.requestFullscreen();
+    }}
+  }};
+</script>
+</body>
+</html>"#,
+        vm_name, token
+    ))
+}
+
 async fn vnc_ws_proxy(
     ws: axum::extract::ws::WebSocketUpgrade,
     Query(params): Query<HashMap<String, String>>,
@@ -1226,16 +1305,23 @@ async fn vnc_ws_proxy(
 }
 
 // noVNC /websockify endpoint — no auth required, defaults to praxis-vm
-async fn vnc_ws_proxy_noauth(ws: axum::extract::ws::WebSocketUpgrade) -> impl IntoResponse {
+async fn vnc_ws_proxy_noauth(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let vm_name = params
+        .get("vm")
+        .cloned()
+        .unwrap_or_else(|| "praxis-vm".to_string());
     ws.on_upgrade(move |socket| async move {
-        if let Err(e) = handle_vnc_proxy_noauth(socket).await {
+        if let Err(e) = handle_vnc_proxy_noauth(socket, &vm_name).await {
             tracing::warn!("VNC proxy error: {}", e);
         }
     })
 }
 
-async fn handle_vnc_proxy_noauth(socket: axum::extract::ws::WebSocket) -> anyhow::Result<()> {
-    tracing::info!("VNC proxy (noauth) handler called");
+async fn handle_vnc_proxy_noauth(socket: axum::extract::ws::WebSocket, vm_name: &str) -> anyhow::Result<()> {
+    tracing::info!("VNC proxy (noauth) handler called for VM: {}", vm_name);
     let manager = match crate::tools::vm_tools::get_vm_manager().await {
         Some(m) => m,
         None => {
@@ -1244,7 +1330,7 @@ async fn handle_vnc_proxy_noauth(socket: axum::extract::ws::WebSocket) -> anyhow
         }
     };
 
-    let vm_info = manager.get_vm_info("praxis-vm").await.map_err(|e| {
+    let vm_info = manager.get_vm_info(vm_name).await.map_err(|e| {
         tracing::error!("VNC proxy: failed to get VM info: {}", e);
         e
     })?;
