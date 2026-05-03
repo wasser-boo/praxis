@@ -60,6 +60,52 @@ pub struct SharedFolder {
     pub readonly: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum KeyboardLayout {
+    #[serde(rename = "us")]
+    US,
+    #[serde(rename = "de")]
+    DE,
+    #[serde(rename = "fr")]
+    FR,
+    #[serde(rename = "es")]
+    ES,
+    #[serde(rename = "it")]
+    IT,
+    #[serde(rename = "gb")]
+    GB,
+}
+
+impl KeyboardLayout {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "de" | "german" | "qwertz" => KeyboardLayout::DE,
+            "fr" | "french" | "azerty" => KeyboardLayout::FR,
+            "es" | "spanish" => KeyboardLayout::ES,
+            "it" | "italian" => KeyboardLayout::IT,
+            "gb" | "uk" | "british" => KeyboardLayout::GB,
+            _ => KeyboardLayout::US,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            KeyboardLayout::US => "us",
+            KeyboardLayout::DE => "de",
+            KeyboardLayout::FR => "fr",
+            KeyboardLayout::ES => "es",
+            KeyboardLayout::IT => "it",
+            KeyboardLayout::GB => "gb",
+        }
+    }
+}
+
+impl std::fmt::Display for KeyboardLayout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmConfig {
     pub name: String,
@@ -78,6 +124,7 @@ pub struct VmConfig {
     pub shared_folders: Vec<SharedFolder>,
     pub network_mode: String,
     pub audio_enabled: bool,
+    pub keyboard_layout: KeyboardLayout,
 }
 
 /// Detect the best acceleration method for the current OS
@@ -161,6 +208,7 @@ impl VmConfig {
             shared_folders: Vec::new(),
             network_mode: "user".to_string(),
             audio_enabled: false,
+            keyboard_layout: KeyboardLayout::US,
         }
     }
 
@@ -193,6 +241,8 @@ pub struct VmInstance {
     pub qmp: Option<qmp::QmpClient>,
     pub serial: Option<serial::SerialShell>,
     pub pid: Option<u32>,
+    pub current_iso: Option<String>,
+    pub keyboard_layout: KeyboardLayout,
 }
 
 /// VM Manager — manages all VM instances
@@ -553,6 +603,8 @@ impl VmManager {
             qmp,
             serial,
             pid,
+            current_iso: config.iso_path.clone(),
+            keyboard_layout: config.keyboard_layout.clone(),
         };
 
         instances.insert(config.name.clone(), instance);
@@ -574,7 +626,7 @@ impl VmManager {
             .get_mut(name)
             .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
 
-        if instance.status != VmStatus::Running {
+        if instance.status == VmStatus::Stopped {
             return Ok(format!("VM '{}' is not running", name));
         }
 
@@ -614,7 +666,29 @@ impl VmManager {
         Ok(format!("VM '{}' was not running", name))
     }
 
-    /// Execute a shell command in a VM via QMP keystrokes (visible in VNC)
+    /// Reboot a VM using QMP system_reset (preserves CD/media state)
+    pub async fn reboot_vm(&self, name: &str) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            anyhow::bail!("VM '{}' is not running (status: {})", name, instance.status);
+        }
+
+        let qmp = instance
+            .qmp
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("QMP not connected for VM '{}'", name))?;
+
+        qmp.system_reset().await?;
+        tracing::info!("Sent system_reset to VM '{}'", name);
+
+        Ok(format!("VM '{}' rebooted", name))
+    }
+
+    /// Execute a shell command in a VM and return the output
     pub async fn shell_exec(
         &self,
         name: &str,
@@ -630,40 +704,39 @@ impl VmManager {
             anyhow::bail!("VM '{}' is not running", name);
         }
 
-        // Send command via QMP keystrokes (visible in VNC)
-        if let Some(ref mut qmp) = instance.qmp {
-            // Type each character via QMP key events
-            for ch in command.chars() {
-                let events = Self::char_to_qmp_events(ch)?;
-                for (qcode, down) in events {
-                    qmp.send_key_event(&qcode, down).await?;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            // Send enter
-            qmp.send_key_event("ret", true).await?;
-            qmp.send_key_event("ret", false).await?;
-
-            // Wait for command to execute, then take screenshot
-            tokio::time::sleep(std::time::Duration::from_millis(timeout_secs.min(5) * 1000)).await;
-
-            let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
-            let screenshot_path = format!("{}/vm/{}/screenshot.ppm", data_dir, name);
-            let _ = qmp.screendump(&screenshot_path).await;
-
-            return Ok(format!(
-                "Command '{}' sent via QMP keystrokes. Output visible in VNC / screenshot.",
-                command
-            ));
+        // Always use serial for command execution (returns output)
+        if let Some(ref mut serial) = instance.serial {
+            return serial.execute(command, timeout_secs).await;
         }
 
-        // Fallback: use serial (not visible in VNC)
-        let serial = instance
-            .serial
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Neither QMP nor Serial connected for VM '{}'", name))?;
-
-        serial.execute(command, timeout_secs).await
+        // Fallback: if no serial, try to reconnect
+        let serial_addr = instance.config.serial_connect_addr();
+        match crate::vm::serial::SerialShell::connect(&serial_addr).await {
+            Ok(mut shell) => {
+                let result = shell.execute(command, timeout_secs).await;
+                instance.serial = Some(shell);
+                result
+            }
+            Err(e) => {
+                // Last resort: use QMP keystrokes (no output)
+                if let Some(ref mut qmp) = instance.qmp {
+                    let layout = instance.keyboard_layout.clone();
+                    for ch in command.chars() {
+                        let events = Self::char_to_qmp_events(ch, &layout)?;
+                        for (qcode, down) in events {
+                            qmp.send_key_event(&qcode, down).await?;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                    qmp.send_key_event("ret", true).await?;
+                    qmp.send_key_event("ret", false).await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(timeout_secs.min(5) * 1000)).await;
+                    Ok(format!("Command '{}' sent via QMP (no serial available). Output visible in VNC.", command))
+                } else {
+                    anyhow::bail!("Neither Serial nor QMP connected: {}", e)
+                }
+            }
+        }
     }
 
     /// Send raw keystrokes to a VM (all input via QMP so it's visible in VNC)
@@ -682,20 +755,72 @@ impl VmManager {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("QMP not connected for VM '{}'", name))?;
 
+        let layout = instance.keyboard_layout.clone();
+
         // Check if it's a single special key name
         let key_events = if Self::is_special_key(keys) {
             Self::keys_to_qmp(keys)?
         } else {
             // It's a string - send each character individually
-            Self::string_to_qmp(keys)?
+            Self::string_to_qmp(keys, &layout)?
         };
         
         tracing::info!(keys = keys, events = ?key_events, "Sending QMP key events");
-        for (qcode, down) in key_events {
-            qmp.send_key_event(&qcode, down).await?;
-            // Small delay between characters for reliability
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        for (qcode, down) in &key_events {
+            if qcode == "delay" {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+            qmp.send_key_event(qcode, *down).await?;
+            // Delay between key events for reliability
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         }
+        // Small pause after the full key sequence
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        Ok(format!("Sent keys: {}", keys))
+    }
+
+    /// Send keys with optional layout override
+    pub async fn send_keys_with_layout(&self, name: &str, keys: &str, layout_override: Option<&str>) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            anyhow::bail!("VM '{}' is not running", name);
+        }
+
+        let qmp = instance
+            .qmp
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("QMP not connected for VM '{}'", name))?;
+
+        // Use override layout, or instance layout
+        let layout = layout_override
+            .map(|s| KeyboardLayout::from_str(s))
+            .unwrap_or(instance.keyboard_layout.clone());
+
+        // Check if it's a single special key name
+        let key_events = if Self::is_special_key(keys) {
+            Self::keys_to_qmp(keys)?
+        } else {
+            // It's a string - send each character individually
+            Self::string_to_qmp(keys, &layout)?
+        };
+        
+        tracing::info!(keys = keys, layout = %layout, events = ?key_events, "Sending QMP key events");
+        for (qcode, down) in &key_events {
+            if qcode == "delay" {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+            qmp.send_key_event(qcode, *down).await?;
+            // Delay between key events for reliability
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        // Small pause after the full key sequence
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         Ok(format!("Sent keys: {}", keys))
     }
 
@@ -724,62 +849,118 @@ impl VmManager {
         )
     }
 
-    /// Convert a string to QMP key events, handling special characters and modifier combos
-    fn string_to_qmp(s: &str) -> anyhow::Result<Vec<(String, bool)>> {
+    /// Convert a string to QMP key events, handling special characters, modifier combos, and macros
+    fn string_to_qmp(s: &str, layout: &KeyboardLayout) -> anyhow::Result<Vec<(String, bool)>> {
         let mut events = Vec::new();
+        let chars: Vec<char> = s.chars().collect();
+        let mut i = 0;
         
-        // Check for modifier combinations like "ctrl+a", "alt+tab", "ctrl+alt+delete"
-        if s.contains('+') {
-            let parts: Vec<&str> = s.split('+').collect();
-            let mut modifiers = Vec::new();
-            let mut main_key = None;
-            
-            for part in &parts {
-                let part_lower = part.to_lowercase();
-                match part_lower.as_str() {
-                    "ctrl" | "control" => modifiers.push("ctrl"),
-                    "alt" => modifiers.push("alt"),
-                    "shift" => modifiers.push("shift"),
-                    "super" | "meta" | "win" => modifiers.push("meta_l"),
-                    _ => main_key = Some(part_lower),
+        while i < chars.len() {
+            // Check for macro syntax: (key)count e.g. (arrowdown)5 or (enter)3
+            if chars[i] == '(' {
+                // Find closing paren
+                if let Some(end_paren) = chars[i..].iter().position(|&c| c == ')') {
+                    let key_name: String = chars[i+1..i+end_paren].iter().collect();
+                    let after_paren = i + end_paren + 1;
+                    
+                    // Parse optional count after closing paren
+                    let mut count_str = String::new();
+                    let mut j = after_paren;
+                    while j < chars.len() && chars[j].is_ascii_digit() {
+                        count_str.push(chars[j]);
+                        j += 1;
+                    }
+                    let count: usize = if count_str.is_empty() { 1 } else { count_str.parse().unwrap_or(1) };
+                    
+                    // Generate key events count times
+                    let key_events = Self::keys_to_qmp(&key_name.to_lowercase())?;
+                    for _ in 0..count {
+                        events.extend(key_events.clone());
+                        // Small delay between repeats
+                        events.push(("delay".into(), true));
+                    }
+                    
+                    i = j;
+                    continue;
                 }
             }
             
-            // Press all modifiers down
-            for mod_key in &modifiers {
-                events.push((mod_key.to_string(), true));
+            // Check for modifier combinations like "ctrl+a", "alt+tab"
+            let remaining: String = chars[i..].iter().collect();
+            if remaining.contains('+') && !remaining.starts_with('+') {
+                let parts: Vec<&str> = remaining.split('+').collect();
+                let mut modifiers = Vec::new();
+                let mut main_key = None;
+                let mut consumed = 0;
+                
+                for (idx, part) in parts.iter().enumerate() {
+                    let part_lower = part.to_lowercase();
+                    match part_lower.as_str() {
+                        "ctrl" | "control" => {
+                            modifiers.push("ctrl");
+                            consumed += part.len() + 1; // +1 for the '+'
+                        }
+                        "alt" => {
+                            modifiers.push("alt");
+                            consumed += part.len() + 1;
+                        }
+                        "shift" => {
+                            modifiers.push("shift");
+                            consumed += part.len() + 1;
+                        }
+                        "super" | "meta" | "win" => {
+                            modifiers.push("meta_l");
+                            consumed += part.len() + 1;
+                        }
+                        _ => {
+                            main_key = Some(part_lower);
+                            consumed += part.len();
+                            break;
+                        }
+                    }
+                }
+                
+                if !modifiers.is_empty() && main_key.is_some() {
+                    // Press all modifiers down
+                    for mod_key in &modifiers {
+                        events.push((mod_key.to_string(), true));
+                    }
+                    
+                    // Press the main key
+                    if let Some(key) = main_key {
+                        let key_events = Self::keys_to_qmp(&key)?;
+                        events.extend(key_events);
+                    }
+                    
+                    // Release all modifiers (in reverse order)
+                    for mod_key in modifiers.iter().rev() {
+                        events.push((mod_key.to_string(), false));
+                    }
+                    
+                    i += consumed;
+                    continue;
+                }
             }
             
-            // Press the main key
-            if let Some(key) = main_key {
-                let key_events = Self::keys_to_qmp(&key)?;
-                events.extend(key_events);
-            }
-            
-            // Release all modifiers (in reverse order)
-            for mod_key in modifiers.iter().rev() {
-                events.push((mod_key.to_string(), false));
-            }
-            
-            return Ok(events);
-        }
-        
-        // Regular string - send each character
-        for c in s.chars() {
+            // Regular character
+            let c = chars[i];
             let char_events = match c {
                 '\n' | '\r' => Self::keys_to_qmp("enter")?,
                 '\t' => Self::keys_to_qmp("tab")?,
-                ' ' => Self::keys_to_qmp("space")?,
                 '\x08' => Self::keys_to_qmp("backspace")?,
                 '\x1b' => Self::keys_to_qmp("esc")?,
-                _ => {
-                    let key = c.to_string();
-                    Self::keys_to_qmp(&key)?
-                }
+                _ => Self::char_to_qmp_events(c, layout)?,
             };
             events.extend(char_events);
+            i += 1;
         }
-        Ok(events)
+        
+        // Filter out delay markers
+        let final_events: Vec<(String, bool)> = events.into_iter()
+            .filter(|(qcode, _)| qcode != "delay")
+            .collect();
+
+        Ok(final_events)
     }
 
     /// Send mouse input to the VM
@@ -926,6 +1107,8 @@ impl VmManager {
             "shared_folders": instance.config.shared_folders,
             "network_mode": instance.config.network_mode,
             "audio_enabled": instance.config.audio_enabled,
+            "current_iso": instance.current_iso,
+            "keyboard_layout": instance.keyboard_layout.to_string(),
         }))
     }
 
@@ -940,6 +1123,8 @@ impl VmManager {
                     "status": inst.status.to_string(),
                     "pid": inst.pid,
                     "vnc_port": inst.config.vnc_port,
+                    "current_iso": inst.current_iso,
+                    "keyboard_layout": inst.keyboard_layout.to_string(),
                 })
             })
             .collect()
@@ -986,10 +1171,12 @@ impl VmManager {
                     anyhow::bail!("ISO file not found: {}", path);
                 }
                 qmp.blockdev_change_medium("cd0", path).await?;
+                instance.current_iso = Some(path.to_string());
                 Ok(format!("CD '{}' inserted into VM '{}'", path, name))
             }
             None => {
                 qmp.eject("cd0").await?;
+                instance.current_iso = None;
                 Ok(format!("CD ejected from VM '{}'", name))
             }
         }
@@ -1789,15 +1976,31 @@ impl VmManager {
         }
     }
 
-    /// Convert a single character to QMP key events (for typing text via QMP)
-    fn char_to_qmp_events(ch: char) -> anyhow::Result<Vec<(String, bool)>> {
+    /// Convert a single character to QMP key events based on keyboard layout
+    fn char_to_qmp_events(ch: char, layout: &KeyboardLayout) -> anyhow::Result<Vec<(String, bool)>> {
+        match layout {
+            KeyboardLayout::DE => Self::char_to_qmp_de(ch),
+            KeyboardLayout::FR => Self::char_to_qmp_fr(ch),
+            KeyboardLayout::ES => Self::char_to_qmp_es(ch),
+            KeyboardLayout::IT => Self::char_to_qmp_it(ch),
+            KeyboardLayout::GB => Self::char_to_qmp_gb(ch),
+            KeyboardLayout::US | _ => Self::char_to_qmp_us(ch),
+        }
+    }
+
+    /// US keyboard layout (default)
+    fn char_to_qmp_us(ch: char) -> anyhow::Result<Vec<(String, bool)>> {
         let press = |k: &str| vec![(k.to_string(), true), (k.to_string(), false)];
+        let shift_press = |k: &str| vec![
+            ("shift".into(), true), (k.to_string(), true), (k.to_string(), false), ("shift".into(), false),
+        ];
 
         match ch {
             'a'..='z' => Ok(press(&ch.to_string())),
+            'A'..='Z' => Ok(shift_press(&ch.to_lowercase().to_string())),
             '0'..='9' => Ok(press(&ch.to_string())),
             ' ' => Ok(press("spc")),
-            '\n' => Ok(press("ret")),
+            '\n' | '\r' => Ok(press("ret")),
             '\t' => Ok(press("tab")),
             '-' => Ok(press("minus")),
             '=' => Ok(press("equal")),
@@ -1810,148 +2013,347 @@ impl VmManager {
             ',' => Ok(press("comma")),
             '.' => Ok(press("dot")),
             '/' => Ok(press("slash")),
+            '!' => Ok(shift_press("1")),
+            '@' => Ok(shift_press("2")),
+            '#' => Ok(shift_press("3")),
+            '$' => Ok(shift_press("4")),
+            '%' => Ok(shift_press("5")),
+            '^' => Ok(shift_press("6")),
+            '&' => Ok(shift_press("7")),
+            '*' => Ok(shift_press("8")),
+            '(' => Ok(shift_press("9")),
+            ')' => Ok(shift_press("0")),
+            '_' => Ok(shift_press("minus")),
+            '+' => Ok(shift_press("equal")),
+            '{' => Ok(shift_press("bracket_left")),
+            '}' => Ok(shift_press("bracket_right")),
+            '|' => Ok(shift_press("backslash")),
+            ':' => Ok(shift_press("semicolon")),
+            '"' => Ok(shift_press("apostrophe")),
+            '~' => Ok(shift_press("grave_accent")),
+            '<' => Ok(shift_press("comma")),
+            '>' => Ok(shift_press("dot")),
+            '?' => Ok(shift_press("slash")),
+            _ => { tracing::warn!(char = %ch, "Unsupported char for US layout"); Ok(vec![]) }
+        }
+    }
 
-            // Shifted characters
-            'A'..='Z' => {
-                let lower = ch.to_lowercase().to_string();
-                Ok(vec![
-                    ("shift".into(), true),
-                    (lower.clone(), true),
-                    (lower, false),
-                    ("shift".into(), false),
-                ])
-            }
-            '!' => Ok(vec![
-                ("shift".into(), true),
-                ("1".into(), true),
-                ("1".into(), false),
-                ("shift".into(), false),
-            ]),
-            '@' => Ok(vec![
-                ("shift".into(), true),
-                ("2".into(), true),
-                ("2".into(), false),
-                ("shift".into(), false),
-            ]),
-            '#' => Ok(vec![
-                ("shift".into(), true),
-                ("3".into(), true),
-                ("3".into(), false),
-                ("shift".into(), false),
-            ]),
-            '$' => Ok(vec![
-                ("shift".into(), true),
-                ("4".into(), true),
-                ("4".into(), false),
-                ("shift".into(), false),
-            ]),
-            '%' => Ok(vec![
-                ("shift".into(), true),
-                ("5".into(), true),
-                ("5".into(), false),
-                ("shift".into(), false),
-            ]),
-            '^' => Ok(vec![
-                ("shift".into(), true),
-                ("6".into(), true),
-                ("6".into(), false),
-                ("shift".into(), false),
-            ]),
-            '&' => Ok(vec![
-                ("shift".into(), true),
-                ("7".into(), true),
-                ("7".into(), false),
-                ("shift".into(), false),
-            ]),
-            '*' => Ok(vec![
-                ("shift".into(), true),
-                ("8".into(), true),
-                ("8".into(), false),
-                ("shift".into(), false),
-            ]),
-            '(' => Ok(vec![
-                ("shift".into(), true),
-                ("9".into(), true),
-                ("9".into(), false),
-                ("shift".into(), false),
-            ]),
-            ')' => Ok(vec![
-                ("shift".into(), true),
-                ("0".into(), true),
-                ("0".into(), false),
-                ("shift".into(), false),
-            ]),
-            '_' => Ok(vec![
-                ("shift".into(), true),
-                ("minus".into(), true),
-                ("minus".into(), false),
-                ("shift".into(), false),
-            ]),
-            '+' => Ok(vec![
-                ("shift".into(), true),
-                ("equal".into(), true),
-                ("equal".into(), false),
-                ("shift".into(), false),
-            ]),
-            '{' => Ok(vec![
-                ("shift".into(), true),
-                ("bracket_left".into(), true),
-                ("bracket_left".into(), false),
-                ("shift".into(), false),
-            ]),
-            '}' => Ok(vec![
-                ("shift".into(), true),
-                ("bracket_right".into(), true),
-                ("bracket_right".into(), false),
-                ("shift".into(), false),
-            ]),
-            '|' => Ok(vec![
-                ("shift".into(), true),
-                ("backslash".into(), true),
-                ("backslash".into(), false),
-                ("shift".into(), false),
-            ]),
-            ':' => Ok(vec![
-                ("shift".into(), true),
-                ("semicolon".into(), true),
-                ("semicolon".into(), false),
-                ("shift".into(), false),
-            ]),
-            '"' => Ok(vec![
-                ("shift".into(), true),
-                ("apostrophe".into(), true),
-                ("apostrophe".into(), false),
-                ("shift".into(), false),
-            ]),
-            '~' => Ok(vec![
-                ("shift".into(), true),
-                ("grave_accent".into(), true),
-                ("grave_accent".into(), false),
-                ("shift".into(), false),
-            ]),
-            '<' => Ok(vec![
-                ("shift".into(), true),
-                ("comma".into(), true),
-                ("comma".into(), false),
-                ("shift".into(), false),
-            ]),
-            '>' => Ok(vec![
-                ("shift".into(), true),
-                ("dot".into(), true),
-                ("dot".into(), false),
-                ("shift".into(), false),
-            ]),
-            '?' => Ok(vec![
-                ("shift".into(), true),
-                ("slash".into(), true),
-                ("slash".into(), false),
-                ("shift".into(), false),
-            ]),
+    /// German keyboard layout
+    fn char_to_qmp_de(ch: char) -> anyhow::Result<Vec<(String, bool)>> {
+        let press = |k: &str| vec![(k.to_string(), true), (k.to_string(), false)];
+        let shift_press = |k: &str| vec![
+            ("shift".into(), true), (k.to_string(), true), (k.to_string(), false), ("shift".into(), false),
+        ];
+        let altgr_press = |k: &str| vec![
+            ("alt_r".into(), true), (k.to_string(), true), (k.to_string(), false), ("alt_r".into(), false),
+        ];
 
-            _ => {
-                tracing::warn!(char = %ch, "Unsupported character for QMP, skipping");
-                Ok(vec![])
+        match ch {
+            'a'..='z' => Ok(press(&ch.to_string())),
+            'A'..='Z' => Ok(shift_press(&ch.to_lowercase().to_string())),
+            '0'..='9' => Ok(press(&ch.to_string())),
+            ' ' => Ok(press("spc")),
+            '\n' | '\r' => Ok(press("ret")),
+            '\t' => Ok(press("tab")),
+            'ß' => Ok(press("minus")),
+            '?' => Ok(shift_press("minus")),
+            '´' => Ok(press("equal")),
+            '`' => Ok(shift_press("equal")),
+            'ü' => Ok(press("bracket_left")),
+            'Ü' => Ok(shift_press("bracket_left")),
+            '+' => Ok(press("bracket_right")),
+            '*' => Ok(shift_press("bracket_right")),
+            '#' => Ok(press("backslash")),
+            '\'' => Ok(shift_press("backslash")),
+            'ö' => Ok(press("semicolon")),
+            'Ö' => Ok(shift_press("semicolon")),
+            'ä' => Ok(press("apostrophe")),
+            'Ä' => Ok(shift_press("apostrophe")),
+            '^' => Ok(press("grave_accent")),
+            '°' => Ok(shift_press("grave_accent")),
+            '-' => Ok(press("slash")),
+            '_' => Ok(shift_press("slash")),
+            ',' => Ok(press("comma")),
+            ';' => Ok(shift_press("comma")),
+            '.' => Ok(press("dot")),
+            ':' => Ok(shift_press("dot")),
+            '!' => Ok(shift_press("1")),
+            '"' => Ok(shift_press("2")),
+            '§' => Ok(shift_press("3")),
+            '$' => Ok(shift_press("4")),
+            '%' => Ok(shift_press("5")),
+            '&' => Ok(shift_press("6")),
+            '/' => Ok(shift_press("7")),
+            '(' => Ok(shift_press("8")),
+            ')' => Ok(shift_press("9")),
+            '=' => Ok(shift_press("0")),
+            '<' => Ok(press("less")),
+            '>' => Ok(shift_press("less")),
+            '{' => Ok(shift_press("bracket_left")),
+            '}' => Ok(shift_press("bracket_right")),
+            '|' => Ok(shift_press("backslash")),
+            '~' => Ok(shift_press("grave_accent")),
+            '@' => Ok(altgr_press("q")),
+            '\\' => Ok(altgr_press("minus")),
+            '€' => Ok(altgr_press("e")),
+            _ => { tracing::warn!(char = %ch, "Unsupported char for DE layout"); Ok(vec![]) }
+        }
+    }
+
+    /// French keyboard layout (AZERTY)
+    fn char_to_qmp_fr(ch: char) -> anyhow::Result<Vec<(String, bool)>> {
+        let press = |k: &str| vec![(k.to_string(), true), (k.to_string(), false)];
+        let shift_press = |k: &str| vec![
+            ("shift".into(), true), (k.to_string(), true), (k.to_string(), false), ("shift".into(), false),
+        ];
+        let altgr_press = |k: &str| vec![
+            ("alt_r".into(), true), (k.to_string(), true), (k.to_string(), false), ("alt_r".into(), false),
+        ];
+
+        match ch {
+            // AZERTY: a and q swapped, z and w swapped
+            'a' => Ok(press("q")),
+            'q' => Ok(press("a")),
+            'z' => Ok(press("w")),
+            'w' => Ok(press("z")),
+            'A' => Ok(shift_press("q")),
+            'Q' => Ok(shift_press("a")),
+            'Z' => Ok(shift_press("w")),
+            'W' => Ok(shift_press("z")),
+            // Other letters same
+            'b'..='y' | 'B'..='Y' => {
+                if ch.is_lowercase() { Ok(press(&ch.to_string())) }
+                else { Ok(shift_press(&ch.to_lowercase().to_string())) }
             }
+            '0'..='9' => Ok(shift_press(&ch.to_string())), // Digits need shift on FR
+            ' ' => Ok(press("spc")),
+            '\n' | '\r' => Ok(press("ret")),
+            '\t' => Ok(press("tab")),
+            'é' => Ok(press("2")),
+            '&' => Ok(press("1")),
+            '"' => Ok(press("3")),
+            '\'' => Ok(press("4")),
+            '(' => Ok(press("5")),
+            '-' => Ok(press("6")),
+            'è' => Ok(press("7")),
+            '_' => Ok(press("8")),
+            'ç' => Ok(press("9")),
+            'à' => Ok(press("0")),
+            ')' => Ok(shift_press("minus")),
+            '=' => Ok(shift_press("equal")),
+            '^' => Ok(press("bracket_left")),
+            '$' => Ok(press("bracket_right")),
+            '*' => Ok(press("backslash")),
+            'm' => Ok(press("semicolon")),
+            'M' => Ok(shift_press("semicolon")),
+            'ù' => Ok(press("apostrophe")),
+            '!' => Ok(shift_press("backslash")),
+            ',' => Ok(press("m")),
+            '?' => Ok(shift_press("m")),
+            ';' => Ok(press("comma")),
+            '.' => Ok(press("e")),
+            ':' => Ok(press("slash")),
+            '/' => Ok(shift_press("slash")),
+            '§' => Ok(shift_press("grave_accent")),
+            '<' => Ok(press("less")),
+            '>' => Ok(shift_press("less")),
+            '@' => Ok(altgr_press("0")),
+            '#' => Ok(altgr_press("3")),
+            '{' => Ok(altgr_press("4")),
+            '}' => Ok(altgr_press("equal")),
+            '[' => Ok(altgr_press("5")),
+            ']' => Ok(altgr_press("minus")),
+            '|' => Ok(altgr_press("6")),
+            '~' => Ok(altgr_press("2")),
+            '\\' => Ok(altgr_press("grave_accent")),
+            '€' => Ok(altgr_press("e")),
+            _ => { tracing::warn!(char = %ch, "Unsupported char for FR layout"); Ok(vec![]) }
+        }
+    }
+
+    /// Spanish keyboard layout
+    fn char_to_qmp_es(ch: char) -> anyhow::Result<Vec<(String, bool)>> {
+        let press = |k: &str| vec![(k.to_string(), true), (k.to_string(), false)];
+        let shift_press = |k: &str| vec![
+            ("shift".into(), true), (k.to_string(), true), (k.to_string(), false), ("shift".into(), false),
+        ];
+        let altgr_press = |k: &str| vec![
+            ("alt_r".into(), true), (k.to_string(), true), (k.to_string(), false), ("alt_r".into(), false),
+        ];
+
+        match ch {
+            'a'..='z' => Ok(press(&ch.to_string())),
+            'A'..='Z' => Ok(shift_press(&ch.to_lowercase().to_string())),
+            '0'..='9' => Ok(press(&ch.to_string())),
+            ' ' => Ok(press("spc")),
+            '\n' | '\r' => Ok(press("ret")),
+            '\t' => Ok(press("tab")),
+            '!' => Ok(shift_press("1")),
+            '"' => Ok(shift_press("2")),
+            '·' => Ok(shift_press("3")),
+            '$' => Ok(shift_press("4")),
+            '%' => Ok(shift_press("5")),
+            '&' => Ok(shift_press("6")),
+            '/' => Ok(shift_press("7")),
+            '(' => Ok(shift_press("8")),
+            ')' => Ok(shift_press("9")),
+            '=' => Ok(shift_press("0")),
+            '\'' => Ok(press("minus")),
+            '¡' => Ok(shift_press("minus")),
+            '¿' => Ok(press("equal")),
+            '?' => Ok(shift_press("equal")),
+            '`' => Ok(press("bracket_left")),
+            '^' => Ok(shift_press("bracket_left")),
+            '+' => Ok(press("bracket_right")),
+            '*' => Ok(shift_press("bracket_right")),
+            'ç' => Ok(press("backslash")),
+            'Ç' => Ok(shift_press("backslash")),
+            'ñ' => Ok(press("semicolon")),
+            'Ñ' => Ok(shift_press("semicolon")),
+            '´' => Ok(press("apostrophe")),
+            '¨' => Ok(shift_press("apostrophe")),
+            'º' => Ok(press("grave_accent")),
+            'ª' => Ok(shift_press("grave_accent")),
+            '-' => Ok(press("slash")),
+            '_' => Ok(shift_press("slash")),
+            ',' => Ok(press("comma")),
+            ';' => Ok(shift_press("comma")),
+            '.' => Ok(press("dot")),
+            ':' => Ok(shift_press("dot")),
+            '<' => Ok(press("less")),
+            '>' => Ok(shift_press("less")),
+            '{' => Ok(altgr_press("apostrophe")),
+            '}' => Ok(altgr_press("grave_accent")),
+            '[' => Ok(altgr_press("bracket_left")),
+            ']' => Ok(altgr_press("bracket_right")),
+            '\\' => Ok(altgr_press("minus")),
+            '@' => Ok(altgr_press("2")),
+            '#' => Ok(altgr_press("3")),
+            '~' => Ok(altgr_press("4")),
+            '|' => Ok(altgr_press("1")),
+            '€' => Ok(altgr_press("e")),
+            _ => { tracing::warn!(char = %ch, "Unsupported char for ES layout"); Ok(vec![]) }
+        }
+    }
+
+    /// Italian keyboard layout
+    fn char_to_qmp_it(ch: char) -> anyhow::Result<Vec<(String, bool)>> {
+        let press = |k: &str| vec![(k.to_string(), true), (k.to_string(), false)];
+        let shift_press = |k: &str| vec![
+            ("shift".into(), true), (k.to_string(), true), (k.to_string(), false), ("shift".into(), false),
+        ];
+        let altgr_press = |k: &str| vec![
+            ("alt_r".into(), true), (k.to_string(), true), (k.to_string(), false), ("alt_r".into(), false),
+        ];
+
+        match ch {
+            'a'..='z' => Ok(press(&ch.to_string())),
+            'A'..='Z' => Ok(shift_press(&ch.to_lowercase().to_string())),
+            '0'..='9' => Ok(press(&ch.to_string())),
+            ' ' => Ok(press("spc")),
+            '\n' | '\r' => Ok(press("ret")),
+            '\t' => Ok(press("tab")),
+            '!' => Ok(shift_press("1")),
+            '"' => Ok(shift_press("2")),
+            '£' => Ok(shift_press("3")),
+            '$' => Ok(shift_press("4")),
+            '%' => Ok(shift_press("5")),
+            '&' => Ok(shift_press("6")),
+            '/' => Ok(shift_press("7")),
+            '(' => Ok(shift_press("8")),
+            ')' => Ok(shift_press("9")),
+            '=' => Ok(shift_press("0")),
+            '\'' => Ok(press("minus")),
+            '?' => Ok(shift_press("minus")),
+            'ì' => Ok(press("equal")),
+            '^' => Ok(shift_press("equal")),
+            'è' => Ok(press("bracket_left")),
+            'é' => Ok(shift_press("bracket_left")),
+            '+' => Ok(press("bracket_right")),
+            '*' => Ok(shift_press("bracket_right")),
+            'ù' => Ok(press("backslash")),
+            '§' => Ok(shift_press("backslash")),
+            'ò' => Ok(press("semicolon")),
+            'ç' => Ok(shift_press("semicolon")),
+            'à' => Ok(press("apostrophe")),
+            '°' => Ok(shift_press("apostrophe")),
+            '\\'=> Ok(press("grave_accent")),
+            '|' => Ok(shift_press("grave_accent")),
+            '-' => Ok(press("slash")),
+            '_' => Ok(shift_press("slash")),
+            ',' => Ok(press("comma")),
+            ';' => Ok(shift_press("comma")),
+            '.' => Ok(press("dot")),
+            ':' => Ok(shift_press("dot")),
+            '<' => Ok(press("less")),
+            '>' => Ok(shift_press("less")),
+            '{' => Ok(altgr_press("bracket_left")),
+            '}' => Ok(altgr_press("bracket_right")),
+            '[' => Ok(altgr_press("equal")),
+            ']' => Ok(altgr_press("apostrophe")),
+            '@' => Ok(altgr_press("semicolon")),
+            '#' => Ok(altgr_press("backslash")),
+            '~' => Ok(altgr_press("grave_accent")),
+            '€' => Ok(altgr_press("e")),
+            _ => { tracing::warn!(char = %ch, "Unsupported char for IT layout"); Ok(vec![]) }
+        }
+    }
+
+    /// British keyboard layout
+    fn char_to_qmp_gb(ch: char) -> anyhow::Result<Vec<(String, bool)>> {
+        let press = |k: &str| vec![(k.to_string(), true), (k.to_string(), false)];
+        let shift_press = |k: &str| vec![
+            ("shift".into(), true), (k.to_string(), true), (k.to_string(), false), ("shift".into(), false),
+        ];
+        let altgr_press = |k: &str| vec![
+            ("alt_r".into(), true), (k.to_string(), true), (k.to_string(), false), ("alt_r".into(), false),
+        ];
+
+        match ch {
+            'a'..='z' => Ok(press(&ch.to_string())),
+            'A'..='Z' => Ok(shift_press(&ch.to_lowercase().to_string())),
+            '0'..='9' => Ok(press(&ch.to_string())),
+            ' ' => Ok(press("spc")),
+            '\n' | '\r' => Ok(press("ret")),
+            '\t' => Ok(press("tab")),
+            // GB layout differences from US
+            '#' => Ok(press("backslash")),
+            '~' => Ok(shift_press("backslash")),
+            '£' => Ok(shift_press("3")),
+            '¬' => Ok(shift_press("grave_accent")),
+            '|' => Ok(altgr_press("less")),
+            '@' => Ok(shift_press("apostrophe")),
+            // Rest same as US
+            '-' => Ok(press("minus")),
+            '=' => Ok(press("equal")),
+            '[' => Ok(press("bracket_left")),
+            ']' => Ok(press("bracket_right")),
+            ';' => Ok(press("semicolon")),
+            '\'' => Ok(press("apostrophe")),
+            '`' => Ok(press("grave_accent")),
+            ',' => Ok(press("comma")),
+            '.' => Ok(press("dot")),
+            '/' => Ok(press("slash")),
+            '\\' => Ok(press("less")),
+            '!' => Ok(shift_press("1")),
+            '"' => Ok(shift_press("2")),
+            '$' => Ok(shift_press("4")),
+            '%' => Ok(shift_press("5")),
+            '^' => Ok(shift_press("6")),
+            '&' => Ok(shift_press("7")),
+            '*' => Ok(shift_press("8")),
+            '(' => Ok(shift_press("9")),
+            ')' => Ok(shift_press("0")),
+            '_' => Ok(shift_press("minus")),
+            '+' => Ok(shift_press("equal")),
+            '{' => Ok(shift_press("bracket_left")),
+            '}' => Ok(shift_press("bracket_right")),
+            ':' => Ok(shift_press("semicolon")),
+            '<' => Ok(shift_press("comma")),
+            '>' => Ok(shift_press("dot")),
+            '?' => Ok(shift_press("slash")),
+            '€' => Ok(altgr_press("4")),
+            _ => { tracing::warn!(char = %ch, "Unsupported char for GB layout"); Ok(vec![]) }
         }
     }
 }

@@ -127,6 +127,36 @@ impl EventHandler for DiscordHandler {
         }
 
         if msg.content.starts_with('/') {
+            // Handle special commands
+            let cmd = msg.content.trim().to_lowercase();
+            match cmd.as_str() {
+                "/stop" => {
+                    // Stop the active agent loop
+                    let discord_user_id = msg.author.id.to_string();
+                    if let Ok(Some(pairing)) = self.db.get_pairing_by_discord(&discord_user_id) {
+                        crate::gateway::agent_loop::stop_agent_loop(&pairing.user_id).await;
+                        let _ = msg.reply(&ctx.http, "Agent stopped.").await;
+                    } else {
+                        let _ = msg.reply(&ctx.http, "No active agent to stop.").await;
+                    }
+                    return;
+                }
+                "/last" | "/last-response" => {
+                    // Let the LLM do one more response and then stop
+                    let discord_user_id = msg.author.id.to_string();
+                    if let Ok(Some(pairing)) = self.db.get_pairing_by_discord(&discord_user_id) {
+                        if let Some(sender) = crate::gateway::agent_loop::get_user_input_sender(&pairing.user_id).await {
+                            // Send a special stop signal
+                            let _ = sender.send("__LAST_RESPONSE__".to_string());
+                            let _ = msg.reply(&ctx.http, "Agent will respond one last time then stop.").await;
+                        } else {
+                            let _ = msg.reply(&ctx.http, "No active agent found.").await;
+                        }
+                    }
+                    return;
+                }
+                _ => {}
+            }
             return;
         }
 
@@ -183,7 +213,7 @@ impl EventHandler for DiscordHandler {
             if let Err(e) = sender.send(msg.content.clone()) {
                 tracing::warn!("Failed to inject message into agent loop: {}", e);
             } else {
-                let _ = msg.reply(&ctx.http, "Message received - continuing...").await;
+                let _ = msg.react(&ctx.http, '✅').await;
             }
             return;
         }

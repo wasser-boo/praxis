@@ -165,9 +165,12 @@
 
                     <div>
                         <h3>Desktop (VNC)</h3>
-                        <div id="vm-vnc-container" style="background:#000;border:1px solid var(--border);border-radius:8px;min-height:600px;display:flex;align-items:center;justify-content:center;position:relative">
-                            <div id="vm-vnc-placeholder" style="color:var(--text-secondary);font-size:0.9rem">VM not running. Click "Start VM" to begin.</div>
-                            <canvas id="vm-vnc-canvas" style="visibility:hidden;border-radius:6px" width="1024" height="768"></canvas>
+                        <div id="vm-vnc-container" style="background:#000;border:1px solid var(--border);border-radius:8px;min-height:600px;position:relative">
+                            <div id="vm-vnc-placeholder" style="color:var(--text-secondary);font-size:0.9rem;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)">VM not running. Click "Start VM" to begin.</div>
+                            <div id="vm-vnc-screen" style="width:100%;height:600px"></div>
+                        </div>
+                        <div id="vm-vnc-log" style="margin-top:0.5rem;background:var(--bg-tertiary,#1a1a2e);border:1px solid var(--border);border-radius:8px;padding:0.75rem;max-height:180px;overflow-y:auto;font-family:monospace;font-size:0.75rem;line-height:1.5">
+                            <div style="color:var(--text-secondary)">VNC log will appear here when connecting...</div>
                         </div>
                     </div>
 

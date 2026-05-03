@@ -225,7 +225,7 @@ fn get_default_tools() -> Vec<Tool> {
         Tool {
             name: "vm_start".into(),
             description: Some("Start a QEMU VM. Creates a new VM if none exists. The VM runs a full Linux environment you control.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm","description":"VM name"},"cpu_cores":{"type":"integer","default":2},"ram_mb":{"type":"integer","default":4096},"disk_size":{"type":"string","default":"40G"},"iso_path":{"type":"string","description":"Path to ISO for OS installation"},"arch":{"type":"string","enum":["x86_64","aarch64"],"default":"x86_64"}}}),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm","description":"VM name"},"cpu_cores":{"type":"integer","default":2},"ram_mb":{"type":"integer","default":4096},"disk_size":{"type":"string","default":"40G"},"iso_path":{"type":"string","description":"Path to ISO for OS installation"},"arch":{"type":"string","enum":["x86_64","aarch64"],"default":"x86_64"},"keyboard_layout":{"type":"string","enum":["us","de","fr","es","it","gb"],"default":"us","description":"Keyboard layout for the VM (us, de, fr, es, it, gb)"}}}),
             is_enabled: false,
         },
         Tool {
@@ -242,8 +242,39 @@ fn get_default_tools() -> Vec<Tool> {
         },
         Tool {
             name: "vm_keys".into(),
-            description: Some("Send keyboard input to the VM. Use this for TUI apps (vim, htop, nano, etc) and installer menus. Special keys: 'enter', 'esc', 'tab', 'backspace', 'space', 'delete', 'insert', 'home', 'end', 'pageup', 'pagedown', 'capslock', 'numlock', 'print_screen', 'arrow_up', 'arrow_down', 'arrow_left', 'arrow_right', 'f1'-'f24', 'super'/'meta'/'win'. Numpad: 'kp0'-'kp9', 'kp_enter', 'kp_plus', 'kp_minus', 'kp_multiply', 'kp_divide', 'kp_dot'. Symbols: - = [ ] \\ ; ' ` , . / and shifted: ! @ # $ % ^ & * ( ) _ + { } | : \" ~ < > ?. Letters a-z, digits 0-9. Modifier combos: 'ctrl+a'-'ctrl+z', 'alt+f1'-'alt+f12', 'alt+tab', 'alt+enter', 'ctrl+alt+delete', 'ctrl+alt+f1'-'ctrl+alt+f6'. Regular text strings (e.g. 'ls -la', 'hello') are sent as-is via serial.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"keys":{"type":"string","description":"Text or special key to send"},"name":{"type":"string","default":"praxis-vm"}},"required":["keys"]}),
+            description: Some("Send keyboard input to the VM. Supports:\n\
+                - Text: 'root', 'ls -la', 'hello world'\n\
+                - Special keys: 'enter', 'esc', 'tab', 'backspace', 'space', 'delete', 'insert', 'home', 'end', 'pageup', 'pagedown'\n\
+                - Arrow keys: 'arrow_up', 'arrow_down', 'arrow_left', 'arrow_right'\n\
+                - Function keys: 'f1'-'f24'\n\
+                - Modifiers: 'ctrl', 'alt', 'shift', 'super'/'meta'/'win'\n\
+                - Numpad: 'kp0'-'kp9', 'kp_enter', 'kp_plus', 'kp_minus', 'kp_multiply', 'kp_divide', 'kp_dot'\n\
+                - Symbols: - = [ ] \\ ; ' ` , . / and shifted: ! @ # $ % ^ & * ( ) _ + { } | : \" ~ < > ?\n\
+                - Modifier combos: 'ctrl+a', 'alt+tab', 'ctrl+alt+delete'\n\
+                - Macros (repeat): '(key)count' - e.g. '(arrowdown)5' presses down 5 times, '(enter)3' presses enter 3 times, '(tab)2' presses tab twice\n\
+                - Newlines '\\n' are converted to enter key\n\
+                - Use keyboard_layout parameter to set VM keyboard layout (us, de, fr, es, it, gb)".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"keys":{"type":"string","description":"Text, special key, or macro. Examples: 'root\\n', '(arrowdown)5', 'ctrl+c', 'enter'"},"name":{"type":"string","default":"praxis-vm"},"keyboard_layout":{"type":"string","enum":["us","de","fr","es","it","gb"],"default":"us","description":"Keyboard layout for this input"}},"required":["keys"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_input".into(),
+            description: Some("High-level VM input tool for easy navigation. Vim-like shortcuts:\n\
+                - Navigation: up/k, down/j, left/h, right/l (with count)\n\
+                - Pages: pageup/pgup, pagedown/pgdn, home, end\n\
+                - Tab: tab, shifttab/backtab\n\
+                - Actions: enter/confirm/select, esc/cancel/back, space/toggle, backspace/delete\n\
+                - Type: type (text), typeenter (text+enter), num (number+enter)\n\
+                - Function keys: f1-f12\n\
+                - Ctrl: ctrl_c (interrupt), ctrl_z, ctrl_a, ctrl_l (clear)\n\
+                - Wait: wait (ms parameter)\n\
+                - Bash: bash (command) - Execute command directly via serial, returns output\n\
+                - File: write_file (path, content) - Write file directly to VM\n\
+                - Status: system_status - Check keymap, locale, network, disk, memory, services\n\
+                - Service: restart_service (service) - Restart a Void Linux service\n\
+                - Use keyboard_layout parameter to set VM keyboard layout (us, de, fr, es, it, gb)\n\
+                Examples: {action:'bash', command:'ls -la'}, {action:'write_file', path:'/tmp/test.txt', content:'hello'}, {action:'system_status'}".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"action":{"type":"string","description":"Action: up/down/left/right, tab/shifttab, enter/confirm, esc/cancel, space/toggle, type, typeenter, num, f1-f12, ctrl_c, wait"},"text":{"type":"string","description":"Text for type/typeenter/num actions"},"count":{"type":"integer","default":1,"description":"Repeat count for navigation"},"ms":{"type":"integer","default":1000,"description":"Wait time in ms for wait action"},"enter":{"type":"boolean","default":false,"description":"Press enter after type"},"name":{"type":"string","default":"praxis-vm"},"keyboard_layout":{"type":"string","enum":["us","de","fr","es","it","gb"],"default":"us","description":"Keyboard layout for this input"}},"required":["action"]}),
             is_enabled: false,
         },
         Tool {
@@ -280,6 +311,160 @@ fn get_default_tools() -> Vec<Tool> {
             name: "vm_look_screenshot".into(),
             description: Some("Look at a saved VM screenshot. index: -1=latest, 0=oldest, N=specific screenshot number. Returns base64 image. Max 500 screenshots are kept (oldest auto-deleted).".into()),
             parameters: serde_json::json!({"type":"object","properties":{"index":{"type":"integer","description":"-1=latest, 0=oldest, N=specific","default":-1},"name":{"type":"string","default":"praxis-vm"}}}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_process_list".into(),
+            description: Some("List running processes in the VM. Returns PID, user, CPU%, MEM%, and command. Use to see what's running.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm"}}}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_file_read".into(),
+            description: Some("Read a file from the VM and return its content. Use for config files, logs, etc.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File path to read"},"name":{"type":"string","default":"praxis-vm"}},"required":["path"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_network_test".into(),
+            description: Some("Test network connectivity in the VM. Actions: ping (host), curl (url), dns (domain), interfaces, routes.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["ping","curl","dns","interfaces","routes"],"default":"ping"},"target":{"type":"string","description":"Host/URL/domain to test"},"name":{"type":"string","default":"praxis-vm"}}}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_service_list".into(),
+            description: Some("List all services in the VM and their status (Void Linux runit). Shows running/stopped services.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm"}}}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_package_install".into(),
+            description: Some("Install packages in the VM using xbps-install (Void Linux). Updates package list and installs specified packages.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"packages":{"type":"string","description":"Space-separated package names to install"},"name":{"type":"string","default":"praxis-vm"}},"required":["packages"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_snapshot_list".into(),
+            description: Some("List all snapshots for the VM. Shows snapshot names and creation info.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm"}}}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_snapshot_restore".into(),
+            description: Some("Restore a VM snapshot. The VM will be reset to the state when the snapshot was created.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"snapshot_name":{"type":"string","description":"Name of the snapshot to restore"},"name":{"type":"string","default":"praxis-vm"}},"required":["snapshot_name"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_snapshot_delete".into(),
+            description: Some("Delete a VM snapshot.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"snapshot_name":{"type":"string","description":"Name of the snapshot to delete"},"name":{"type":"string","default":"praxis-vm"}},"required":["snapshot_name"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_cron_add".into(),
+            description: Some("Add a cron job in the VM. Schedule examples: '@reboot', '0 2 * * *' (daily at 2am), '*/5 * * * *' (every 5 minutes).".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"schedule":{"type":"string","description":"Cron schedule expression"},"command":{"type":"string","description":"Command to execute"},"name":{"type":"string","default":"praxis-vm"}},"required":["schedule","command"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_cron_list".into(),
+            description: Some("List all cron jobs in the VM.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm"}}}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_cron_remove".into(),
+            description: Some("Remove a cron job from the VM by its command or schedule.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"pattern":{"type":"string","description":"Pattern to match cron job (command or schedule)"},"name":{"type":"string","default":"praxis-vm"}},"required":["pattern"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_shortcut".into(),
+            description: Some("Send common keyboard shortcuts to the VM. Predefined shortcuts:\n\
+                - copy, paste, cut, select_all, undo, redo\n\
+                - save, open, new, close, quit\n\
+                - find, replace, print\n\
+                - alt_tab, alt_f4, ctrl_alt_delete\n\
+                - minimize, maximize, fullscreen\n\
+                - volume_up, volume_down, mute\n\
+                - brightness_up, brightness_down".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"shortcut":{"type":"string","description":"Shortcut name (e.g. 'copy', 'paste', 'alt_tab')"},"name":{"type":"string","default":"praxis-vm"}},"required":["shortcut"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_key_combo".into(),
+            description: Some("Send arbitrary key combinations to the VM. Use QEMU key names.\n\
+                Examples: 'ctrl+shift+t', 'alt+F2', 'super+l', 'ctrl+alt+delete'\n\
+                Supports modifiers: ctrl, alt, shift, super/meta/win\n\
+                Supports keys: a-z, 0-9, f1-f12, enter, esc, tab, space, backspace, delete, arrows, etc.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"combo":{"type":"string","description":"Key combination (e.g. 'ctrl+shift+t')"},"repeat":{"type":"integer","default":1,"description":"Number of times to repeat"},"name":{"type":"string","default":"praxis-vm"}},"required":["combo"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_type_fast".into(),
+            description: Some("Type text quickly into the VM. Uses faster key delays for installers and text fields. Optionally press Enter after.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"Text to type"},"enter":{"type":"boolean","default":false,"description":"Press Enter after typing"},"name":{"type":"string","default":"praxis-vm"},"keyboard_layout":{"type":"string","enum":["us","de","fr","es","it","gb"],"default":"us"}},"required":["text"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_wait_for_text".into(),
+            description: Some("Wait for specific text to appear on the VM screen. Takes a screenshot and checks if the text is present. Useful for waiting for boot/installation completion.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"Text to wait for"},"timeout_secs":{"type":"integer","default":60,"description":"Maximum wait time in seconds"},"interval_secs":{"type":"integer","default":5,"description":"Check interval in seconds"},"name":{"type":"string","default":"praxis-vm"}},"required":["text"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_window_list".into(),
+            description: Some("List open windows in the VM (if running a desktop environment). Uses wmctrl or xdotool.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm"}}}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_window_focus".into(),
+            description: Some("Focus/activate a window in the VM by title or ID.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"window":{"type":"string","description":"Window title or ID to focus"},"name":{"type":"string","default":"praxis-vm"}},"required":["window"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_clipboard_set".into(),
+            description: Some("Set clipboard content in the VM. Requires xclip or xsel.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"content":{"type":"string","description":"Content to set in clipboard"},"name":{"type":"string","default":"praxis-vm"}},"required":["content"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_clipboard_get".into(),
+            description: Some("Get clipboard content from the VM. Requires xclip or xsel.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm"}}}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_mouse_move".into(),
+            description: Some("Move mouse to absolute position in the VM. Coordinates are in pixels.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"x":{"type":"integer","description":"X coordinate"},"y":{"type":"integer","description":"Y coordinate"},"name":{"type":"string","default":"praxis-vm"}},"required":["x","y"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_mouse_click_at".into(),
+            description: Some("Click at specific position in the VM. Button: 0=left, 1=middle, 2=right.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"x":{"type":"integer","description":"X coordinate"},"y":{"type":"integer","description":"Y coordinate"},"button":{"type":"integer","default":0,"description":"0=left, 1=middle, 2=right"},"name":{"type":"string","default":"praxis-vm"}},"required":["x","y"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_mouse_double_click_at".into(),
+            description: Some("Double-click at specific position in the VM.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"x":{"type":"integer","description":"X coordinate"},"y":{"type":"integer","description":"Y coordinate"},"name":{"type":"string","default":"praxis-vm"}},"required":["x","y"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_mouse_drag_to".into(),
+            description: Some("Drag from current position to target position in the VM.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"from_x":{"type":"integer","description":"Start X coordinate"},"from_y":{"type":"integer","description":"Start Y coordinate"},"to_x":{"type":"integer","description":"End X coordinate"},"to_y":{"type":"integer","description":"End Y coordinate"},"name":{"type":"string","default":"praxis-vm"}},"required":["from_x","from_y","to_x","to_y"]}),
+            is_enabled: false,
+        },
+        Tool {
+            name: "vm_mouse_scroll_at".into(),
+            description: Some("Scroll at specific position in the VM. Direction: up, down, left, right.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"x":{"type":"integer","description":"X coordinate"},"y":{"type":"integer","description":"Y coordinate"},"direction":{"type":"string","enum":["up","down","left","right"],"default":"down"},"amount":{"type":"integer","default":3,"description":"Scroll amount (lines)"},"name":{"type":"string","default":"praxis-vm"}},"required":["x","y"]}),
             is_enabled: false,
         },
         Tool {

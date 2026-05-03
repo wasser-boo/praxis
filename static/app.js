@@ -928,6 +928,19 @@ function escapeHtml(str) {
 let vncRfb = null;
 let vncModule = null;
 
+function vncLog(msg, level) {
+    const log = document.getElementById('vm-vnc-log');
+    if (!log) return;
+    const time = new Date().toLocaleTimeString();
+    const colors = { info: 'var(--text-primary)', warn: '#FFD600', error: '#FF5252', success: '#4CAF50' };
+    const color = colors[level] || colors.info;
+    const div = document.createElement('div');
+    div.innerHTML = `<span style="color:var(--text-secondary)">${time}</span> <span style="color:${color}">${escapeHtml(msg)}</span>`;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+    console.log(`[VNC] ${msg}`);
+}
+
 async function loadVM() {
     try {
         await loadVMStatus();
@@ -957,7 +970,7 @@ async function loadVMStatus() {
                 <div class="data-item">
                     <div>
                         <span class="name">${escapeHtml(vm.name)}</span>
-                        <span class="meta">Status: ${escapeHtml(vm.status)} | PID: ${vm.pid || '-'} | VNC: ${vm.vnc_port || '-'}</span>
+                        <span class="meta">Status: ${escapeHtml(vm.status)} | PID: ${vm.pid || '-'} | VNC: ${vm.vnc_port || '-'} | Layout: ${(vm.keyboard_layout || 'us').toUpperCase()}${vm.current_iso ? ' | CD: ' + escapeHtml(vm.current_iso.split('/').pop()) : ''}</span>
                     </div>
                     <div class="actions">
                         <button class="btn btn-sm btn-danger" onclick="vmStop('${escapeHtml(vm.name)}')">Stop</button>
@@ -967,6 +980,7 @@ async function loadVMStatus() {
 
             const runningVm = vms.find(vm => vm.status === 'running');
             if (runningVm) {
+                vncLog(`Auto-connecting to running VM: ${runningVm.name}`, 'info');
                 connectVNC(runningVm.name);
             }
         }
@@ -989,51 +1003,74 @@ async function loadVMStatus() {
 
 async function connectVNC(vmName) {
     const placeholder = document.getElementById('vm-vnc-placeholder');
-    const canvas = document.getElementById('vm-vnc-canvas');
+    const screen = document.getElementById('vm-vnc-screen');
     const container = document.getElementById('vm-vnc-container');
+    const log = document.getElementById('vm-vnc-log');
+    if (log) log.innerHTML = '';
+
+    if (!screen) {
+        console.error('VNC screen element not found - try hard refresh (Ctrl+Shift+R)');
+        return;
+    }
 
     try {
+        vncLog(`Starting VNC connection to VM: ${vmName}`, 'info');
+
+        vncLog('Loading noVNC module...', 'info');
         if (!vncModule) {
             vncModule = await import('/static/novnc/core/rfb.js');
+            vncLog('noVNC module loaded successfully', 'success');
+        } else {
+            vncLog('noVNC module already loaded', 'info');
         }
 
         const RFB = vncModule.default || vncModule.RFB || vncModule;
 
         if (vncRfb) {
+            vncLog('Disconnecting previous VNC session...', 'info');
             vncRfb.disconnect();
             vncRfb = null;
         }
 
         const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${wsProto}//${location.host}/websockify?vm=${encodeURIComponent(vmName)}`;
+        vncLog(`WebSocket URL: ${wsUrl}`, 'info');
 
         placeholder.textContent = 'Connecting to VNC...';
+        placeholder.style.display = 'block';
+        screen.innerHTML = '';
+        vncLog('Creating RFB instance on screen div...', 'info');
 
-        vncRfb = new RFB(canvas, wsUrl, {
+        vncRfb = new RFB(screen, wsUrl, {
             credentials: { password: '' },
             shared: true,
             wsProtocols: ['binary'],
         });
+        vncLog('RFB instance created, waiting for connection...', 'info');
 
         vncRfb.addEventListener('connect', () => {
+            vncLog('VNC connected successfully!', 'success');
             placeholder.style.display = 'none';
-            canvas.style.visibility = 'visible';
-            canvas.style.width = '100%';
-            canvas.style.height = 'auto';
-            console.log('VNC connected');
         });
 
         vncRfb.addEventListener('disconnect', (e) => {
+            const reason = e.detail?.reason || 'unknown';
+            const clean = e.detail?.clean;
+            vncLog(`VNC disconnected: ${reason} (clean: ${clean})`, clean ? 'warn' : 'error');
             placeholder.style.display = 'block';
-            canvas.style.visibility = 'hidden';
             placeholder.textContent = 'VNC disconnected. Click Refresh to reconnect.';
-            console.log('VNC disconnected:', e.detail?.reason || '');
+        });
+
+        vncRfb.addEventListener('credentialsrequired', () => {
+            vncLog('VNC server requires credentials', 'warn');
         });
 
         vncRfb.scaleViewport = true;
         vncRfb.resizeSession = false;
+        vncLog('VNC options set: scaleViewport=true, resizeSession=false', 'info');
 
     } catch (err) {
+        vncLog(`VNC connection failed: ${err.message}`, 'error');
         console.error('Failed to connect VNC:', err);
         placeholder.textContent = 'VNC connection failed: ' + err.message;
     }
@@ -1041,14 +1078,18 @@ async function connectVNC(vmName) {
 
 function disconnectVNC() {
     if (vncRfb) {
+        vncLog('Disconnecting VNC...', 'info');
         vncRfb.disconnect();
         vncRfb = null;
+        vncLog('VNC disconnected', 'info');
     }
     const placeholder = document.getElementById('vm-vnc-placeholder');
-    const canvas = document.getElementById('vm-vnc-canvas');
-    if (placeholder) placeholder.style.display = 'block';
-    if (canvas) canvas.style.display = 'none';
-    if (placeholder) placeholder.textContent = 'VM not running. Click "Start VM" to begin.';
+    const screen = document.getElementById('vm-vnc-screen');
+    if (placeholder) {
+        placeholder.style.display = 'block';
+        placeholder.textContent = 'VM not running. Click "Start VM" to begin.';
+    }
+    if (screen) screen.innerHTML = '';
 }
 
 async function loadVMActivity() {
@@ -1118,6 +1159,28 @@ async function loadVMActivity() {
 }
 
 async function vmStart() {
+    // Load keyboard layout from context settings
+    let savedLayout = 'us';
+    try {
+        const ctxRes = await apiFetch('/api/contexts/default');
+        if (ctxRes.ok) {
+            const ctx = await ctxRes.json();
+            savedLayout = ctx.settings?.vm_keyboard_layout || 'us';
+        }
+    } catch (e) { /* use default */ }
+
+    const layouts = [
+        { value: 'us', label: 'US (QWERTY)' },
+        { value: 'de', label: 'DE (QWERTZ)' },
+        { value: 'fr', label: 'FR (AZERTY)' },
+        { value: 'es', label: 'ES (Spanish)' },
+        { value: 'it', label: 'IT (Italian)' },
+        { value: 'gb', label: 'GB (British)' },
+    ];
+    const layoutOptions = layouts.map(l => 
+        `<option value="${l.value}" ${l.value === savedLayout ? 'selected' : ''}>${l.label}</option>`
+    ).join('');
+
     showModal('Start VM', `
         <div class="form-group">
             <label>VM Name</label>
@@ -1139,6 +1202,12 @@ async function vmStart() {
             <label>ISO Path (optional, for OS installation)</label>
             <input type="text" id="vm-start-iso" placeholder="/path/to/linux.iso" style="width:100%;padding:0.5rem">
         </div>
+        <div class="form-group">
+            <label>Keyboard Layout</label>
+            <select id="vm-start-layout" style="width:100%;padding:0.5rem">
+                ${layoutOptions}
+            </select>
+        </div>
         <button class="btn btn-primary" style="margin-top:1rem" onclick="vmDoStart()">Start VM</button>
     `);
 }
@@ -1149,6 +1218,7 @@ async function vmDoStart() {
         cpu_cores: parseInt(document.getElementById('vm-start-cpu').value) || 2,
         ram_mb: parseInt(document.getElementById('vm-start-ram').value) || 4096,
         disk_size: document.getElementById('vm-start-disk').value || '40G',
+        keyboard_layout: document.getElementById('vm-start-layout').value || 'us',
     };
     const iso = document.getElementById('vm-start-iso').value;
     if (iso) body.iso_path = iso;
@@ -1240,12 +1310,14 @@ function vmShowSetup() {
 async function vmReboot() {
     if (!confirm('Reboot VM?')) return;
     try {
-        await apiFetch('/api/vm/stop', { method: 'POST', body: JSON.stringify({ name: 'praxis-vm' }) });
-        setTimeout(async () => {
-            await apiFetch('/api/vm/start', { method: 'POST', body: JSON.stringify({ name: 'praxis-vm' }) });
-            alert('VM rebooting...');
-            loadVM();
-        }, 2000);
+        const res = await apiFetch('/api/vm/reboot', { method: 'POST', body: JSON.stringify({ name: 'praxis-vm' }) });
+        const data = await res.json();
+        if (data.error) {
+            alert('Reboot failed: ' + data.error);
+        } else {
+            alert(data.message || 'VM rebooting...');
+        }
+        loadVM();
     } catch (err) { alert('Failed: ' + err.message); }
 }
 

@@ -188,6 +188,12 @@ pub struct ContextSettings {
     pub feedback_template: String,
     #[serde(default)]
     pub message_on_toolcalling: bool,
+    #[serde(default = "default_true")]
+    pub vm_screenshot_enabled: bool,
+    #[serde(default = "default_screenshot_limit")]
+    pub vm_screenshot_limit: usize,
+    #[serde(default = "default_keyboard_layout")]
+    pub vm_keyboard_layout: String,
 }
 
 fn default_stt() -> String {
@@ -234,6 +240,12 @@ fn default_feedback_template() -> String {
 }
 fn default_true() -> bool {
     true
+}
+fn default_screenshot_limit() -> usize {
+    5000
+}
+fn default_keyboard_layout() -> String {
+    "us".to_string()
 }
 
 impl Default for ContextSettings {
@@ -311,6 +323,9 @@ impl Default for ContextSettings {
             feedback_channel_id: None,
             feedback_template: default_feedback_template(),
             message_on_toolcalling: false,
+            vm_screenshot_enabled: true,
+            vm_screenshot_limit: default_screenshot_limit(),
+            vm_keyboard_layout: default_keyboard_layout(),
         }
     }
 }

@@ -15,6 +15,12 @@
     </section>
   </task>
 
+  <cp caption="Current User Request" if="user_prompt">
+    <p><b>IMPORTANT - Current user instruction:</b></p>
+    <p style="font-size:1.1em;padding:10px;border:1px solid #ccc;border-radius:5px;background:#f9f9f9">{{ user_prompt }}</p>
+    <p>Prioritize this instruction. If the user gives you a specific command or correction, follow it immediately.</p>
+  </cp>
+
   <cp caption="Available Skills">
     <p>When a user request matches a skill, call <code inline="true">use_skill</code> with the skill name and relevant parameters.</p>
     <list>
@@ -34,6 +40,7 @@
       <item>Ask for clarification when the request is ambiguous.</item>
       <item>When using tools, explain what you're doing.</item>
       <item>Report errors clearly if a tool fails.</item>
+      <item>If the user gives you a specific instruction or correction, follow it immediately without hesitation.</item>
     </list>
   </cp>
 </poml>

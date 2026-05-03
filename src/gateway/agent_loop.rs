@@ -10,10 +10,30 @@ use tokio::sync::RwLock;
 static ACTIVE_LOOPS: once_cell::sync::Lazy<Arc<RwLock<HashMap<String, UserInputChannel>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
+/// Global registry of stop signals for agent loops
+static STOP_SIGNALS: once_cell::sync::Lazy<Arc<RwLock<HashMap<String, bool>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+
 /// Get a sender for injecting user input into an active agent loop
 pub async fn get_user_input_sender(user_id: &str) -> Option<tokio::sync::mpsc::UnboundedSender<String>> {
     let loops = ACTIVE_LOOPS.read().await;
     loops.get(user_id).map(|ch| ch.sender())
+}
+
+/// Stop an active agent loop
+pub async fn stop_agent_loop(user_id: &str) {
+    let mut signals = STOP_SIGNALS.write().await;
+    signals.insert(user_id.to_string(), true);
+    
+    // Also remove the input channel to unblock any waiting
+    let mut loops = ACTIVE_LOOPS.write().await;
+    loops.remove(user_id);
+}
+
+/// Check if a stop signal has been sent
+async fn should_stop(user_id: &str) -> bool {
+    let signals = STOP_SIGNALS.read().await;
+    signals.get(user_id).copied().unwrap_or(false)
 }
 
 /// Register an active agent loop
@@ -271,28 +291,36 @@ pub async fn run_agent_loop(
     )?;
 
     loop {
+        // Check for stop signal
+        if should_stop(user_id).await {
+            tracing::info!(user_id = %user_id, "Stop signal received, ending agent loop");
+            break;
+        }
+
         // Check for user input during execution
+        let mut last_response_mode = false;
         if let Some(user_msg) = user_input.try_recv() {
             tracing::info!(user_id = %user_id, turn = turn, "Received user input during agent loop: {}", user_msg);
             
-            // Store user message in history
-            state.db.add_message(
-                user_id,
-                &crate::db::messages::Message::user(user_msg.clone()),
-            )?;
-            
-            // Reset turn counter to allow more turns
-            turn = 0;
-            
-            // Send feedback if enabled
-            if let Some(ref tx) = feedback_tx {
-                let _ = tx.send(format!("User input received: {}", &user_msg));
+            // Check for special signals
+            if user_msg == "__LAST_RESPONSE__" {
+                last_response_mode = true;
+                tracing::info!(user_id = %user_id, "Last response mode activated");
+            } else {
+                // Store user message in history
+                state.db.add_message(
+                    user_id,
+                    &crate::db::messages::Message::user(user_msg.clone()),
+                )?;
+                
+                // Reset turn counter to allow more turns
+                turn = 0;
+                
+                // Update user_message for subsequent turns
+                user_message = user_msg;
+                
+                tracing::info!(user_id = %user_id, "Updated user_message to: {}", user_message);
             }
-            
-            // Update user_message for the next system prompt build
-            user_message = user_msg;
-            
-            continue;
         }
 
         if turn >= config.max_turns {
@@ -304,7 +332,7 @@ pub async fn run_agent_loop(
         ctx.turn = turn;
         let _ = state.db.save_context(&ctx);
 
-        // Build messages
+        // Build messages - always use current user_message
         let system_prompt = build_system_prompt(state, &ctx, &user_message).await;
         let mut messages = vec![ChatMessage {
             role: "system".to_string(),
@@ -439,6 +467,19 @@ pub async fn run_agent_loop(
             model: ctx.settings.model.clone(),
         };
 
+        // Log LLM request details
+        let msg_count = request.messages.len();
+        let tool_count = request.tools.as_ref().map(|t| t.len()).unwrap_or(0);
+        tracing::info!(
+            user_id = %user_id,
+            turn = ctx.turn,
+            message_count = msg_count,
+            tool_count = tool_count,
+            model = ?request.model,
+            provider = ?ctx.settings.provider,
+            ">>> LLM REQUEST >>>"
+        );
+
         // Call LLM
         let response = match state
             .llm
@@ -447,13 +488,27 @@ pub async fn run_agent_loop(
         {
             Ok(r) => r,
             Err(e) => {
-                tracing::error!(user_id = %user_id, error = %e, "LLM call failed");
+                tracing::error!(user_id = %user_id, error = %e, "<<< LLM ERROR <<<");
                 if let Some(ref tx) = feedback_tx {
                     let _ = tx.send(format!("LLM error: {}", e));
                 }
                 return Err(e);
             }
         };
+
+        // Log LLM response details
+        let has_tool_calls = response.tool_calls.is_some();
+        let tool_calls_count = response.tool_calls.as_ref().map(|tc| tc.len()).unwrap_or(0);
+        let response_preview = response.content.as_deref()
+            .map(|c| if c.len() > 300 { format!("{}...", &c[..300]) } else { c.to_string() })
+            .unwrap_or_else(|| "(no content)".to_string());
+        tracing::info!(
+            user_id = %user_id,
+            has_tool_calls = has_tool_calls,
+            tool_calls_count = tool_calls_count,
+            response_preview = %response_preview,
+            "<<< LLM RESPONSE <<<"
+        );
 
         // Handle tool calls
         if let Some(tool_calls) = &response.tool_calls {
@@ -538,9 +593,32 @@ pub async fn run_agent_loop(
                     }
                 }
 
+                // Log tool call start with full details
+                tracing::info!(
+                    user_id = %user_id,
+                    tool = %tc.function.name,
+                    call_id = %tc.id,
+                    arguments = %tc.function.arguments,
+                    "=== TOOL CALL START ==="
+                );
+
                 let result = execute_tool_call(&state.db, user_id, tc, &state.plugins).await;
                 let mut final_result = result.clone();
                 let mut image_content_parts: Option<Vec<serde_json::Value>> = None;
+
+                // Log tool call result
+                let result_preview = if result.len() > 500 {
+                    format!("{}... ({} chars total)", &result[..500], result.len())
+                } else {
+                    result.clone()
+                };
+                tracing::info!(
+                    user_id = %user_id,
+                    tool = %tc.function.name,
+                    call_id = %tc.id,
+                    result = %result_preview,
+                    "=== TOOL CALL END ==="
+                );
 
                 // Check if understand_image returned image data
                 if tc.function.name == "understand_image" {
@@ -580,11 +658,7 @@ pub async fn run_agent_loop(
 
                 // Auto-screenshot after VM tool calls
                 if tc.function.name.starts_with("vm_") && tc.function.name != "vm_screenshot" {
-                    let auto_screenshot = ctx
-                        .custom_data
-                        .get("vm_auto_screenshot")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
+                    let auto_screenshot = ctx.settings.vm_screenshot_enabled;
                     if auto_screenshot {
                         let data_dir =
                             std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
@@ -626,8 +700,14 @@ pub async fn run_agent_loop(
             continue;
         }
 
-        // No tool calls — process response
+        // No tool calls — process response (final answer)
         let raw_response = response.content.unwrap_or_default();
+        tracing::info!(
+            user_id = %user_id,
+            turn = ctx.turn,
+            response_len = raw_response.len(),
+            "<<< LLM FINAL RESPONSE (no tool calls) <<<"
+        );
 
         // Strip think tags
         let response_text = crate::gateway::poml::strip_think_tags(&raw_response);
@@ -823,12 +903,20 @@ pub async fn run_agent_loop(
             break;
         }
 
+        // If in last response mode, mark as completed after this response
+        if last_response_mode {
+            tracing::info!(user_id = %user_id, "Last response mode: completing after this response");
+            completed = true;
+            break;
+        }
+
         // If no tool calls and not completed, we're done with this message
         break;
     }
 
-    // Unregister this loop
+    // Unregister this loop and clean up stop signal
     unregister_active_loop(user_id).await;
+    STOP_SIGNALS.write().await.remove(user_id);
 
     // Find the last assistant message with actual content
     let all_msgs = state.db.get_messages(user_id, 50)?;
@@ -919,6 +1007,7 @@ async fn build_system_prompt(
     ctx: &crate::db::contexts::Context,
     user_message: &str,
 ) -> String {
+    tracing::info!(user_id = %ctx.user_id, "build_system_prompt called with user_message: {}", user_message);
     let mut context_json = serde_json::json!({
         "user_id": ctx.user_id,
         "turn": ctx.turn,
@@ -928,6 +1017,8 @@ async fn build_system_prompt(
         "user_prompt": user_message,
         "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     });
+    
+    tracing::info!(user_id = %ctx.user_id, "context_json user_prompt: {}", context_json["user_prompt"]);
 
     context_json["user_name"] = serde_json::json!(ctx.user_name.as_deref().unwrap_or("User"));
 

@@ -205,6 +205,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/vm", axum::routing::get(list_vm_status))
         .route("/vm/start", axum::routing::post(vm_start))
         .route("/vm/stop", axum::routing::post(vm_stop))
+        .route("/vm/reboot", axum::routing::post(vm_reboot))
         .route("/vm/snapshot", axum::routing::post(vm_snapshot))
         .route("/vm/shared-folder", axum::routing::post(vm_shared_folder))
         .route("/vm/cd", axum::routing::post(vm_cd))
@@ -983,6 +984,7 @@ pub struct VmStartRequest {
     pub disk_size: Option<String>,
     pub iso_path: Option<String>,
     pub arch: Option<String>,
+    pub keyboard_layout: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1059,6 +1061,18 @@ async fn vm_start(Json(req): Json<VmStartRequest>) -> Result<Json<serde_json::Va
         vm_config.disk_size = size;
     }
     vm_config.iso_path = req.iso_path;
+    
+    // Get keyboard layout: from request, or from context settings, or default "us"
+    let keyboard_layout = req.keyboard_layout.unwrap_or_else(|| {
+        // Try to load from context settings (default user)
+        if let Ok(db) = crate::db::Database::new(std::path::Path::new(&data_dir)) {
+            if let Ok(ctx) = db.load_context("default") {
+                return ctx.settings.vm_keyboard_layout;
+            }
+        }
+        "us".to_string()
+    });
+    vm_config.keyboard_layout = crate::vm::KeyboardLayout::from_str(&keyboard_layout);
 
     match manager.start_vm(vm_config).await {
         Ok(msg) => Ok(Json(serde_json::json!({"message": msg}))),
@@ -1075,6 +1089,20 @@ async fn vm_stop(Json(req): Json<VmStopRequest>) -> Result<Json<serde_json::Valu
 
     let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
     match manager.stop_vm(&name).await {
+        Ok(msg) => Ok(Json(serde_json::json!({"message": msg}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+    }
+}
+
+async fn vm_reboot(Json(req): Json<VmStopRequest>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let config = crate::config::Config::from_env();
+    let manager = match crate::tools::vm_tools::get_vm_manager().await {
+        Some(m) => m,
+        None => crate::tools::vm_tools::init_vm_manager(&config.data_dir),
+    };
+
+    let name = req.name.unwrap_or_else(|| "praxis-vm".to_string());
+    match manager.reboot_vm(&name).await {
         Ok(msg) => Ok(Json(serde_json::json!({"message": msg}))),
         Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
     }
