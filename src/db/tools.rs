@@ -301,15 +301,9 @@ fn get_default_tools() -> Vec<Tool> {
             is_enabled: false,
         },
         Tool {
-            name: "ask_question".into(),
-            description: Some("Ask the user a question via Discord and wait for their response. You can provide emoji-based quick reply suggestions. The tool blocks until the user answers or timeout is reached.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"question":{"type":"string","description":"The question to ask"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options (shown as 1️⃣, 2️⃣, etc.)"},"timeout_secs":{"type":"integer","default":300,"description":"How long to wait for response (seconds)"}},"required":["channel_id","question"]}),
-            is_enabled: false,
-        },
-        Tool {
             name: "ask_questions".into(),
-            description: Some("Ask the user MULTIPLE questions sequentially via Discord. Each question is asked one after another. The user can react with multiple emojis per question (3s debounce). Returns a JSON object mapping each label to its answer. Use this instead of ask_question when you have multiple related questions.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"questions":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string","description":"Short label for this answer (e.g. 'partition', 'username')"},"question":{"type":"string","description":"The question text"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options"}},"required":["label","question"]},"description":"Array of questions to ask sequentially"},"timeout_secs":{"type":"integer","default":120,"description":"Timeout per individual question (seconds)"}},"required":["channel_id","questions"]}),
+            description: Some("Ask the user one or more questions sequentially via Discord and wait for responses. Each question is asked one after another. The user can react with emojis (3s debounce) or type their answer. Returns a JSON object mapping each label to its answer. Works for a single question too - just provide one entry in the questions array.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"questions":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string","description":"Short label for this answer (e.g. 'username', 'choice')"},"question":{"type":"string","description":"The question text"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options (shown as emoji buttons)"}},"required":["label","question"]},"description":"Array of one or more questions to ask sequentially"},"timeout_secs":{"type":"integer","default":120,"description":"Timeout per individual question (seconds)"}},"required":["channel_id","questions"]}),
             is_enabled: false,
         },
     ]
@@ -349,7 +343,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 32);
+        assert_eq!(tools.len(), 31);
     }
 
     #[test]
@@ -358,7 +352,7 @@ mod tool_tests {
         init_default_tools(&db).unwrap();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 32);
+        assert_eq!(tools.len(), 31);
     }
 
     #[test]

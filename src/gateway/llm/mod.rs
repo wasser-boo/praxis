@@ -312,6 +312,44 @@ impl LLMRouter {
                         let _ = crate::db::memory::save_memory(db, user_id, &memory);
                         format!("Topic tracked: {}", topic)
                     }
+                    "ask_questions" | "ask_question" => {
+                        let channel_id = args["channel_id"].as_str().unwrap_or("");
+                        let timeout = args["timeout_secs"].as_u64().unwrap_or(300);
+                        let paired_discord_user_id = db
+                            .get_pairing_by_internal_user(user_id)
+                            .ok()
+                            .flatten()
+                            .map(|p| p.discord_user_id)
+                            .unwrap_or_default();
+                        let questions_raw = args["questions"].as_array();
+                        let mut questions: Vec<(String, String, Vec<String>)> = Vec::new();
+                        if let Some(arr) = questions_raw {
+                            for q in arr {
+                                let label = q["label"].as_str().unwrap_or("").to_string();
+                                let text = q["question"].as_str().unwrap_or("").to_string();
+                                let suggestions: Vec<String> = q["suggestions"]
+                                    .as_array()
+                                    .map(|a| {
+                                        a.iter()
+                                            .filter_map(|v| v.as_str().map(String::from))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                questions.push((label, text, suggestions));
+                            }
+                        }
+                        match crate::tools::discord_interactive::ask_questions(
+                            channel_id,
+                            &questions,
+                            timeout,
+                            &paired_discord_user_id,
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(e) => format!("Error: {}", e),
+                        }
+                    }
                     other => format!("Unknown tool: {}", other),
                 };
 
