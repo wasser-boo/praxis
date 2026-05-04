@@ -22,6 +22,10 @@ pub fn set_context_value(
         }
         "max_llm_turns" => ctx.settings.max_llm_turns = value.parse().ok(),
         "max_tool_calls" => ctx.settings.max_tool_calls = value.parse().ok(),
+        "provider" => ctx.settings.provider = Some(value.to_string()),
+        "model" => ctx.settings.model = Some(value.to_string()),
+        "vision_provider" => ctx.settings.vision_provider = Some(value.to_string()),
+        "vision_model" => ctx.settings.vision_model = Some(value.to_string()),
         _ => {
             if ctx.custom_data.is_null() {
                 ctx.custom_data = serde_json::json!({});
@@ -52,6 +56,10 @@ pub fn delete_context_value(
         "active_state" => ctx.active_state = None,
         "max_llm_turns" => ctx.settings.max_llm_turns = None,
         "max_tool_calls" => ctx.settings.max_tool_calls = None,
+        "provider" => ctx.settings.provider = None,
+        "model" => ctx.settings.model = None,
+        "vision_provider" => ctx.settings.vision_provider = None,
+        "vision_model" => ctx.settings.vision_model = None,
         _ => {
             if let Some(obj) = ctx.custom_data.as_object_mut() {
                 obj.remove(key);

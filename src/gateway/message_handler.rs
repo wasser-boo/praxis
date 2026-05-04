@@ -179,6 +179,8 @@ pub async fn handle_message(
         temperature: Some(0.7),
         max_tokens: Some(4096),
         model: ctx.settings.model.clone(),
+        vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
+        vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
     };
 
     let response = state
@@ -340,6 +342,8 @@ pub async fn handle_message(
             temperature: Some(0.7),
             max_tokens: Some(4096),
             model: ctx.settings.model.clone(),
+            vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
+            vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
         };
 
         let followup_response = state

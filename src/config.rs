@@ -35,6 +35,8 @@ pub struct Config {
     pub mimo_model: String,
     pub mimo_api_base: String,
     pub mimo_api_mode: ApiMode,
+    pub vision_provider: Option<String>,
+    pub vision_model: Option<String>,
     pub gateway_port: u16,
     pub gateway_api_key: String,
     pub dashboard_port: u16,
@@ -82,6 +84,8 @@ impl Config {
             mimo_api_mode: ApiMode::from_str(
                 &env::var("MIMO_API_MODE").unwrap_or_else(|_| "openai".to_string()),
             ),
+            vision_provider: env::var("VISION_PROVIDER").ok(),
+            vision_model: env::var("VISION_MODEL").ok(),
             gateway_port: env::var("GATEWAY_PORT")
                 .unwrap_or_else(|_| "3537".to_string())
                 .parse()

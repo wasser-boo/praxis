@@ -471,6 +471,8 @@ pub async fn run_agent_loop(
             temperature: Some(0.7),
             max_tokens: Some(4096),
             model: ctx.settings.model.clone(),
+            vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
+            vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
         };
 
         // Log LLM request details
@@ -997,6 +999,8 @@ pub async fn generate_compaction_summary(
         temperature: Some(0.3),
         max_tokens: Some(500),
         model: None,
+        vision_provider: None,
+        vision_model: None,
     };
 
     let response = state.llm.chat(request, None).await?;

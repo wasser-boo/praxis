@@ -175,6 +175,10 @@ pub struct ContextSettings {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub vision_provider: Option<String>,
+    #[serde(default)]
+    pub vision_model: Option<String>,
+    #[serde(default)]
     pub agent_name: String,
     #[serde(default)]
     pub voice_wake_words: Vec<String>,
@@ -316,6 +320,8 @@ impl Default for ContextSettings {
             system_template: None,
             provider: None,
             model: None,
+            vision_provider: None,
+            vision_model: None,
             agent_name: "assistant".to_string(),
             voice_wake_words: vec!["*".to_string()],
             voice_auto_pause_enabled: false,

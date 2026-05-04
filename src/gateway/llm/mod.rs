@@ -68,11 +68,37 @@ impl LLMRouter {
         request: ChatRequest,
         provider: Option<&str>,
     ) -> anyhow::Result<ChatResponse> {
-        let provider_name = provider.unwrap_or(&self.default_provider);
+        // If vision provider/model is set, check if messages contain images
+        // and route to the vision provider instead
+        let has_images = request.messages.iter().any(|m| {
+            m.content_parts
+                .as_ref()
+                .map_or(false, |parts| parts.iter().any(|p| matches!(p, provider::ContentPart::ImageUrl { .. })))
+        });
+
+        let (effective_provider, effective_model) = if has_images {
+            let vp = request.vision_provider.as_deref().or(provider);
+            let vm = request.vision_model.as_deref();
+            if vm.is_some() || request.vision_provider.is_some() {
+                tracing::info!(
+                    "Vision content detected, routing to provider={:?}, model={:?}",
+                    vp, vm
+                );
+            }
+            (vp, vm)
+        } else {
+            (provider, None)
+        };
+
+        let provider_name = effective_provider.unwrap_or(&self.default_provider);
 
         for p in &self.providers {
             if p.name() == provider_name {
-                match p.chat(request.clone()).await {
+                let mut req = request.clone();
+                if let Some(ref vm) = effective_model {
+                    req.model = Some(vm.clone());
+                }
+                match p.chat(req).await {
                     Ok(response) => return Ok(response),
                     Err(e) => {
                         tracing::warn!("Provider {} failed: {}", provider_name, e);
@@ -85,7 +111,9 @@ impl LLMRouter {
         for p in &self.providers {
             if p.name() != provider_name {
                 tracing::info!("Trying fallback provider: {}", p.name());
-                match p.chat(request.clone()).await {
+                let req = request.clone();
+                // Don't override model for fallback providers
+                match p.chat(req).await {
                     Ok(response) => {
                         tracing::info!("Fallback to {} successful", p.name());
                         return Ok(response);
@@ -154,6 +182,8 @@ impl LLMRouter {
                 temperature: Some(0.7),
                 max_tokens: Some(4096),
                 model: None,
+                vision_provider: None,
+                vision_model: None,
             };
 
             let response = self.chat(request, None).await?;

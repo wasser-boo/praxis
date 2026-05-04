@@ -243,8 +243,21 @@ async fn main() {
     }
 }
 
+fn load_dotenv() {
+    if dotenvy::dotenv().is_err() {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let env_path = exe_dir.join(".env");
+                if env_path.exists() {
+                    let _ = dotenvy::from_path(&env_path);
+                }
+            }
+        }
+    }
+}
+
 async fn run() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
+    load_dotenv();
 
     let cli = Cli::parse();
 
@@ -479,7 +492,7 @@ async fn run_services(
 }
 
 async fn pair_command(code: &str) -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
+    load_dotenv();
 
     let config = praxis::config::Config::from_env();
     let db = praxis::db::Database::new(Path::new(&config.data_dir))?;
@@ -776,7 +789,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
 }
 
 async fn handle_vm_action(action: VmAction) -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
+    load_dotenv();
     let config = praxis::config::Config::from_env();
     if !config.vm_enabled {
         anyhow::bail!("VM not enabled. Set VM_ENABLED=true in .env");
