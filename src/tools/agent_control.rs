@@ -38,6 +38,19 @@ pub async fn run(
                 }
             }
             ctx.settings.llm_turn += 1;
+
+            // Advance CL state if a CL file is configured
+            let cl_path = ctx.settings.cl_file.clone().or(ctx.cl_file.clone());
+            if let Some(ref path) = cl_path {
+                if let Ok(cl) = crate::cl::load_file(path) {
+                    let ctx_val = serde_json::to_value(&ctx)
+                        .map_err(|e| format!("Failed to serialize context: {}", e))?;
+                    if let Some(new_state) = crate::cl::advance_state(&cl, &ctx_val) {
+                        ctx.settings.active_state = Some(new_state.clone());
+                        tracing::info!(user_id = %user_id, new_state = %new_state, "CL state advanced via agent_next");
+                    }
+                }
+            }
         }
         AgentControlSignal::Complete => {
             ctx.settings.done = true;

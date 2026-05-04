@@ -583,7 +583,11 @@ pub fn load_file(path: &str) -> Result<ContextLang, ClError> {
     let cl_dir =
         std::env::var("CONTEXTLANGUAGE_DIR").unwrap_or_else(|_| "contextlanguage".to_string());
     let cl_path = format!("{}/{}", cl_dir, path);
-    let content = std::fs::read_to_string(&cl_path)?;
+    if let Ok(content) = std::fs::read_to_string(&cl_path) {
+        return parse(&content);
+    }
+    let contexts_path = format!("contexts/{}", path);
+    let content = std::fs::read_to_string(&contexts_path)?;
     parse(&content)
 }
 
