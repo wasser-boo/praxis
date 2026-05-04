@@ -251,20 +251,6 @@ pub async fn run_agent_loop(
         }
     }
 
-    // Apply CL workflow if configured
-    if let Some(ref cl_path) = config.cl_file {
-        if let Ok(cl) = cl::load_file(cl_path) {
-            let mut ctx_val = serde_json::to_value(&ctx)?;
-            let _secret_changes = cl::apply_to_context(&cl, &mut ctx_val);
-            // Save updated context
-            if let Ok(updated_ctx) = serde_json::from_value::<crate::db::contexts::Context>(ctx_val)
-            {
-                ctx = updated_ctx;
-                let _ = state.db.save_context(&ctx);
-            }
-        }
-    }
-
     // Apply user template
     let user_template_name = ctx
         .custom_data
@@ -330,6 +316,26 @@ pub async fn run_agent_loop(
 
         turn += 1;
         ctx.turn = turn;
+
+        // Reload context from DB to pick up changes from set_context
+        // (e.g. screen transitions that change the system_template)
+        if let Ok(fresh_ctx) = state.db.load_context(user_id) {
+            ctx = fresh_ctx;
+            ctx.turn = turn;
+        }
+
+        // Apply CL workflow every turn so transitions react to set_context changes
+        if let Some(ref cl_path) = config.cl_file {
+            if let Ok(cl) = cl::load_file(cl_path) {
+                let mut ctx_val = serde_json::to_value(&ctx)?;
+                let _secret_changes = cl::apply_to_context(&cl, &mut ctx_val);
+                if let Ok(updated_ctx) = serde_json::from_value::<crate::db::contexts::Context>(ctx_val)
+                {
+                    ctx = updated_ctx;
+                }
+            }
+        }
+
         let _ = state.db.save_context(&ctx);
 
         // Build messages - always use current user_message
