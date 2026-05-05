@@ -88,6 +88,73 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     };
     println!();
 
+    // Embedding Model (for RAG)
+    println!("--- Embedding Model (for RAG) ---");
+    println!("Embeddings are used for semantic search in the knowledge base.");
+    println!("  1) Ollama (local, free) - Recommended");
+    println!("  2) OpenAI (cloud, paid) - Best quality");
+    println!("  3) None (hash-based, lowest quality)");
+    let has_embedding = existing.contains_key("EMBEDDING_PROVIDER");
+    let embedding_default = if has_embedding {
+        match get_existing(&existing, "EMBEDDING_PROVIDER", "ollama").as_str() {
+            "openai" => "2",
+            "ollama" => "1",
+            _ => "3",
+        }
+    } else {
+        "1"
+    };
+    let embedding_choice = prompt_choice("Select embedding provider", &["1", "2", "3"], embedding_default)?;
+    match embedding_choice.as_str() {
+        "1" => {
+            let base_url = prompt_with_default(
+                "Ollama API Base URL",
+                &get_existing(&existing, "OLLAMA_API_BASE", "http://localhost:11434"),
+            );
+            let model = prompt_with_default(
+                "Embedding Model",
+                &get_existing(&existing, "EMBEDDING_MODEL", "nomic-embed-text"),
+            );
+            env_lines.push("EMBEDDING_PROVIDER=ollama".to_string());
+            env_lines.push(format!("EMBEDDING_MODEL={}", model));
+            // Only add OLLAMA_API_BASE if not already set
+            if !env_lines.iter().any(|l| l.starts_with("OLLAMA_API_BASE=")) {
+                env_lines.push(format!("OLLAMA_API_BASE={}", base_url));
+            }
+            println!("Embeddings: Ollama {} (local)", model);
+        }
+        "2" => {
+            let api_key = prompt_required_with_existing(
+                "OpenAI API Key",
+                &get_existing(&existing, "OPENAI_API_KEY", ""),
+            );
+            let base_url = prompt_with_default(
+                "OpenAI API Base URL",
+                &get_existing(&existing, "OPENAI_API_BASE", "https://api.openai.com/v1"),
+            );
+            let model = prompt_with_default(
+                "Embedding Model",
+                &get_existing(&existing, "EMBEDDING_MODEL", "text-embedding-3-small"),
+            );
+            env_lines.push("EMBEDDING_PROVIDER=openai".to_string());
+            env_lines.push(format!("EMBEDDING_MODEL={}", model));
+            // Only add OPENAI_API_BASE if not already set
+            if !env_lines.iter().any(|l| l.starts_with("OPENAI_API_BASE=")) {
+                env_lines.push(format!("OPENAI_API_BASE={}", base_url));
+            }
+            // Store API key for secrets
+            if !env_lines.iter().any(|l| l.starts_with("OPENAI_API_KEY=")) {
+                env_lines.push(format!("OPENAI_API_KEY={}", api_key));
+            }
+            println!("Embeddings: OpenAI {} (cloud)", model);
+        }
+        "3" => {
+            println!("Embeddings: Hash-based (no configuration needed)");
+        }
+        _ => {}
+    }
+    println!();
+
     // Discord (optional)
     println!("--- Discord Bot (Optional) ---");
     let has_discord = existing.contains_key("DISCORD_BOT_TOKEN");
@@ -504,6 +571,15 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
             || line.starts_with("MIMO_")
             || line.starts_with("POML_CLI=")
         {
+            content.push_str(line);
+            content.push('\n');
+        }
+    }
+    content.push('\n');
+
+    content.push_str("# Embedding Model (for RAG)\n");
+    for line in &env_lines {
+        if line.starts_with("EMBEDDING_") {
             content.push_str(line);
             content.push('\n');
         }
