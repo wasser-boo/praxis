@@ -106,6 +106,36 @@ impl std::fmt::Display for KeyboardLayout {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum Firmware {
+    #[serde(rename = "bios")]
+    Bios,
+    #[serde(rename = "uefi")]
+    Uefi,
+}
+
+impl Firmware {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "uefi" | "efi" | "ovmf" => Firmware::Uefi,
+            _ => Firmware::Bios,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Firmware::Bios => "bios",
+            Firmware::Uefi => "uefi",
+        }
+    }
+}
+
+impl std::fmt::Display for Firmware {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmConfig {
     pub name: String,
@@ -125,6 +155,7 @@ pub struct VmConfig {
     pub network_mode: String,
     pub audio_enabled: bool,
     pub keyboard_layout: KeyboardLayout,
+    pub firmware: Firmware,
 }
 
 /// Detect the best acceleration method for the current OS
@@ -209,6 +240,7 @@ impl VmConfig {
             network_mode: "user".to_string(),
             audio_enabled: false,
             keyboard_layout: KeyboardLayout::US,
+            firmware: Firmware::Bios,
         }
     }
 
@@ -1402,9 +1434,13 @@ impl VmManager {
             args.extend(["-device".to_string(), "AC97,audiodev=audio0".to_string()]);
         }
 
-        // UEFI firmware (OS-specific paths)
-        if let Some(fw) = find_ovmf_firmware() {
-            args.extend(["-bios".to_string(), fw]);
+        // Firmware: UEFI (OVMF) or BIOS
+        if config.firmware == Firmware::Uefi {
+            if let Some(fw) = find_ovmf_firmware() {
+                args.extend(["-bios".to_string(), fw]);
+            } else {
+                tracing::warn!("UEFI firmware requested but OVMF not found, falling back to BIOS");
+            }
         }
 
         args

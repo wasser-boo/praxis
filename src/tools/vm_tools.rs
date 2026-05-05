@@ -150,6 +150,7 @@ async fn handle_vm_start(manager: &VmManager, args: &serde_json::Value) -> Strin
     let disk_size = args["disk_size"].as_str().unwrap_or("40G");
     let iso_path = args["iso_path"].as_str().map(|s| s.to_string());
     let arch = args["arch"].as_str().unwrap_or("x86_64");
+    let firmware_str = args["firmware"].as_str().unwrap_or("bios");
     
     // Get keyboard layout: from args, or from context settings, or default "us"
     let keyboard_layout = args["keyboard_layout"].as_str()
@@ -180,6 +181,7 @@ async fn handle_vm_start(manager: &VmManager, args: &serde_json::Value) -> Strin
     config.disk_size = disk_size.to_string();
     config.iso_path = iso_path;
     config.keyboard_layout = crate::vm::KeyboardLayout::from_str(&keyboard_layout);
+    config.firmware = crate::vm::Firmware::from_str(firmware_str);
 
     // Auto-add shared folders from data directory
     config.shared_folders.push(crate::vm::SharedFolder {
@@ -882,6 +884,7 @@ async fn handle_vm_install(manager: &VmManager, args: &serde_json::Value) -> Str
     let cpu_cores = args["cpu_cores"].as_u64().unwrap_or(2) as u32;
     let ram_mb = args["ram_mb"].as_u64().unwrap_or(4096) as u32;
     let disk_size = args["disk_size"].as_str().unwrap_or("40G");
+    let firmware_str = args["firmware"].as_str().unwrap_or("bios");
 
     // Resolve ISO path: check iso_name against installation_disks, or use iso_path directly
     let iso_path = if let Some(path) = iso_path_arg {
@@ -953,6 +956,7 @@ async fn handle_vm_install(manager: &VmManager, args: &serde_json::Value) -> Str
     config.ram_mb = ram_mb;
     config.disk_size = disk_size.to_string();
     config.iso_path = Some(iso_path.clone());
+    config.firmware = crate::vm::Firmware::from_str(firmware_str);
 
     // Add shared folder
     config.shared_folders.push(crate::vm::SharedFolder {

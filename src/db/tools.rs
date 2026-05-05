@@ -225,7 +225,7 @@ fn get_default_tools() -> Vec<Tool> {
         Tool {
             name: "vm_start".into(),
             description: Some("Start a QEMU VM. Creates a new VM if none exists. The VM runs a full Linux environment you control.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm","description":"VM name"},"cpu_cores":{"type":"integer","default":2},"ram_mb":{"type":"integer","default":4096},"disk_size":{"type":"string","default":"40G"},"iso_path":{"type":"string","description":"Path to ISO for OS installation"},"arch":{"type":"string","enum":["x86_64","aarch64"],"default":"x86_64"},"keyboard_layout":{"type":"string","enum":["us","de","fr","es","it","gb"],"default":"us","description":"Keyboard layout for the VM (us, de, fr, es, it, gb)"}}}),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm","description":"VM name"},"cpu_cores":{"type":"integer","default":2},"ram_mb":{"type":"integer","default":4096},"disk_size":{"type":"string","default":"40G"},"iso_path":{"type":"string","description":"Path to ISO for OS installation"},"arch":{"type":"string","enum":["x86_64","aarch64"],"default":"x86_64"},"keyboard_layout":{"type":"string","enum":["us","de","fr","es","it","gb"],"default":"us","description":"Keyboard layout for the VM (us, de, fr, es, it, gb)"},"firmware":{"type":"string","enum":["bios","uefi"],"default":"bios","description":"Boot firmware: 'bios' (legacy) or 'uefi' (OVMF). Use 'uefi' for modern OSes that require EFI boot."}}}),
             is_enabled: false,
         },
         Tool {
@@ -470,7 +470,7 @@ fn get_default_tools() -> Vec<Tool> {
         Tool {
             name: "vm_install".into(),
             description: Some("Start a VM with an installation ISO to install an OS. Provide either iso_name (searches in installation_disks context) or iso_path (direct path). The VM boots from the ISO. Use vm_keys and vm_screenshot to complete the installation.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"iso_name":{"type":"string","description":"Name to search for in installation_disks (e.g. 'alpine', 'ubuntu', 'arch')"},"iso_path":{"type":"string","description":"Direct path to ISO file (alternative to iso_name)"},"vm_name":{"type":"string","default":"praxis-vm"},"cpu_cores":{"type":"integer","default":2},"ram_mb":{"type":"integer","default":4096},"disk_size":{"type":"string","default":"40G"}}}),
+            parameters: serde_json::json!({"type":"object","properties":{"iso_name":{"type":"string","description":"Name to search for in installation_disks (e.g. 'alpine', 'ubuntu', 'arch')"},"iso_path":{"type":"string","description":"Direct path to ISO file (alternative to iso_name)"},"vm_name":{"type":"string","default":"praxis-vm"},"cpu_cores":{"type":"integer","default":2},"ram_mb":{"type":"integer","default":4096},"disk_size":{"type":"string","default":"40G"},"firmware":{"type":"string","enum":["bios","uefi"],"default":"bios","description":"Boot firmware: 'bios' (legacy) or 'uefi' (OVMF). Use 'uefi' for modern OSes that require EFI boot."}}}),
             is_enabled: false,
         },
         Tool {
