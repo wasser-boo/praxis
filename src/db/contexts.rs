@@ -20,6 +20,10 @@ pub struct Context {
     pub settings: ContextSettings,
     #[serde(default)]
     pub custom_data: serde_json::Value,
+    /// Workflow-specific data for CL system (e.g., application context, device, etc.)
+    /// Supports deep merge via dot-notation in set_context
+    #[serde(default)]
+    pub cl_data: serde_json::Value,
 }
 
 impl Default for Context {
@@ -34,6 +38,7 @@ impl Default for Context {
             active_templates: Vec::new(),
             settings: ContextSettings::default(),
             custom_data: serde_json::Value::Null,
+            cl_data: serde_json::Value::Null,
         }
     }
 }
@@ -384,7 +389,11 @@ impl Database {
 
         if let (Some(obj), Some(updates_obj)) = (data.as_object_mut(), updates.as_object()) {
             for (key, value) in updates_obj {
-                obj.insert(key.clone(), value.clone());
+                if key.contains('.') {
+                    set_nested_value(obj, key, value.clone());
+                } else {
+                    obj.insert(key.clone(), value.clone());
+                }
             }
         }
 
@@ -395,6 +404,29 @@ impl Database {
 
     pub fn increment_turn(&self, ctx: &mut Context) {
         ctx.turn += 1;
+    }
+}
+
+/// Set a nested value in a JSON object using dot-notation (e.g., "custom_data.device")
+/// Creates intermediate objects as needed.
+fn set_nested_value(obj: &mut serde_json::Map<String, serde_json::Value>, path: &str, value: serde_json::Value) {
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.is_empty() {
+        return;
+    }
+
+    let mut current = obj;
+    for (i, part) in parts.iter().enumerate() {
+        if i == parts.len() - 1 {
+            // Last part: set the value
+            current.insert(part.to_string(), value.clone());
+        } else {
+            // Intermediate part: navigate or create object
+            if !current.contains_key(*part) || !current[*part].is_object() {
+                current.insert(part.to_string(), serde_json::json!({}));
+            }
+            current = current.get_mut(*part).unwrap().as_object_mut().unwrap();
+        }
     }
 }
 
@@ -446,6 +478,48 @@ mod db_tests {
         let merged = db.merge_context("user1", updates).unwrap();
         assert_eq!(merged.mode, "coding");
         assert_eq!(merged.turn, 3);
+    }
+
+    #[test]
+    fn test_merge_context_dot_notation() {
+        let (db, _dir) = test_db();
+        let ctx = Context {
+            user_id: "user1".to_string(),
+            ..Default::default()
+        };
+        db.save_context(&ctx).unwrap();
+
+        // Set custom_data.device via dot-notation
+        let updates = serde_json::json!({"custom_data.device": "main"});
+        let merged = db.merge_context("user1", updates).unwrap();
+        assert_eq!(merged.custom_data["device"], "main");
+
+        // Set another key without overwriting the first
+        let updates = serde_json::json!({"custom_data.style": "analytical"});
+        let merged = db.merge_context("user1", updates).unwrap();
+        assert_eq!(merged.custom_data["device"], "main");
+        assert_eq!(merged.custom_data["style"], "analytical");
+    }
+
+    #[test]
+    fn test_merge_context_nested_dot_notation() {
+        let (db, _dir) = test_db();
+        let ctx = Context {
+            user_id: "user1".to_string(),
+            ..Default::default()
+        };
+        db.save_context(&ctx).unwrap();
+
+        // Set deeply nested value
+        let updates = serde_json::json!({"custom_data.app.settings.theme": "dark"});
+        let merged = db.merge_context("user1", updates).unwrap();
+        assert_eq!(merged.custom_data["app"]["settings"]["theme"], "dark");
+
+        // Set sibling key without overwriting
+        let updates = serde_json::json!({"custom_data.app.settings.lang": "en"});
+        let merged = db.merge_context("user1", updates).unwrap();
+        assert_eq!(merged.custom_data["app"]["settings"]["theme"], "dark");
+        assert_eq!(merged.custom_data["app"]["settings"]["lang"], "en");
     }
 
     #[test]

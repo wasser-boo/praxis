@@ -207,10 +207,80 @@ impl EventHandler for DiscordHandler {
             }
         };
 
+        // Handle file attachments - download to appropriate folder
+        let mut attachment_context = String::new();
+        if !msg.attachments.is_empty() {
+            let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+            let vm_enabled = std::env::var("VM_ENABLED").map(|v| v == "true").unwrap_or(false);
+
+            // If VM enabled: shared/downloads (accessible at /mnt/shared/downloads in VM)
+            // If VM disabled: data/downloads
+            let download_dir = if vm_enabled {
+                std::path::Path::new(&data_dir).join("shared").join("downloads")
+            } else {
+                std::path::Path::new(&data_dir).join("downloads")
+            };
+            let _ = std::fs::create_dir_all(&download_dir);
+
+            for attachment in &msg.attachments {
+                tracing::info!(
+                    "Downloading attachment: {} ({} bytes) from user {}",
+                    attachment.filename,
+                    attachment.size,
+                    pairing.user_id
+                );
+
+                let file_path = download_dir.join(&attachment.filename);
+
+                // Download the file
+                match reqwest::get(&attachment.url).await {
+                    Ok(resp) => {
+                        match resp.bytes().await {
+                            Ok(bytes) => {
+                                match std::fs::write(&file_path, &bytes) {
+                                    Ok(_) => {
+                                        tracing::info!(
+                                            "Downloaded attachment {} to {}",
+                                            attachment.filename,
+                                            file_path.display()
+                                        );
+                                        if vm_enabled {
+                                            attachment_context.push_str(&format!(
+                                                "\n[Attached file saved to: /mnt/shared/downloads/{}]",
+                                                attachment.filename
+                                            ));
+                                        } else {
+                                            attachment_context.push_str(&format!(
+                                                "\n[Attached file saved to: {}]",
+                                                file_path.display()
+                                            ));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to save attachment {}: {}", attachment.filename, e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to read attachment {}: {}", attachment.filename, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to download attachment {}: {}", attachment.filename, e);
+                    }
+                }
+            }
+        }
+
         // Check if there's an active agent loop for this user - inject message if so
         if let Some(sender) = crate::gateway::agent_loop::get_user_input_sender(&pairing.user_id).await {
             tracing::info!("Injecting Discord message into active agent loop for user {}", pairing.user_id);
-            if let Err(e) = sender.send(msg.content.clone()) {
+            let mut inject_content = msg.content.clone();
+            if !attachment_context.is_empty() {
+                inject_content.push_str(&attachment_context);
+            }
+            if let Err(e) = sender.send(inject_content) {
                 tracing::warn!("Failed to inject message into agent loop: {}", e);
             } else {
                 let _ = msg.react(&ctx.http, '✅').await;
@@ -236,9 +306,15 @@ impl EventHandler for DiscordHandler {
 
         let _req_guard = self.request_lock.lock().await;
 
+        // Append attachment context to message content
+        let mut content = msg.content.clone();
+        if !attachment_context.is_empty() {
+            content.push_str(&attachment_context);
+        }
+
         let payload = OutgoingMessage::Message {
             user_id: pairing.user_id.clone(),
-            content: msg.content.clone(),
+            content,
             channel_id: msg.channel_id.to_string(),
         };
 

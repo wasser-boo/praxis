@@ -392,6 +392,7 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            tool_name: None,
         };
 
         let json = serde_json::to_value(&msg).unwrap();
@@ -409,6 +410,7 @@ mod tests {
             content_parts: None,
             tool_calls: None,
             tool_call_id: Some("call_123".to_string()),
+            tool_name: None,
         };
 
         let json = serde_json::to_value(&msg).unwrap();

@@ -12,9 +12,28 @@ pub struct VectorChunk {
     pub similarity: f32,
 }
 
-pub fn compute_embedding(text: &str) -> Vec<f32> {
-    // Simple TF-IDF-like embedding using word hashing
-    // In production, use a proper embedding model (OpenAI, MiniMax, etc.)
+/// Compute embedding using neural model (OpenAI/Ollama)
+/// Falls back to hash-based embedding if provider is not configured
+pub async fn compute_embedding(text: &str) -> Vec<f32> {
+    // Try neural embedding first
+    match crate::gateway::llm::embeddings::create_embedding_provider() {
+        Ok(provider) => match provider.embed(text).await {
+            Ok(embedding) => return embedding,
+            Err(e) => {
+                tracing::warn!("Neural embedding failed, falling back to hash: {}", e);
+            }
+        },
+        Err(e) => {
+            tracing::debug!("No embedding provider configured, using hash: {}", e);
+        }
+    }
+
+    // Fallback: Simple TF-IDF-like embedding using word hashing
+    compute_embedding_hash(text)
+}
+
+/// Hash-based embedding fallback (256 dimensions)
+fn compute_embedding_hash(text: &str) -> Vec<f32> {
     let mut embedding = vec![0.0f32; 256];
 
     let words: Vec<&str> = text.split_whitespace().collect();
@@ -79,7 +98,7 @@ pub async fn vector_search(
     query: &str,
     limit: usize,
 ) -> anyhow::Result<Vec<VectorChunk>> {
-    let query_embedding = compute_embedding(query);
+    let query_embedding = compute_embedding(query).await;
     let conn = db.conn();
 
     let mut stmt = conn.prepare(
@@ -163,6 +182,13 @@ pub async fn ingest_with_embeddings(
     let chunks = crate::tools::rag_query::chunk_text(content, 500, 50);
     let chunk_count = chunks.len();
 
+    // Compute all embeddings first (outside of DB lock)
+    let mut embeddings: Vec<Vec<f32>> = Vec::new();
+    for chunk in &chunks {
+        embeddings.push(compute_embedding(chunk).await);
+    }
+
+    // Now insert into database
     let conn = db.conn();
     conn.execute(
         "INSERT INTO documents (id, user_id, filename, file_type, file_size, chunk_count, status) 
@@ -178,8 +204,7 @@ pub async fn ingest_with_embeddings(
     )?;
 
     for (i, chunk) in chunks.iter().enumerate() {
-        let embedding = compute_embedding(chunk);
-        let embedding_bytes = embedding_to_bytes(&embedding);
+        let embedding_bytes = embedding_to_bytes(&embeddings[i]);
 
         conn.execute(
             "INSERT INTO document_chunks (document_id, user_id, chunk_index, content, embedding, token_count) 
@@ -209,9 +234,10 @@ pub async fn ingest_with_embeddings(
 mod vector_tests {
     use super::*;
 
-    #[test]
-    fn test_compute_embedding() {
-        let embedding = compute_embedding("hello world");
+    #[tokio::test]
+    async fn test_compute_embedding() {
+        // Test with hash-based fallback (no neural provider configured)
+        let embedding = compute_embedding_hash("hello world");
         assert_eq!(embedding.len(), 256);
         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 0.001);

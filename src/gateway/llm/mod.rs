@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod embeddings;
 pub mod mimo;
 pub mod minimax;
 pub mod ollama;
