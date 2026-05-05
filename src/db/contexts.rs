@@ -113,6 +113,12 @@ pub struct ContextSettings {
     #[serde(default)]
     pub qwen_tts_language: Option<String>,
     #[serde(default)]
+    pub qwen_voice_clone_audio_path: Option<String>,
+    #[serde(default)]
+    pub qwen_voice_clone_enabled: bool,
+    #[serde(default)]
+    pub qwen_voice_clone_prompt: Option<String>,
+    #[serde(default)]
     pub minimax_voice_id: Option<String>,
     #[serde(default)]
     pub minimax_tts_model: Option<String>,
@@ -289,6 +295,9 @@ impl Default for ContextSettings {
             qwen_tts_model: None,
             qwen_tts_speaker: None,
             qwen_tts_language: None,
+            qwen_voice_clone_audio_path: None,
+            qwen_voice_clone_enabled: false,
+            qwen_voice_clone_prompt: None,
             minimax_voice_id: None,
             minimax_tts_model: None,
             mimo_voice_id: None,

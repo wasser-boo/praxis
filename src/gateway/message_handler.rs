@@ -65,16 +65,6 @@ pub async fn handle_message(
                 }),
             );
 
-            let tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
-            let tools_context: Vec<serde_json::Value> = tools.iter().map(|t| {
-                serde_json::json!({
-                    "name": t.function.name,
-                    "description": t.function.description,
-                    "parameters": t.function.parameters
-                })
-            }).collect();
-            obj.insert("tools".to_string(), serde_json::json!(tools_context));
-
             let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
             let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
             let (_all_msgs, tokens_used) = state
@@ -517,18 +507,6 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
     // Load memory
     let memory = crate::db::memory::load_memory(&state.db, &ctx.user_id);
 
-    // Load tools for context
-    let tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
-    tracing::debug!(target: "message_handler", "Loaded {} tool definitions", tools.len());
-    let tools_context: Vec<serde_json::Value> = tools.iter().map(|t| {
-        serde_json::json!({
-            "name": t.function.name,
-            "description": t.function.description,
-            "parameters": t.function.parameters
-        })
-    }).collect();
-    tracing::debug!(target: "message_handler", "Tools context: {}", serde_json::to_string(&tools_context).unwrap_or_default());
-
     // Calculate uptime
     let uptime_secs = state.start_time.elapsed().as_secs();
     let uptime = format_uptime(uptime_secs);
@@ -553,7 +531,6 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
         "turn": ctx.turn,
         "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
         "skills": skills,
-        "tools": tools_context,
         "uptime": uptime,
         "uptime_secs": uptime_secs,
         "paired_users_count": paired_count,
@@ -989,6 +966,13 @@ fn spawn_tts(
         .clone()
         .unwrap_or_else(|| "builtin".to_string());
     let mimo_voice = settings.mimo_voice_id.clone();
+    let qwen_tts_server = settings.qwen_tts_server.clone();
+    let qwen_tts_model = settings.qwen_tts_model.clone();
+    let qwen_tts_speaker = settings.qwen_tts_speaker.clone();
+    let qwen_tts_language = settings.qwen_tts_language.clone();
+    let qwen_voice_clone_audio_path = settings.qwen_voice_clone_audio_path.clone();
+    let qwen_voice_clone_enabled = settings.qwen_voice_clone_enabled;
+    let qwen_voice_clone_prompt = settings.qwen_voice_clone_prompt.clone();
     let audio_output_path = settings.voice_audio_output_path.clone();
     let user_id = user_id.to_string();
 
@@ -1059,6 +1043,44 @@ fn spawn_tts(
                     Err(e) => {
                         tracing::warn!("TTS FAILED: mimo_tts: {}", e);
                         return;
+                    }
+                }
+            }
+            "qwen_tts" => {
+                let server_url = qwen_tts_server.unwrap_or_default();
+                if server_url.is_empty() {
+                    tracing::warn!("TTS FAILED: qwen_tts: server_url not set");
+                    return;
+                }
+                let language = qwen_tts_language.unwrap_or_else(|| "English".to_string());
+                let speaker = qwen_tts_speaker.clone();
+                let tts_client = tts::qwen_tts::QwenTTSClient::new(server_url, language, speaker);
+                let use_clone = qwen_voice_clone_enabled || qwen_voice_clone_audio_path.as_ref().map_or(false, |p| !p.is_empty());
+                if use_clone {
+                    if let Some(ref clone_path) = qwen_voice_clone_audio_path {
+                        if !clone_path.is_empty() {
+                            match tts_client.speak_voice_clone(&text, clone_path, qwen_voice_clone_prompt.as_deref()).await {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    tracing::warn!("TTS FAILED: qwen_tts voice_clone: {}", e);
+                                    return;
+                                }
+                            }
+                        } else {
+                            tracing::warn!("TTS FAILED: qwen_tts: voice_clone_enabled but no audio path set");
+                            return;
+                        }
+                    } else {
+                        tracing::warn!("TTS FAILED: qwen_tts: voice_clone_enabled but no audio path set");
+                        return;
+                    }
+                } else {
+                    match tts_client.speak(&text).await {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            tracing::warn!("TTS FAILED: qwen_tts: {}", e);
+                            return;
+                        }
                     }
                 }
             }

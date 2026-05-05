@@ -96,7 +96,7 @@ impl LLMRouter {
             if p.name() == provider_name {
                 let mut req = request.clone();
                 if let Some(ref vm) = effective_model {
-                    req.model = Some(vm.clone());
+                    req.model = Some(vm.to_string());
                 }
                 match p.chat(req).await {
                     Ok(response) => return Ok(response),

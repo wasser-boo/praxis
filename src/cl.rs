@@ -57,6 +57,8 @@ const ALLOWED_SECRET_FIELDS: &[&str] = &[
     "qwen_tts_speaker",
     "qwen_tts_language",
     "qwen_voice_clone_enabled",
+    "qwen_voice_clone_audio_path",
+    "qwen_voice_clone_prompt",
     "rvc_on",
 ];
 
