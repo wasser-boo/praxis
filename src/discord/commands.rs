@@ -109,6 +109,16 @@ pub async fn setup_commands(http: &serenity::http::Http) -> anyhow::Result<()> {
         .dm_permission(true);
     http.create_global_command(&compact_cmd).await?;
 
+    let stop_cmd = serenity::builder::CreateCommand::new("stop")
+        .description("Stop the active agent loop")
+        .dm_permission(true);
+    http.create_global_command(&stop_cmd).await?;
+
+    let clear_cmd = serenity::builder::CreateCommand::new("clear")
+        .description("Delete all messages from history and context")
+        .dm_permission(true);
+    http.create_global_command(&clear_cmd).await?;
+
     tracing::info!("All discord commands registered");
     Ok(())
 }
@@ -272,6 +282,14 @@ pub fn register_commands() -> Vec<serde_json::Value> {
         serde_json::json!({
             "name": "compact",
             "description": "Compact conversation history into a summary"
+        }),
+        serde_json::json!({
+            "name": "stop",
+            "description": "Stop the active agent loop"
+        }),
+        serde_json::json!({
+            "name": "clear",
+            "description": "Delete all messages from history and context"
         }),
     ]
 }

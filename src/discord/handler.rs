@@ -1126,6 +1126,70 @@ impl EventHandler for DiscordHandler {
                         }
                     }
                 }
+                "stop" => {
+                    let discord_user_id = command.user.id.to_string();
+                    if let Ok(Some(pairing)) = self.db.get_pairing_by_discord(&discord_user_id) {
+                        crate::gateway::agent_loop::stop_agent_loop(&pairing.user_id).await;
+                        let _ = command
+                            .create_response(
+                                &ctx.http,
+                                serenity::builder::CreateInteractionResponse::Message(
+                                    serenity::builder::CreateInteractionResponseMessage::new()
+                                        .content("Agent stopped."),
+                                ),
+                            )
+                            .await;
+                    } else {
+                        let _ = command
+                            .create_response(
+                                &ctx.http,
+                                serenity::builder::CreateInteractionResponse::Message(
+                                    serenity::builder::CreateInteractionResponseMessage::new()
+                                        .content("No active agent to stop."),
+                                ),
+                            )
+                            .await;
+                    }
+                }
+                "clear" => {
+                    let discord_user_id = command.user.id.to_string();
+                    if let Ok(Some(pairing)) = self.db.get_pairing_by_discord(&discord_user_id) {
+                        crate::gateway::agent_loop::stop_agent_loop(&pairing.user_id).await;
+                        if let Err(e) = self.db.clear_messages(&pairing.user_id) {
+                            tracing::error!("Failed to clear messages for user {}: {}", pairing.user_id, e);
+                            let _ = command
+                                .create_response(
+                                    &ctx.http,
+                                    serenity::builder::CreateInteractionResponse::Message(
+                                        serenity::builder::CreateInteractionResponseMessage::new()
+                                            .content("Failed to clear messages."),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                        tracing::info!("Cleared all messages for user {}", pairing.user_id);
+                        let _ = command
+                            .create_response(
+                                &ctx.http,
+                                serenity::builder::CreateInteractionResponse::Message(
+                                    serenity::builder::CreateInteractionResponseMessage::new()
+                                        .content("All messages cleared and agent stopped."),
+                                ),
+                            )
+                            .await;
+                    } else {
+                        let _ = command
+                            .create_response(
+                                &ctx.http,
+                                serenity::builder::CreateInteractionResponse::Message(
+                                    serenity::builder::CreateInteractionResponseMessage::new()
+                                        .content("Please pair first with /pair"),
+                                ),
+                            )
+                            .await;
+                    }
+                }
                 _ => {}
             }
         }
