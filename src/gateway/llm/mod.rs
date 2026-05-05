@@ -345,14 +345,22 @@ impl LLMRouter {
                         let _ = crate::db::memory::save_memory(db, user_id, &memory);
                         format!("Topic tracked: {}", topic)
                     }
-                    "ask_questions" | "ask_question" => {
-                        let channel_id = args["channel_id"].as_str().unwrap_or("");
+                    "ask_questions" => {
                         // Get timeout from args, then context, then default to 120
                         let ctx_data = db
                             .load_context(user_id)
                             .ok()
                             .map(|ctx| ctx.custom_data)
                             .filter(|v| !v.is_null());
+                        let fallback_ch = ctx_data
+                            .as_ref()
+                            .and_then(|c| c.get("channel_id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let channel_id = args["channel_id"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(fallback_ch);
                         let default_timeout = ctx_data
                             .as_ref()
                             .and_then(|c| c.get("question_timeout_secs"))

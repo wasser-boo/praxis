@@ -181,20 +181,20 @@ fn get_default_tools() -> Vec<Tool> {
         },
         Tool {
             name: "discord_upload_file".into(),
-            description: Some("Upload file to Discord channel. Provide channel_id, filename (display name), and base64_content (base64-encoded file data).".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"filename":{"type":"string","description":"Display filename for the attachment"},"base64_content":{"type":"string","description":"Base64-encoded file content"},"message":{"type":"string","description":"Optional message text"}},"required":["channel_id","filename","base64_content"]}),
+            description: Some("Upload file to Discord channel. If channel_id is omitted, sends to the channel where the request originated.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID. If omitted, uses the originating channel."},"filename":{"type":"string","description":"Display filename for the attachment"},"base64_content":{"type":"string","description":"Base64-encoded file content"},"message":{"type":"string","description":"Optional message text"}},"required":["filename","base64_content"]}),
             is_enabled: true,
         },
         Tool {
             name: "discord_send_message".into(),
-            description: Some("Send message to Discord channel".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string"},"message":{"type":"string"}},"required":["channel_id","message"]}),
+            description: Some("Send message to Discord channel. If channel_id is omitted, sends to the originating channel.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID. If omitted, uses the originating channel."},"message":{"type":"string"}},"required":["message"]}),
             is_enabled: true,
         },
         Tool {
             name: "discord_send_embed".into(),
-            description: Some("Send rich embed to Discord channel".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"url":{"type":"string"},"color":{"type":["string","number"],"description":"Hex color (e.g. '6C5CE7' or '#FF0000') or integer"},"footer":{"type":"string"},"author":{"type":"string"},"thumbnail":{"type":"string","description":"URL to thumbnail image"},"image":{"type":"string","description":"URL to full image"},"fields":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"value":{"type":"string"},"inline":{"type":"boolean"}},"required":["name","value"]}}},"required":["channel_id"]}),
+            description: Some("Send rich embed to Discord channel. If channel_id is omitted, sends to the originating channel.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID. If omitted, uses the originating channel."},"title":{"type":"string"},"description":{"type":"string"},"url":{"type":"string"},"color":{"type":["string","number"],"description":"Hex color (e.g. '6C5CE7' or '#FF0000') or integer"},"footer":{"type":"string"},"author":{"type":"string"},"thumbnail":{"type":"string","description":"URL to thumbnail image"},"image":{"type":"string","description":"URL to full image"},"fields":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"value":{"type":"string"},"inline":{"type":"boolean"}},"required":["name","value"]}}},"required":[]}),
             is_enabled: true,
         },
         Tool {
@@ -500,20 +500,20 @@ fn get_default_tools() -> Vec<Tool> {
         },
         Tool {
             name: "send_screenshot_to_discord".into(),
-            description: Some("Take a VM screenshot and send it to a Discord channel. Use this to show the user what's happening on the VM desktop.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"caption":{"type":"string","description":"Optional caption for the screenshot"},"vm_name":{"type":"string","default":"praxis-vm"}},"required":["channel_id"]}),
+            description: Some("Take a VM screenshot and send it to a Discord channel. If channel_id is omitted, sends to the originating channel.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID. If omitted, uses the originating channel."},"caption":{"type":"string","description":"Optional caption for the screenshot"},"vm_name":{"type":"string","default":"praxis-vm"}},"required":[]}),
             is_enabled: false,
         },
         Tool {
             name: "screenshot_with_feedback".into(),
-            description: Some("Take a VM screenshot and send it to Discord with a message/feedback. Use this to show progress and ask for input.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"feedback":{"type":"string","description":"Message to send with the screenshot"},"vm_name":{"type":"string","default":"praxis-vm"}},"required":["channel_id","feedback"]}),
+            description: Some("Take a VM screenshot and send it to Discord with a message/feedback. If channel_id is omitted, sends to the originating channel.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID. If omitted, uses the originating channel."},"feedback":{"type":"string","description":"Message to send with the screenshot"},"vm_name":{"type":"string","default":"praxis-vm"}},"required":["feedback"]}),
             is_enabled: false,
         },
         Tool {
             name: "ask_questions".into(),
-            description: Some("Ask the user questions via Discord. Each question needs 'label' (short key for the answer), 'question' (the text to ask), and optionally 'suggestions' (array of plain strings like [\"yes\", \"no\", \"maybe\"] shown as emoji buttons). Do NOT use 'options' or objects - use 'suggestions' with simple strings only.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID"},"questions":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string","description":"Short key for answer, e.g. 'color', 'choice'"},"question":{"type":"string","description":"The question text to ask"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options as plain strings, e.g. [\"red\", \"blue\", \"green\"]"}},"required":["label","question"]},"description":"Array of questions to ask"},"timeout_secs":{"type":"integer","default":120,"description":"Timeout per question in seconds"}},"required":["channel_id","questions"]}),
+            description: Some("Ask the user questions via Discord. Each question needs 'label' (short key for the answer), 'question' (the text to ask), and optionally 'suggestions' (array of plain strings like [\"yes\", \"no\", \"maybe\"] shown as emoji buttons). Do NOT use 'options' or objects - use 'suggestions' with simple strings only. If 'channel_id' is omitted, questions are sent to the channel where the request originated.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID. If omitted, sends to the channel where the request originated."},"questions":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string","description":"Short key for answer, e.g. 'color', 'choice'"},"question":{"type":"string","description":"The question text to ask"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options as plain strings, e.g. [\"red\", \"blue\", \"green\"]"}},"required":["label","question"]},"description":"Array of questions to ask"},"timeout_secs":{"type":"integer","default":120,"description":"Timeout per question in seconds"}},"required":["questions"]}),
             is_enabled: false,
         },
     ]

@@ -192,6 +192,14 @@ pub async fn run_agent_loop(
                 .unwrap_or_else(|| serde_json::json!("user"));
             obj.insert("user_template".to_string(), user_template);
 
+            // Default channel_id for Discord tools (can be overwritten via CL)
+            if !obj.contains_key("channel_id") {
+                let fallback_ch = ctx.settings.feedback_channel_id.clone().unwrap_or_default();
+                if !fallback_ch.is_empty() {
+                    obj.insert("channel_id".to_string(), serde_json::json!(fallback_ch));
+                }
+            }
+
             let memory = crate::db::memory::load_memory(&state.db, user_id);
             obj.insert(
                 "memory".to_string(),
@@ -1343,15 +1351,15 @@ async fn execute_tool_call(
             .unwrap_or_else(|e| format!("Error: {}", e))
         }
         "discord_upload_file" => {
-            let fallback_ch = db
-                .load_context(user_id)
-                .ok()
-                .and_then(|ctx| ctx.settings.feedback_channel_id)
-                .unwrap_or_default();
+            let fallback_ch = ctx_data
+                .as_ref()
+                .and_then(|c| c.get("channel_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let channel_id = args["channel_id"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(&fallback_ch);
+                .unwrap_or(fallback_ch);
             let filename = args["filename"].as_str().unwrap_or("file");
             let base64_content = args["base64_content"].as_str().unwrap_or("");
             // Decode base64 to temp file, then upload
@@ -1385,15 +1393,15 @@ async fn execute_tool_call(
             }
         }
         "discord_send_message" => {
-            let fallback_ch = db
-                .load_context(user_id)
-                .ok()
-                .and_then(|ctx| ctx.settings.feedback_channel_id)
-                .unwrap_or_default();
+            let fallback_ch = ctx_data
+                .as_ref()
+                .and_then(|c| c.get("channel_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let channel_id = args["channel_id"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(&fallback_ch);
+                .unwrap_or(fallback_ch);
             let message = args["message"].as_str().unwrap_or("");
             match crate::tools::discord_send_message::send_message(channel_id, message).await {
                 Ok(_) => "Message sent".to_string(),
@@ -1401,15 +1409,15 @@ async fn execute_tool_call(
             }
         }
         "discord_send_embed" => {
-            let fallback_ch = db
-                .load_context(user_id)
-                .ok()
-                .and_then(|ctx| ctx.settings.feedback_channel_id)
-                .unwrap_or_default();
+            let fallback_ch = ctx_data
+                .as_ref()
+                .and_then(|c| c.get("channel_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let channel_id = args["channel_id"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(&fallback_ch);
+                .unwrap_or(fallback_ch);
             let title = args.get("title").and_then(|v| v.as_str());
             let description = args.get("description").and_then(|v| v.as_str());
             let url = args.get("url").and_then(|v| v.as_str());
@@ -1540,15 +1548,15 @@ async fn execute_tool_call(
             .to_string();
         }
         "send_screenshot_to_discord" => {
-            let fallback_ch = db
-                .load_context(user_id)
-                .ok()
-                .and_then(|ctx| ctx.settings.feedback_channel_id)
-                .unwrap_or_default();
+            let fallback_ch = ctx_data
+                .as_ref()
+                .and_then(|c| c.get("channel_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let channel_id = args["channel_id"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(&fallback_ch);
+                .unwrap_or(fallback_ch);
             let caption = args["caption"].as_str();
             let vm_name = args["vm_name"].as_str().unwrap_or("praxis-vm");
             match crate::tools::discord_interactive::send_screenshot_to_discord(
@@ -1573,45 +1581,16 @@ async fn execute_tool_call(
                 Err(e) => format!("Error: {}", e),
             }
         }
-        "ask_question" => {
-            let channel_id = args["channel_id"].as_str().unwrap_or("");
-            let question = args["question"].as_str().unwrap_or("");
-            // Get timeout from args, then context, then default to 120
-            let default_timeout = ctx_data
-                .as_ref()
-                .and_then(|c| c.get("question_timeout_secs"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(120);
-            let timeout = args["timeout_secs"].as_u64().unwrap_or(default_timeout);
-            let suggestions: Vec<String> = args["suggestions"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let paired_discord_user_id = db
-                .get_pairing_by_internal_user(user_id)
-                .ok()
-                .flatten()
-                .map(|p| p.discord_user_id)
-                .unwrap_or_default();
-            match crate::tools::discord_interactive::ask_question(
-                channel_id,
-                question,
-                &suggestions,
-                timeout,
-                &paired_discord_user_id,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(e) => format!("Error: {}", e),
-            }
-        }
         "ask_questions" => {
-            let channel_id = args["channel_id"].as_str().unwrap_or("");
+            let fallback_ch = ctx_data
+                .as_ref()
+                .and_then(|c| c.get("channel_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let channel_id = args["channel_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(fallback_ch);
             // Get timeout from args, then context, then default to 120
             let default_timeout = ctx_data
                 .as_ref()

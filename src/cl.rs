@@ -418,12 +418,8 @@ pub fn apply_to_context(
         }
     }
 
-    // Auto-rules: determine active state from conditions
-    let resolved_state = if active_state.is_empty() {
-        resolve_auto_state(cl, obj)
-    } else {
-        active_state.clone()
-    };
+    // Auto-rules: always evaluate to allow automatic state transitions
+    let resolved_state = resolve_auto_state(cl, obj, &active_state);
 
     // Apply state variables
     if let Some(state) = cl.states.get(&resolved_state) {
@@ -458,11 +454,16 @@ pub fn apply_to_context(
 fn resolve_auto_state(
     cl: &ContextLang,
     context: &serde_json::Map<String, serde_json::Value>,
+    current_state: &str,
 ) -> String {
     for rule in &cl.auto_rules {
         if evaluate_condition(&rule.condition, context) {
             return rule.target_state.clone();
         }
+    }
+    // Fall back to current state if set, otherwise first step or first state key
+    if !current_state.is_empty() {
+        return current_state.to_string();
     }
     cl.steps
         .first()
