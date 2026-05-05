@@ -177,6 +177,7 @@ async function loadContexts() {
                 </div>
                 <div class="actions">
                     <button class="btn btn-sm btn-primary" onclick="viewContext('${safeUid}')">View</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteContext('${safeUid}')">Delete</button>
                 </div>
             </div>
         `}).join('');
@@ -226,6 +227,15 @@ async function viewContext(userId) {
             `).join('')
             : '<div class="data-item"><span class="name">None</span></div>';
 
+        const clDataHtml = ctx.cl_data && Object.keys(ctx.cl_data).length > 0
+            ? Object.entries(ctx.cl_data).map(([k, v]) => `
+                <div class="data-item">
+                    <span class="name">${escapeHtml(k)}</span>
+                    <span class="meta">${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</span>
+                </div>
+            `).join('')
+            : '<div class="data-item"><span class="name">None</span></div>';
+
         const ctxJson = JSON.stringify(ctx, null, 2);
         const uid = escapeHtml(userId);
 
@@ -244,7 +254,10 @@ async function viewContext(userId) {
                 <div class="data-list" style="margin-bottom:1rem;max-height:200px;overflow-y:auto">${settingsHtml}</div>
                 <h3>Custom Data</h3>
                 <div class="data-list" style="margin-bottom:1rem">${customDataHtml}</div>
+                <h3>CL Data</h3>
+                <div class="data-list" style="margin-bottom:1rem">${clDataHtml}</div>
                 <button class="btn btn-primary" style="width:auto" id="ctx-edit-btn">Edit</button>
+                <button class="btn btn-danger" style="width:auto" id="ctx-delete-btn">Delete</button>
             </div>
             <div id="context-edit-mode" style="display:none">
                 <textarea id="context-edit-json" class="code-editor" style="min-height:400px">${escapeHtml(ctxJson)}</textarea>
@@ -258,6 +271,7 @@ async function viewContext(userId) {
         document.getElementById('ctx-edit-btn').addEventListener('click', () => toggleContextEdit());
         document.getElementById('ctx-save-btn').addEventListener('click', () => saveContextEdit(userId));
         document.getElementById('ctx-cancel-btn').addEventListener('click', () => toggleContextEdit());
+        document.getElementById('ctx-delete-btn').addEventListener('click', () => deleteContext(userId));
     } catch (err) {
         console.error('Failed to load context:', err);
         alert('Failed to load context: ' + err.message);
@@ -296,6 +310,25 @@ async function saveContextEdit(userId) {
         }
     } catch (err) {
         alert('Failed to save context: ' + err.message);
+    }
+}
+
+async function deleteContext(userId) {
+    if (!confirm(`Delete context for "${userId}"?`)) return;
+    try {
+        const res = await apiFetch(`/api/contexts/${encodeURIComponent(userId)}`, {
+            method: 'DELETE'
+        });
+        if (res.ok) {
+            const modal = document.getElementById('modal-overlay');
+            if (modal) modal.style.display = 'none';
+            loadContexts();
+        } else {
+            const text = await res.text();
+            alert('Failed to delete context: ' + text);
+        }
+    } catch (err) {
+        alert('Failed to delete context: ' + err.message);
     }
 }
 

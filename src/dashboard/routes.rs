@@ -172,6 +172,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/contexts", axum::routing::get(list_contexts))
         .route("/contexts/:user_id", axum::routing::get(get_context))
         .route("/contexts/:user_id", axum::routing::put(update_context))
+        .route("/contexts/:user_id", axum::routing::delete(delete_context))
         .route("/messages/:user_id", axum::routing::get(get_messages))
         .route("/templates", axum::routing::get(list_templates))
         .route("/templates", axum::routing::post(create_template))
@@ -363,6 +364,7 @@ async fn get_context(
         "active_templates": ctx.active_templates,
         "settings": ctx.settings,
         "custom_data": ctx.custom_data,
+        "cl_data": ctx.cl_data,
     })))
 }
 
@@ -385,7 +387,19 @@ async fn update_context(
         "active_templates": ctx.active_templates,
         "settings": ctx.settings,
         "custom_data": ctx.custom_data,
+        "cl_data": ctx.cl_data,
     })))
+}
+
+async fn delete_context(
+    State(state): State<Arc<DashboardState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .db
+        .delete_context(&user_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "success": true })))
 }
 
 // ── Messages ─────────────────────────────────────────────────────────────────

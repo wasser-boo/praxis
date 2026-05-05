@@ -402,6 +402,15 @@ impl Database {
         Ok(ctx)
     }
 
+    pub fn delete_context(&self, user_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM contexts WHERE user_id = ?1",
+            rusqlite::params![user_id],
+        )?;
+        Ok(())
+    }
+
     pub fn increment_turn(&self, ctx: &mut Context) {
         ctx.turn += 1;
     }
