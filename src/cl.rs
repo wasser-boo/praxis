@@ -428,28 +428,26 @@ pub fn apply_to_context(
     // Apply state variables
     if let Some(state) = cl.states.get(&resolved_state) {
         for (key, value) in &state.variables {
-            obj.insert(key.clone(), serde_json::Value::String(value.clone()));
+            set_nested_value(context, key, serde_json::Value::String(value.clone()));
         }
-        obj.insert(
-            "active_state".to_string(),
+        set_nested_value(
+            context,
+            "active_state",
             serde_json::Value::String(resolved_state),
         );
     }
 
     // Apply overrides
     for overr in &cl.overrides {
-        if evaluate_condition(&overr.condition, obj) {
-            obj.insert(
-                overr.key.clone(),
-                serde_json::Value::String(overr.value.clone()),
-            );
+        if evaluate_condition(&overr.condition, context.as_object().unwrap_or(&serde_json::Map::new())) {
+            set_nested_value(context, &overr.key, serde_json::Value::String(overr.value.clone()));
         }
     }
 
     // Collect secret overrides
     let mut secret_changes = Vec::new();
     for secret_overr in &cl.secret_overrides {
-        if evaluate_condition(&secret_overr.condition, obj) {
+        if evaluate_condition(&secret_overr.condition, context.as_object().unwrap_or(&serde_json::Map::new())) {
             secret_changes.push((secret_overr.key.clone(), secret_overr.value.clone()));
         }
     }
@@ -516,7 +514,7 @@ pub fn evaluate_condition(
         };
     };
 
-    let ctx_val = context.get(var);
+    let ctx_val = get_nested_value(context, var);
 
     let clean_value = if value.starts_with('"') && value.ends_with('"') {
         &value[1..value.len() - 1]
@@ -589,7 +587,11 @@ pub fn load_file(path: &str) -> Result<ContextLang, ClError> {
         return parse(&content);
     }
     let contexts_path = format!("contexts/{}", path);
-    let content = std::fs::read_to_string(&contexts_path)?;
+    if let Ok(content) = std::fs::read_to_string(&contexts_path) {
+        return parse(&content);
+    }
+    let data_contexts_path = format!("data/contexts/{}", path);
+    let content = std::fs::read_to_string(&data_contexts_path)?;
     parse(&content)
 }
 
@@ -620,23 +622,57 @@ pub fn transition_to(
     context: &mut serde_json::Value,
     target_state: &str,
 ) -> bool {
-    let obj = match context.as_object_mut() {
-        Some(o) => o,
-        None => return false,
-    };
-
     if let Some(state) = cl.states.get(target_state) {
         for (key, value) in &state.variables {
-            obj.insert(key.clone(), serde_json::Value::String(value.clone()));
+            set_nested_value(context, key, serde_json::Value::String(value.clone()));
         }
-        obj.insert(
-            "active_state".to_string(),
+        set_nested_value(
+            context,
+            "active_state",
             serde_json::Value::String(target_state.to_string()),
         );
         true
     } else {
         false
     }
+}
+
+fn set_nested_value(context: &mut serde_json::Value, path: &str, value: serde_json::Value) {
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.is_empty() {
+        return;
+    }
+
+    let mut current = context;
+    for part in &parts[..parts.len() - 1] {
+        if !current.is_object() {
+            *current = serde_json::json!({});
+        }
+        if !current.as_object().unwrap().contains_key(*part) {
+            current
+                .as_object_mut()
+                .unwrap()
+                .insert(part.to_string(), serde_json::json!({}));
+        }
+        current = current.as_object_mut().unwrap().get_mut(*part).unwrap();
+    }
+
+    if let Some(obj) = current.as_object_mut() {
+        obj.insert(parts.last().unwrap().to_string(), value);
+    }
+}
+
+fn get_nested_value<'a>(context: &'a serde_json::Map<String, serde_json::Value>, path: &str) -> Option<&'a serde_json::Value> {
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut current = context.get(parts[0])?;
+    for part in &parts[1..] {
+        current = current.get(part)?;
+    }
+    Some(current)
 }
 
 /// Get the next state in the @steps sequence.

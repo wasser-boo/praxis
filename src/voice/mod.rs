@@ -830,7 +830,7 @@ pub mod tts {
                     ref_audio: None,
                     ref_text: None,
                     clone: Some(false),
-                    raw: Some(true),
+                    raw: Some(false),
                 };
 
                 tracing::info!(text_preview = %text.chars().take(50).collect::<String>(), "Sending TTS request to {}", url);
@@ -853,20 +853,46 @@ pub mod tts {
                     )));
                 }
 
-                let audio_bytes = response
-                    .bytes()
+                let response_text = response
+                    .text()
                     .await
                     .map_err(|e| {
                         TTSError::SynthesisFailed(format!(
-                            "Failed to read Qwen3-TTS raw audio: {}",
+                            "Failed to read Qwen3-TTS response: {}",
                             e
                         ))
-                    })?
-                    .to_vec();
+                    })?;
 
+                // Try to parse as JSON with base64 audio
+                if let Ok(tts_response) = serde_json::from_str::<TTSResponse>(&response_text) {
+                    if let Some(error) = tts_response.error {
+                        return Err(TTSError::SynthesisFailed(format!("Qwen3-TTS error: {}", error)));
+                    }
+                    if let Some(audio_b64) = tts_response.audio {
+                        use base64::Engine;
+                        let audio_bytes = base64::engine::general_purpose::STANDARD
+                            .decode(&audio_b64)
+                            .map_err(|e| {
+                                TTSError::SynthesisFailed(format!(
+                                    "Failed to decode Qwen3-TTS audio: {}",
+                                    e
+                                ))
+                            })?;
+                        tracing::info!(
+                            response_size = audio_bytes.len(),
+                            "TTS response received from {} ({} bytes decoded from base64)",
+                            url,
+                            audio_bytes.len()
+                        );
+                        return Ok(audio_bytes);
+                    }
+                }
+
+                // If not JSON or no audio field, treat as raw bytes
+                let audio_bytes = response_text.into_bytes();
                 tracing::info!(
                     response_size = audio_bytes.len(),
-                    "TTS response received from {} ({} bytes)",
+                    "TTS response received from {} ({} bytes raw)",
                     url,
                     audio_bytes.len()
                 );
@@ -903,7 +929,7 @@ pub mod tts {
                     ref_audio: Some(ref_audio_b64),
                     ref_text: ref_text.map(String::from),
                     clone: Some(true),
-                    raw: Some(true),
+                    raw: Some(false),
                 };
 
                 tracing::info!(text_preview = %text.chars().take(50).collect::<String>(), "Sending voice clone request to {}", url);
@@ -929,20 +955,46 @@ pub mod tts {
                     )));
                 }
 
-                let audio_bytes = response
-                    .bytes()
+                let response_text = response
+                    .text()
                     .await
                     .map_err(|e| {
                         TTSError::SynthesisFailed(format!(
-                            "Failed to read Qwen3-TTS raw audio: {}",
+                            "Failed to read Qwen3-TTS response: {}",
                             e
                         ))
-                    })?
-                    .to_vec();
+                    })?;
 
+                // Try to parse as JSON with base64 audio
+                if let Ok(tts_response) = serde_json::from_str::<TTSResponse>(&response_text) {
+                    if let Some(error) = tts_response.error {
+                        return Err(TTSError::SynthesisFailed(format!("Qwen3-TTS error: {}", error)));
+                    }
+                    if let Some(audio_b64) = tts_response.audio {
+                        use base64::Engine;
+                        let audio_bytes = base64::engine::general_purpose::STANDARD
+                            .decode(&audio_b64)
+                            .map_err(|e| {
+                                TTSError::SynthesisFailed(format!(
+                                    "Failed to decode Qwen3-TTS audio: {}",
+                                    e
+                                ))
+                            })?;
+                        tracing::info!(
+                            response_size = audio_bytes.len(),
+                            "Voice clone response received from {} ({} bytes decoded from base64)",
+                            url,
+                            audio_bytes.len()
+                        );
+                        return Ok(audio_bytes);
+                    }
+                }
+
+                // If not JSON or no audio field, treat as raw bytes
+                let audio_bytes = response_text.into_bytes();
                 tracing::info!(
                     response_size = audio_bytes.len(),
-                    "Voice clone response received from {} ({} bytes)",
+                    "Voice clone response received from {} ({} bytes raw)",
                     url,
                     audio_bytes.len()
                 );

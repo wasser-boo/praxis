@@ -258,6 +258,7 @@ pub async fn run_agent_loop(
         .and_then(|v| v.as_str())
         .unwrap_or("user");
     let user_template_path = format!("templates/{}.poml", user_template_name);
+    tracing::info!(user_id = %ctx.user_id, user_template = %user_template_name, "Using user template");
     let rendered_user_message = if std::path::Path::new(&user_template_path).exists() {
         let tmpl_ctx = serde_json::json!({
             "user_prompt": user_message,
@@ -324,14 +325,23 @@ pub async fn run_agent_loop(
             ctx.turn = turn;
         }
 
-        // Apply CL workflow every turn so transitions react to set_context changes
+        // Apply CL workflow (auto rules only, transitions are on agent_next)
         if let Some(ref cl_path) = config.cl_file {
-            if let Ok(cl) = cl::load_file(cl_path) {
-                let mut ctx_val = serde_json::to_value(&ctx)?;
-                let _secret_changes = cl::apply_to_context(&cl, &mut ctx_val);
-                if let Ok(updated_ctx) = serde_json::from_value::<crate::db::contexts::Context>(ctx_val)
-                {
-                    ctx = updated_ctx;
+            match cl::load_file(cl_path) {
+                Ok(cl) => {
+                    let mut ctx_val = serde_json::to_value(&ctx)?;
+                    let old_template = ctx_val.pointer("/settings/system_template").and_then(|v| v.as_str()).unwrap_or("system").to_string();
+                    let _secret_changes = cl::apply_to_context(&cl, &mut ctx_val);
+                    let new_template = ctx_val.pointer("/settings/system_template").and_then(|v| v.as_str()).unwrap_or("system").to_string();
+                    let current_state = ctx_val.get("active_state").and_then(|v| v.as_str()).unwrap_or("");
+                    tracing::info!(cl_path = %cl_path, active_state = %current_state, old_template = %old_template, new_template = %new_template, "CL workflow applied");
+                    if let Ok(updated_ctx) = serde_json::from_value::<crate::db::contexts::Context>(ctx_val)
+                    {
+                        ctx = updated_ctx;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(cl_path = %cl_path, error = %e, "Failed to load CL file");
                 }
             }
         }
@@ -1081,9 +1091,10 @@ async fn build_system_prompt(
 
         let template_name = ctx.settings.system_template.as_deref().unwrap_or("system");
         let template_path = format!("templates/{}.poml", template_name);
+        tracing::info!(user_id = %ctx.user_id, template_name = %template_name, template_path = %template_path, "Building system prompt");
         match crate::gateway::poml::render(&template_path, &context_json).await {
             Ok(rendered) => {
-                tracing::debug!(target: "agent_loop", "Rendered system prompt (first 2000 chars): {}", &rendered[..rendered.len().min(2000)]);
+                tracing::info!(user_id = %ctx.user_id, "Rendered system prompt (first 500 chars): {}", &rendered[..rendered.len().min(500)]);
                 rendered
             },
         Err(e) => {

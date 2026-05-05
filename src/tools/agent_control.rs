@@ -42,12 +42,30 @@ pub async fn run(
             // Advance CL state if a CL file is configured
             let cl_path = ctx.settings.cl_file.clone().or(ctx.cl_file.clone());
             if let Some(ref path) = cl_path {
-                if let Ok(cl) = crate::cl::load_file(path) {
-                    let ctx_val = serde_json::to_value(&ctx)
-                        .map_err(|e| format!("Failed to serialize context: {}", e))?;
-                    if let Some(new_state) = crate::cl::advance_state(&cl, &ctx_val) {
-                        ctx.settings.active_state = Some(new_state.clone());
-                        tracing::info!(user_id = %user_id, new_state = %new_state, "CL state advanced via agent_next");
+                match crate::cl::load_file(path) {
+                    Ok(cl) => {
+                        let mut ctx_val = serde_json::to_value(&ctx)
+                            .map_err(|e| format!("Failed to serialize context: {}", e))?;
+                        let current_state = ctx_val.get("active_state").and_then(|v| v.as_str()).unwrap_or("");
+                        // Check all possible locations for state_key
+                        let state_key = ctx_val.get("state_key").and_then(|v| v.as_str())
+                            .or_else(|| ctx_val.pointer("/settings/state_key").and_then(|v| v.as_str()))
+                            .unwrap_or("");
+                        tracing::info!(user_id = %user_id, path = %path, current_state = %current_state, state_key = %state_key, 
+                            context_keys = ?ctx_val.as_object().map(|o| o.keys().collect::<Vec<_>>()), 
+                            "CL workflow loaded");
+                        if let Some(new_state) = crate::cl::advance_state(&cl, &ctx_val) {
+                            crate::cl::transition_to(&cl, &mut ctx_val, &new_state);
+                            if let Ok(updated_ctx) = serde_json::from_value::<crate::db::contexts::Context>(ctx_val) {
+                                ctx = updated_ctx;
+                            }
+                            tracing::info!(user_id = %user_id, new_state = %new_state, "CL state advanced via agent_next");
+                        } else {
+                            tracing::info!(user_id = %user_id, "CL no transition matched");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(user_id = %user_id, path = %path, error = %e, "Failed to load CL file");
                     }
                 }
             }
