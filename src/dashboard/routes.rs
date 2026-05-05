@@ -570,6 +570,11 @@ async fn update_template(
         } else {
             ctx.custom_data.clone()
         },
+        "cl_data": if ctx.cl_data.is_null() {
+            serde_json::json!({})
+        } else {
+            ctx.cl_data.clone()
+        },
         "user_message": if user_id.is_empty() {
             "Preview message".to_string()
         } else {
