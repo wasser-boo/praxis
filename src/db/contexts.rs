@@ -405,6 +405,14 @@ impl Database {
     pub fn delete_context(&self, user_id: &str) -> anyhow::Result<()> {
         let conn = self.conn();
         conn.execute(
+            "DELETE FROM messages WHERE user_id = ?1",
+            rusqlite::params![user_id],
+        )?;
+        conn.execute(
+            "DELETE FROM memory WHERE user_id = ?1",
+            rusqlite::params![user_id],
+        )?;
+        conn.execute(
             "DELETE FROM contexts WHERE user_id = ?1",
             rusqlite::params![user_id],
         )?;
