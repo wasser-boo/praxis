@@ -205,6 +205,39 @@ async fn compact_user_history(state: &GatewayState, user_id: &str) -> anyhow::Re
     ctx.settings.compaction_enabled = true;
     ctx.settings.compaction_summary = summary.clone();
     state.db.save_context(&ctx)?;
+
+    let keep_budget = ctx.settings.history_token_limit.unwrap_or(500000) / 2;
+    if let Ok((recent, _)) = state.db.get_messages_with_token_budget(user_id, keep_budget) {
+        let mut valid_tool_call_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for msg in &recent {
+            if let Some(ref tcs) = msg.tool_calls {
+                for tc in tcs {
+                    valid_tool_call_ids.insert(tc.id.clone());
+                }
+            }
+        }
+        let filtered: Vec<_> = recent
+            .into_iter()
+            .filter(|msg| {
+                if msg.role == "tool" {
+                    msg.tool_call_id
+                        .as_ref()
+                        .map(|id| valid_tool_call_ids.contains(id))
+                        .unwrap_or(false)
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        let _ = state.db.clear_messages(user_id);
+        for msg in &filtered {
+            let _ = state.db.add_message(user_id, msg);
+        }
+        tracing::info!(user_id = %user_id, kept = filtered.len(), "Manual compaction: kept recent messages, deleted older ones");
+    }
+
     Ok(summary)
 }
 
