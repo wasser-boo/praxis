@@ -1129,6 +1129,8 @@ async fn execute_tool_call(
     tc: &ToolCall,
     plugins: &crate::plugins::PluginRegistry,
 ) -> String {
+    tracing::info!(tool = %tc.function.name, args = %tc.function.arguments, "execute_tool_call: dispatching");
+
     let args: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
         Ok(v) => v,
         Err(e) => return format!("Error parsing arguments: {}", e),

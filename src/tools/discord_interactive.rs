@@ -334,11 +334,27 @@ pub async fn ask_questions(
     timeout_secs: u64,
     paired_discord_user_id: &str,
 ) -> anyhow::Result<String> {
+    tracing::info!(
+        channel_id = %channel_id,
+        paired_user = %paired_discord_user_id,
+        question_count = questions.len(),
+        timeout_secs = timeout_secs,
+        "ask_questions: starting"
+    );
     let mut answers = serde_json::Map::new();
 
     for (idx, (label, question_text, suggestions)) in questions.iter().enumerate() {
         let progress = format!("**[{}/{}]**", idx + 1, questions.len());
         let full_question = format!("{} {}", progress, question_text);
+
+        tracing::info!(
+            label = %label,
+            question = %question_text,
+            suggestions = ?suggestions,
+            "ask_questions: sending question {}/{}",
+            idx + 1,
+            questions.len()
+        );
 
         match ask_question(
             channel_id,
@@ -350,6 +366,7 @@ pub async fn ask_questions(
         .await
         {
             Ok(response) => {
+                tracing::info!(label = %label, response = %response, "ask_questions: got response");
                 // Strip "User responded: " prefix if present
                 let answer = response
                     .strip_prefix("User responded: ")
@@ -357,6 +374,7 @@ pub async fn ask_questions(
                 answers.insert(label.clone(), serde_json::Value::String(answer.to_string()));
             }
             Err(e) => {
+                tracing::error!(label = %label, error = %e, "ask_questions: question failed");
                 answers.insert(
                     label.clone(),
                     serde_json::Value::String(format!("Error: {}", e)),
@@ -370,5 +388,7 @@ pub async fn ask_questions(
         }
     }
 
-    Ok(serde_json::to_string(&answers).unwrap_or_else(|_| "{}".to_string()))
+    let result = serde_json::to_string(&answers).unwrap_or_else(|_| "{}".to_string());
+    tracing::info!(result = %result, "ask_questions: completed");
+    Ok(result)
 }

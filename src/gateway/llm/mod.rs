@@ -215,7 +215,7 @@ impl LLMRouter {
                 let args: serde_json::Value =
                     serde_json::from_str(&tool_call.function.arguments).unwrap_or_default();
 
-                tracing::info!(tool = %tool_call.function.name, "Executing tool call");
+                tracing::info!(tool = %tool_call.function.name, args = %tool_call.function.arguments, "Executing tool call");
 
                 // Handle agent control signals specially
                 let result_str = match tool_call.function.name.as_str() {
