@@ -514,7 +514,7 @@ fn get_default_tools() -> Vec<Tool> {
             name: "ask_questions".into(),
             description: Some("Ask the user questions via Discord. Each question needs 'label' (short key for the answer), 'question' (the text to ask), and optionally 'suggestions' (array of plain strings like [\"yes\", \"no\", \"maybe\"] shown as emoji buttons). Do NOT use 'options' or objects - use 'suggestions' with simple strings only. If 'channel_id' is omitted, questions are sent to the channel where the request originated.".into()),
             parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID. If omitted, sends to the channel where the request originated."},"questions":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string","description":"Short key for answer, e.g. 'color', 'choice'"},"question":{"type":"string","description":"The question text to ask"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options as plain strings, e.g. [\"red\", \"blue\", \"green\"]"}},"required":["label","question"]},"description":"Array of questions to ask"},"timeout_secs":{"type":"integer","default":120,"description":"Timeout per question in seconds"}},"required":["questions"]}),
-            is_enabled: false,
+            is_enabled: true,
         },
     ]
 }

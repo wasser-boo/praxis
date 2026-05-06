@@ -55,10 +55,14 @@ pub async fn handle_message(
             obj.insert("user_template".to_string(), user_template);
 
             // Default channel_id for Discord tools (can be overwritten via CL)
+            // Prefer channel_id from the incoming message, fall back to settings
             if !obj.contains_key("channel_id") {
-                let fallback_ch = ctx.settings.feedback_channel_id.clone().unwrap_or_default();
-                if !fallback_ch.is_empty() {
-                    obj.insert("channel_id".to_string(), serde_json::json!(fallback_ch));
+                let ch = channel_id
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| ctx.settings.feedback_channel_id.as_deref())
+                    .unwrap_or("");
+                if !ch.is_empty() {
+                    obj.insert("channel_id".to_string(), serde_json::json!(ch));
                 }
             }
 
@@ -411,6 +415,24 @@ async fn handle_message_agent_loop(
     let user_id_owned = user_id.to_string();
     let secrets = state.secrets.clone();
     let settings = ctx.settings.clone();
+
+    // Inject channel_id into custom_data so tools can use it
+    let mut ctx = ctx.clone();
+    if ctx.custom_data.is_null() {
+        ctx.custom_data = serde_json::json!({});
+    }
+    if let Some(obj) = ctx.custom_data.as_object_mut() {
+        if !obj.contains_key("channel_id") {
+            let ch = channel_id
+                .filter(|s| !s.is_empty())
+                .or_else(|| ctx.settings.feedback_channel_id.as_deref())
+                .unwrap_or("");
+            if !ch.is_empty() {
+                obj.insert("channel_id".to_string(), serde_json::json!(ch));
+            }
+        }
+    }
+    let _ = state.db.save_context(&ctx);
 
     let config = crate::gateway::agent_loop::AgentLoopConfig {
         max_turns,
@@ -946,6 +968,9 @@ async fn execute_tool_call(
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(fallback_ch);
+            if channel_id.is_empty() {
+                return "Error: No channel_id provided and no originating channel found. Please specify a channel_id.".to_string();
+            }
             // Get timeout from args, then context, then default to 120
             let default_timeout = ctx_data
                 .as_ref()
@@ -959,44 +984,51 @@ async fn execute_tool_call(
                 .flatten()
                 .map(|p| p.discord_user_id)
                 .unwrap_or_default();
-            let questions_raw = args["questions"].as_array();
-            let mut questions: Vec<(String, String, Vec<String>)> = Vec::new();
-            let mut format_error = None;
-            if let Some(arr) = questions_raw {
-                for q in arr {
-                    // Check for invalid 'options' field
-                    if q.get("options").is_some() {
-                        format_error = Some("Invalid format: use 'suggestions' with plain strings, not 'options' with objects. Example: \"suggestions\": [\"yes\", \"no\", \"maybe\"]".to_string());
-                        break;
-                    }
-                    let label = q["label"].as_str().unwrap_or("").to_string();
-                    let text = q["question"].as_str().unwrap_or("").to_string();
-                    let suggestions: Vec<String> = q["suggestions"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    questions.push((label, text, suggestions));
-                }
+            if paired_discord_user_id.is_empty() {
+                return "Error: No Discord user pairing found. The user must be paired with a Discord account first.".to_string();
             }
-            if let Some(error) = format_error {
-                error
-            } else {
-                tracing::info!(timeout_secs = timeout, "ask_questions: waiting for responses");
-                match crate::tools::discord_interactive::ask_questions(
-                    channel_id,
-                    &questions,
-                    timeout,
-                    &paired_discord_user_id,
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(e) => format!("Error: {}", e),
+            let questions_raw = args["questions"].as_array();
+            let Some(arr) = questions_raw else {
+                return "Error: 'questions' field is required and must be an array.".to_string();
+            };
+            if arr.is_empty() {
+                return "Error: 'questions' array must contain at least one question.".to_string();
+            }
+            let mut questions: Vec<(String, String, Vec<String>)> = Vec::new();
+            for (i, q) in arr.iter().enumerate() {
+                // Check for invalid 'options' field
+                if q.get("options").is_some() {
+                    return format!("Error: Question {}: use 'suggestions' with plain strings, not 'options' with objects. Example: \"suggestions\": [\"yes\", \"no\", \"maybe\"]", i + 1);
                 }
+                let label = q["label"].as_str().filter(|s| !s.is_empty());
+                let Some(label) = label else {
+                    return format!("Error: Question {} is missing a non-empty 'label' field.", i + 1);
+                };
+                let text = q["question"].as_str().filter(|s| !s.is_empty());
+                let Some(text) = text else {
+                    return format!("Error: Question {} (label: '{}') is missing a non-empty 'question' field.", i + 1, label);
+                };
+                let suggestions: Vec<String> = q["suggestions"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                questions.push((label.to_string(), text.to_string(), suggestions));
+            }
+            tracing::info!(timeout_secs = timeout, "ask_questions: waiting for responses");
+            match crate::tools::discord_interactive::ask_questions(
+                channel_id,
+                &questions,
+                timeout,
+                &paired_discord_user_id,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => format!("Error: {}", e),
             }
         }
         _ => match plugins
