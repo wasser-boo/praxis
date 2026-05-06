@@ -398,12 +398,7 @@ pub fn apply_to_context(
     cl: &ContextLang,
     context: &mut serde_json::Value,
 ) -> Vec<(String, String)> {
-    let obj = match context.as_object_mut() {
-        Some(o) => o,
-        None => return Vec::new(),
-    };
-
-    let active_state = obj
+    let active_state = context
         .get("active_state")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -412,11 +407,16 @@ pub fn apply_to_context(
     // Apply default state variables first
     if let Some(default_state) = cl.states.get("_default") {
         for (key, value) in &default_state.variables {
-            if !obj.contains_key(key) {
-                obj.insert(key.clone(), serde_json::Value::String(value.clone()));
+            if get_nested_value(context.as_object().unwrap_or(&serde_json::Map::new()), key).is_none() {
+                set_nested_value(context, key, serde_json::Value::String(value.clone()));
             }
         }
     }
+
+    let obj = match context.as_object() {
+        Some(o) => o,
+        None => return Vec::new(),
+    };
 
     // Auto-rules: always evaluate to allow automatic state transitions
     let resolved_state = resolve_auto_state(cl, obj, &active_state);
