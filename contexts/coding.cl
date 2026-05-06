@@ -10,10 +10,14 @@ transition -> code on next
 task_template = tasks/code
 transition -> test on next
 auto_rule: turn > 10 -> next
+# Track tool call count for automatic progression
+override: custom_data.tool_history.length > 15 -> cl_data.tool_calls_exhausted = "true"
 
 [test]
 task_template = tasks/test
 transition -> review on next
+# Auto-advance if too many tool calls without progress
+auto_rule: custom_data.tool_history.length > 20 -> review
 
 [review]
 task_template = tasks/review

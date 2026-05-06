@@ -34,6 +34,15 @@
     <p>To use a tool, you MUST call it using the tool calling mechanism. Do NOT just describe what you would do - actually call the tool.</p>
   </cp>
 
+  <cp caption="Tool Call History" if="custom_data.tool_history">
+    <p>Recent tool calls (most recent last):</p>
+    <list>
+      <item for="entry in custom_data.tool_history">
+        <b>[it:{{ entry.iteration }}]</b> {{ entry.tool }}({{ entry.args }}) → {{ entry.result }} <i>({{ entry.timestamp }}, {{ entry.duration_ms }}ms)</i>
+      </item>
+    </list>
+  </cp>
+
   <cp caption="Rules">
     <list>
       <item>Be concise and direct in your responses.</item>

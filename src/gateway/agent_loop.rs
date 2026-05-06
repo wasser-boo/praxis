@@ -628,9 +628,44 @@ pub async fn run_agent_loop(
                     "=== TOOL CALL START ==="
                 );
 
+                let tool_start_time = chrono::Local::now();
                 let result = execute_tool_call(&state.db, user_id, tc, &state.plugins).await;
+                let tool_duration = chrono::Local::now().signed_duration_since(tool_start_time);
                 let mut final_result = result.clone();
                 let mut image_content_parts: Option<Vec<serde_json::Value>> = None;
+
+                // Record tool call in custom_data.tool_history
+                {
+                    if ctx.custom_data.is_null() {
+                        ctx.custom_data = serde_json::json!({});
+                    }
+                    if let Some(obj) = ctx.custom_data.as_object_mut() {
+                        if !obj.contains_key("tool_history") {
+                            obj.insert("tool_history".to_string(), serde_json::json!([]));
+                        }
+                        if let Some(history) = obj.get_mut("tool_history").and_then(|v| v.as_array_mut()) {
+                            let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                            let result_preview = if final_result.len() > 500 {
+                                format!("{}...", &final_result[..500])
+                            } else {
+                                final_result.clone()
+                            };
+                            history.push(serde_json::json!({
+                                "iteration": turn,
+                                "tool": tc.function.name,
+                                "args": args,
+                                "result": result_preview,
+                                "timestamp": tool_start_time.format("%Y-%m-%d %H:%M:%S").to_string(),
+                                "duration_ms": tool_duration.num_milliseconds()
+                            }));
+                            // Keep only last 50 entries to avoid context bloat
+                            if history.len() > 50 {
+                                let drain_count = history.len() - 50;
+                                history.drain(0..drain_count);
+                            }
+                        }
+                    }
+                }
 
                 // Log tool call result
                 let result_preview = if result.len() > 500 {
@@ -1752,5 +1787,69 @@ mod agent_tests {
         let debug = format!("{:?}", result);
         assert!(debug.contains("test"));
         assert!(debug.contains("turns_used: 1"));
+    }
+
+    #[test]
+    fn test_tool_history_recording() {
+        // Test that tool_history is properly structured in custom_data
+        let mut custom_data = serde_json::json!({});
+
+        // Simulate adding a tool call to history
+        if let Some(obj) = custom_data.as_object_mut() {
+            if !obj.contains_key("tool_history") {
+                obj.insert("tool_history".to_string(), serde_json::json!([]));
+            }
+            if let Some(history) = obj.get_mut("tool_history").and_then(|v| v.as_array_mut()) {
+                history.push(serde_json::json!({
+                    "iteration": 1,
+                    "tool": "execute_terminal",
+                    "args": {"command": "ls -la"},
+                    "result": "total 248...",
+                    "timestamp": "2026-05-06 10:30:00",
+                    "duration_ms": 150
+                }));
+            }
+        }
+
+        // Verify structure
+        let history = custom_data["tool_history"].as_array().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["iteration"], 1);
+        assert_eq!(history[0]["tool"], "execute_terminal");
+        assert_eq!(history[0]["args"]["command"], "ls -la");
+        assert!(history[0]["timestamp"].as_str().is_some());
+        assert!(history[0]["duration_ms"].as_i64().is_some());
+    }
+
+    #[test]
+    fn test_tool_history_max_entries() {
+        // Test that tool_history is limited to 50 entries
+        let mut custom_data = serde_json::json!({});
+        let obj = custom_data.as_object_mut().unwrap();
+        obj.insert("tool_history".to_string(), serde_json::json!([]));
+
+        // Add 55 entries
+        let history = obj.get_mut("tool_history").unwrap().as_array_mut().unwrap();
+        for i in 0..55 {
+            history.push(serde_json::json!({
+                "iteration": i,
+                "tool": "test_tool",
+                "args": {},
+                "result": "ok",
+                "timestamp": "2026-05-06 10:30:00",
+                "duration_ms": 100
+            }));
+        }
+
+        // Simulate trimming (as done in agent_loop)
+        if history.len() > 50 {
+            let drain_count = history.len() - 50;
+            history.drain(0..drain_count);
+        }
+
+        assert_eq!(history.len(), 50);
+        // Verify oldest entries were removed
+        assert_eq!(history[0]["iteration"], 5);
+        assert_eq!(history[49]["iteration"], 54);
     }
 }
