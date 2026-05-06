@@ -94,12 +94,20 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Existing install: add any missing default tools (preserves user customizations)
+    // Existing install: add missing tools and update parameters for known tools
     let mut tools = existing;
     let defaults = get_default_tools();
     let mut changed = false;
     for default in &defaults {
-        if !tools.iter().any(|t| t.name == default.name) {
+        if let Some(existing) = tools.iter_mut().find(|t| t.name == default.name) {
+            // Update parameters and description from defaults (preserves is_enabled)
+            if existing.parameters != default.parameters || existing.description != default.description {
+                existing.parameters = default.parameters.clone();
+                existing.description = default.description.clone();
+                changed = true;
+                tracing::info!("Updated default tool parameters: {}", default.name);
+            }
+        } else {
             tracing::info!("Adding missing default tool: {}", default.name);
             tools.push(default.clone());
             changed = true;
