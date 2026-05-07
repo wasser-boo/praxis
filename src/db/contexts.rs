@@ -209,6 +209,8 @@ pub struct ContextSettings {
     pub vm_screenshot_limit: usize,
     #[serde(default = "default_keyboard_layout")]
     pub vm_keyboard_layout: String,
+    #[serde(default = "default_tool_history_limit")]
+    pub tool_history_limit: usize,
 }
 
 fn default_stt() -> String {
@@ -261,6 +263,9 @@ fn default_screenshot_limit() -> usize {
 }
 fn default_keyboard_layout() -> String {
     "us".to_string()
+}
+fn default_tool_history_limit() -> usize {
+    50
 }
 
 impl Default for ContextSettings {
@@ -346,6 +351,7 @@ impl Default for ContextSettings {
             vm_screenshot_enabled: true,
             vm_screenshot_limit: default_screenshot_limit(),
             vm_keyboard_layout: default_keyboard_layout(),
+            tool_history_limit: default_tool_history_limit(),
         }
     }
 }

@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -491,7 +492,12 @@ pub fn evaluate_condition(
             .any(|part| evaluate_condition(part.trim(), context));
     }
 
-    let (var, op, value) = if let Some(pos) = condition.find("==") {
+    // Check regex operators first (=~ and !~) before == and != to avoid conflicts
+    let (var, op, value) = if let Some(pos) = condition.find("=~") {
+        (condition[..pos].trim(), "=~", condition[pos + 2..].trim())
+    } else if let Some(pos) = condition.find("!~") {
+        (condition[..pos].trim(), "!~", condition[pos + 2..].trim())
+    } else if let Some(pos) = condition.find("==") {
         (condition[..pos].trim(), "==", condition[pos + 2..].trim())
     } else if let Some(pos) = condition.find("!=") {
         (condition[..pos].trim(), "!=", condition[pos + 2..].trim())
@@ -524,6 +530,30 @@ pub fn evaluate_condition(
     };
 
     match op {
+        "=~" => {
+            let haystack = match ctx_val {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(serde_json::Value::Number(n)) => n.to_string(),
+                Some(serde_json::Value::Bool(b)) => b.to_string(),
+                _ => return false,
+            };
+            match Regex::new(clean_value) {
+                Ok(re) => re.is_match(&haystack),
+                Err(_) => false,
+            }
+        }
+        "!~" => {
+            let haystack = match ctx_val {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(serde_json::Value::Number(n)) => n.to_string(),
+                Some(serde_json::Value::Bool(b)) => b.to_string(),
+                _ => return true,
+            };
+            match Regex::new(clean_value) {
+                Ok(re) => !re.is_match(&haystack),
+                Err(_) => true,
+            }
+        }
         "==" => match ctx_val {
             Some(serde_json::Value::String(s)) => s == clean_value,
             Some(serde_json::Value::Number(n)) => {
@@ -576,8 +606,28 @@ where
     }
 }
 
-/// Load a .cl file from disk
+/// Load a .sm or .cl file from disk. Tries .sm first, then .cl for backwards compat.
 pub fn load_file(path: &str) -> Result<ContextLang, ClError> {
+    // If the path already has an extension, load it directly
+    if path.ends_with(".sm") || path.ends_with(".cl") {
+        return load_file_direct(path);
+    }
+
+    // Try .sm first, then .cl
+    for ext in &[".sm", ".cl"] {
+        let with_ext = format!("{}{}", path, ext);
+        if let Ok(cl) = load_file_direct(&with_ext) {
+            return Ok(cl);
+        }
+    }
+
+    Err(ClError::IoError(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("No .sm or .cl file found for '{}'", path),
+    )))
+}
+
+fn load_file_direct(path: &str) -> Result<ContextLang, ClError> {
     if let Ok(content) = std::fs::read_to_string(path) {
         return parse(&content);
     }
@@ -592,7 +642,7 @@ pub fn load_file(path: &str) -> Result<ContextLang, ClError> {
         return parse(&content);
     }
     let data_contexts_path = format!("data/contexts/{}", path);
-    let content = std::fs::read_to_string(&data_contexts_path)?;
+    let content = std::fs::read_to_string(data_contexts_path)?;
     parse(&content)
 }
 
@@ -1048,5 +1098,78 @@ turn > 10 -> use plan
         assert_eq!(cl.states.len(), 4);
         assert_eq!(cl.transitions.len(), 3);
         assert_eq!(cl.auto_rules.len(), 1);
+    }
+
+    #[test]
+    fn test_evaluate_condition_regex_match() {
+        let mut ctx = serde_json::Map::new();
+        ctx.insert("used_tools".to_string(), serde_json::json!({
+            "last_call": "execute_terminal",
+            "last_result": "partition sda1 created successfully",
+            "count": 1
+        }));
+
+        assert!(evaluate_condition("used_tools.last_call =~ \"execute_terminal\"", &ctx));
+        assert!(evaluate_condition("used_tools.last_call =~ \"execute\"", &ctx));
+        assert!(evaluate_condition("used_tools.last_call =~ \"^execute_terminal$\"", &ctx));
+        assert!(evaluate_condition("used_tools.last_result =~ \"partition.*created\"", &ctx));
+        assert!(evaluate_condition("used_tools.last_result =~ \"(?i)PARTITION.*CREATED\"", &ctx));
+        assert!(evaluate_condition("used_tools.last_call =~ \"^(write_file|execute_terminal)$\"", &ctx));
+    }
+
+    #[test]
+    fn test_evaluate_condition_regex_no_match() {
+        let mut ctx = serde_json::Map::new();
+        ctx.insert("used_tools".to_string(), serde_json::json!({
+            "last_call": "write_file",
+            "count": 1
+        }));
+
+        assert!(!evaluate_condition("used_tools.last_call =~ \"execute_terminal\"", &ctx));
+        assert!(evaluate_condition("used_tools.last_call !~ \"execute_terminal\"", &ctx));
+        assert!(!evaluate_condition("used_tools.last_call !~ \"write_file\"", &ctx));
+        assert!(evaluate_condition("used_tools.last_call =~ \"^read_file$\"", &ctx) == false);
+    }
+
+    #[test]
+    fn test_evaluate_condition_regex_with_context() {
+        let input = r#"
+[state installing]
+settings.system_template = "installing"
+
+[auto]
+used_tools.last_result =~ "partition.*created" -> use installing
+"#;
+        let cl = parse(input).unwrap();
+        let mut ctx = serde_json::json!({
+            "active_state": "partitioning",
+            "used_tools": {
+                "last_call": "execute_terminal",
+                "last_result": "partition sda1 created successfully",
+                "count": 1
+            }
+        });
+        let secrets = apply_to_context(&cl, &mut ctx);
+        assert!(secrets.is_empty());
+        assert_eq!(ctx["active_state"], "installing");
+    }
+
+    #[test]
+    fn test_evaluate_condition_regex_invalid() {
+        let mut ctx = serde_json::Map::new();
+        ctx.insert("val".to_string(), serde_json::json!("test"));
+
+        // Invalid regex should return false, not panic
+        assert!(!evaluate_condition("val =~ \"[invalid\"", &ctx));
+        assert!(evaluate_condition("val !~ \"[invalid\"", &ctx));
+    }
+
+    #[test]
+    fn test_evaluate_condition_regex_number() {
+        let mut ctx = serde_json::Map::new();
+        ctx.insert("count".to_string(), serde_json::json!(42));
+
+        assert!(evaluate_condition("count =~ \"42\"", &ctx));
+        assert!(!evaluate_condition("count =~ \"^99$\"", &ctx));
     }
 }

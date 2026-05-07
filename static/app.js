@@ -103,8 +103,8 @@ async function loadTabData(tab) {
             case 'pairings':
                 await loadPairings();
                 break;
-            case 'cl-files':
-                await loadClFiles();
+            case 'sm-files':
+                await loadSmFiles();
                 break;
             case 'cron-jobs':
                 await loadCronJobs();
@@ -246,7 +246,7 @@ async function viewContext(userId) {
                     <div class="data-item"><span class="name">Turn</span><span class="meta">${ctx.turn ?? 0}</span></div>
                     <div class="data-item"><span class="name">Mode</span><span class="meta">${escapeHtml(ctx.mode || '')}</span></div>
                     <div class="data-item"><span class="name">User Name</span><span class="meta">${escapeHtml(ctx.user_name || '-')}</span></div>
-                    <div class="data-item"><span class="name">CL File</span><span class="meta">${escapeHtml(ctx.cl_file || '-')}</span></div>
+                    <div class="data-item"><span class="name">Statemachine File</span><span class="meta">${escapeHtml(ctx.cl_file || '-')}</span></div>
                     <div class="data-item"><span class="name">Active State</span><span class="meta">${escapeHtml(ctx.active_state || '-')}</span></div>
                     <div class="data-item"><span class="name">Active Templates</span><span class="meta">${(ctx.active_templates || []).join(', ') || '-'}</span></div>
                 </div>
@@ -254,7 +254,7 @@ async function viewContext(userId) {
                 <div class="data-list" style="margin-bottom:1rem;max-height:200px;overflow-y:auto">${settingsHtml}</div>
                 <h3>Custom Data</h3>
                 <div class="data-list" style="margin-bottom:1rem">${customDataHtml}</div>
-                <h3>CL Data</h3>
+                <h3>SM Data</h3>
                 <div class="data-list" style="margin-bottom:1rem">${clDataHtml}</div>
                 <button class="btn btn-primary" style="width:auto" id="ctx-edit-btn">Edit</button>
                 <button class="btn btn-danger" style="width:auto" id="ctx-delete-btn">Delete</button>
@@ -343,18 +343,50 @@ async function loadTemplates() {
         if (!data.templates || data.templates.length === 0) {
             html += '<div class="data-item"><span class="name">No templates found</span></div>';
         } else {
-            html += data.templates.map(t => `
-                <div class="data-item">
+            // Group templates into folders
+            const folders = {};
+            const root = [];
+            for (const t of data.templates) {
+                const idx = t.name.lastIndexOf('/');
+                if (idx > 0) {
+                    const folder = t.name.substring(0, idx);
+                    if (!folders[folder]) folders[folder] = [];
+                    folders[folder].push(t);
+                } else {
+                    root.push(t);
+                }
+            }
+
+            const renderTemplate = (t) => `
+                <div class="data-item" style="padding-left:1.5rem">
                     <div>
-                        <span class="name">${escapeHtml(t.name)}</span>
+                        <span class="name">${escapeHtml(t.name.split('/').pop())}</span>
                         <span class="meta">${t.is_system ? 'System' : 'User'}</span>
                     </div>
                     <div class="actions">
                         <button class="btn btn-sm btn-primary" onclick="editTemplate('${escapeHtml(t.name)}')">Edit</button>
                         <button class="btn btn-sm btn-danger" onclick="deleteTemplate('${escapeHtml(t.name)}')">Delete</button>
                     </div>
+                </div>`;
+
+            // Render root templates
+            for (const t of root) {
+                html += renderTemplate(t);
+            }
+
+            // Render folders with their templates
+            const sortedFolders = Object.keys(folders).sort();
+            for (const folder of sortedFolders) {
+                html += `<div class="data-item" style="cursor:pointer;border-left:2px solid var(--border,#333);margin-top:0.5rem" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">
+                    <span class="name" style="font-weight:600">&#128193; ${escapeHtml(folder)}/</span>
+                    <span class="meta">${folders[folder].length} template${folders[folder].length > 1 ? 's' : ''}</span>
                 </div>
-            `).join('');
+                <div style="display:block">`;
+                for (const t of folders[folder]) {
+                    html += renderTemplate(t);
+                }
+                html += '</div>';
+            }
         }
         list.innerHTML = html;
     } catch (err) {
@@ -365,8 +397,8 @@ async function loadTemplates() {
 function createTemplate() {
     showModal('Create Template', `
         <div style="margin-bottom:0.5rem">
-            <label style="font-size:0.8rem;color:var(--text-secondary)">Template name:</label>
-            <input id="new-template-name" type="text" placeholder="my_template" style="width:100%;padding:0.3rem;margin-top:0.2rem">
+            <label style="font-size:0.8rem;color:var(--text-secondary)">Template name (use / for folders, e.g. tasks/my_task):</label>
+            <input id="new-template-name" type="text" placeholder="tasks/my_template" style="width:100%;padding:0.3rem;margin-top:0.2rem">
         </div>
         <textarea id="template-content" class="code-editor"><poml>
   <task>
@@ -707,64 +739,64 @@ async function deletePendingPairing(code) {
     loadPairings();
 }
 
-async function loadClFiles() {
+async function loadSmFiles() {
     try {
-        const res = await apiFetch('/api/cl-files');
+        const res = await apiFetch('/api/sm-files');
         const data = await res.json();
-        const list = document.getElementById('cl-files-list');
+        const list = document.getElementById('sm-files-list');
 
-        if (!data.cl_files || data.cl_files.length === 0) {
-            list.innerHTML = '<div class="data-item"><span class="name">No CL files found</span></div>';
+        if (!data.sm_files || data.sm_files.length === 0) {
+            list.innerHTML = '<div class="data-item"><span class="name">No statemachine files found</span></div>';
             return;
         }
 
-        list.innerHTML = data.cl_files.map(f => `
+        list.innerHTML = data.sm_files.map(f => `
             <div class="data-item">
                 <span class="name">${escapeHtml(f.name)}</span>
                 <div class="actions">
-                    <button class="btn btn-sm btn-primary" onclick="editClFile('${escapeHtml(f.name)}')">Edit</button>
+                    <button class="btn btn-sm btn-primary" onclick="editSmFile('${escapeHtml(f.name)}')">Edit</button>
                 </div>
             </div>
         `).join('');
     } catch (err) {
-        console.error('Failed to load CL files:', err);
+        console.error('Failed to load statemachine files:', err);
     }
 }
 
-async function editClFile(name) {
-    const res = await apiFetch(`/api/cl-files/${name}`);
+async function editSmFile(name) {
+    const res = await apiFetch(`/api/sm-files/${name}`);
     const content = await res.text();
 
-    showModal('Edit CL File: ' + name, `
-        <textarea id="cl-content" class="code-editor">${escapeHtml(content)}</textarea>
-        <button class="btn btn-primary" style="margin-top:1rem" onclick="saveClFile('${name}')">Save</button>
+    showModal('Edit Statemachine: ' + name, `
+        <textarea id="sm-content" class="code-editor">${escapeHtml(content)}</textarea>
+        <button class="btn btn-primary" style="margin-top:1rem" onclick="saveSmFile('${name}')">Save</button>
     `);
 }
 
-async function createClFile() {
-    showModal('New CL File', `
+async function createSmFile() {
+    showModal('New Statemachine', `
         <div class="form-group">
-            <label for="new-cl-name">File Name</label>
-            <input type="text" id="new-cl-name" placeholder="e.g. my_workflow.cl">
+            <label for="new-sm-name">File Name</label>
+            <input type="text" id="new-sm-name" placeholder="e.g. my_workflow.sm">
         </div>
-        <textarea id="cl-content" class="code-editor" placeholder="[state start]\nmode = chat\n\n[transitions]\n-> done</textarea>
-        <button class="btn btn-primary" style="margin-top:1rem" onclick="saveNewClFile()">Create</button>
+        <textarea id="sm-content" class="code-editor" placeholder="[state start]\nmode = chat\n\n[transitions]\n-> done</textarea>
+        <button class="btn btn-primary" style="margin-top:1rem" onclick="saveNewSmFile()">Create</button>
     `);
 }
 
-async function saveNewClFile() {
-    let name = document.getElementById('new-cl-name').value.trim();
-    const content = document.getElementById('cl-content').value;
+async function saveNewSmFile() {
+    let name = document.getElementById('new-sm-name').value.trim();
+    const content = document.getElementById('sm-content').value;
 
     if (!name) {
         alert('File name is required');
         return;
     }
-    if (!name.endsWith('.cl')) {
-        name += '.cl';
+    if (!name.endsWith('.sm')) {
+        name += '.sm';
     }
 
-    const res = await apiFetch(`/api/cl-files/${name}`, {
+    const res = await apiFetch(`/api/sm-files/${name}`, {
         method: 'PUT',
         body: JSON.stringify({ content })
     });
@@ -773,13 +805,13 @@ async function saveNewClFile() {
         alert(result);
     } else {
         closeModal();
-        loadClFiles();
+        loadSmFiles();
     }
 }
 
-async function saveClFile(name) {
-    const content = document.getElementById('cl-content').value;
-    const res = await apiFetch(`/api/cl-files/${name}`, {
+async function saveSmFile(name) {
+    const content = document.getElementById('sm-content').value;
+    const res = await apiFetch(`/api/sm-files/${name}`, {
         method: 'PUT',
         body: JSON.stringify({ content })
     });
@@ -788,7 +820,7 @@ async function saveClFile(name) {
         alert(result);
     } else {
         closeModal();
-        loadClFiles();
+        loadSmFiles();
     }
 }
 

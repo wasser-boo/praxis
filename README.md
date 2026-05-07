@@ -13,7 +13,7 @@ Self-hosted AI agent platform with Discord bot, dashboard, tool-calling, and QEM
 - **POML Templates**: Customizable system prompts and workflows
 - **Memory & Learning**: Facts, preferences, topics stored per user
 - **Encrypted Secrets**: AES-256-GCM encrypted at rest (enc2)
-- **Context Language (CL)**: File-driven agent workflows
+- **Statemachine (.sm)**: File-driven agent workflows with regex conditions
 - **Voice**: STT (Vosk/Whisper/ElevenLabs) + TTS (SAPI/ElevenLabs/Qwen)
 - **RAG**: Vector store with embedding search
 - **Cron Jobs**: Scheduled agent tasks
@@ -148,7 +148,7 @@ Tabs:
 - **Logs**: Application logs
 - **Pairings**: Discord user pairings
 - **VM**: Start/stop VMs, VNC view, activity log with all LLM tool calls
-- **CL Files**: Context Language workflow files
+- **Statemachine**: Workflow state machine files (.sm)
 
 ## Tool Calling
 
@@ -201,6 +201,303 @@ Customize LLM behavior with POML templates in `templates/`:
 - `roles/*.poml` — Role-specific prompts
 - `tasks/*.poml` — Task-specific prompts
 - `compaction.poml` — Conversation summarization
+
+## Statemachine (.sm)
+
+Statemachine files define agent workflows as state machines. Place them in `contexts/` with the `.sm` extension (`.cl` files are also supported for backwards compatibility).
+
+### Quick Example
+
+```
+# My workflow
+name = my_workflow
+
+[state start]
+settings.system_template = "tasks/plan"
+transition -> coding on next
+auto_rule: turn > 5 -> coding
+
+[state coding]
+settings.system_template = "tasks/code"
+transition -> done on done
+auto_rule: used_tools.last_call =~ "execute_terminal" && used_tools.last_result =~ "build successful" -> done
+
+[state done]
+settings.system_template = "tasks/done"
+```
+
+Assign to a user: `set_context("cl_file", "my_workflow")`
+
+### File Structure
+
+```
+# Comments start with #
+name = workflow_name              # Workflow name (required)
+
+[state state_name]                # Define a state
+key = value                       # State variable assignments
+
+[transitions]                     # Explicit transitions section
+from_state -> to_state : when condition
+
+[auto]                            # Auto-transition rules
+condition -> use target_state
+
+[overrides]                       # Conditional variable overrides
+if condition -> key = value
+
+[secrets]                         # Conditional secret overrides (voice settings etc.)
+if condition -> secret_key = value
+```
+
+### Metadata
+
+```
+@name "My Workflow"
+@version "1.0"
+@steps [state1, state2, state3]
+```
+
+`@steps` defines the ordered list of states for `agent_next` advancement.
+
+### States
+
+Each state defines variables that get applied to the context when active:
+
+```
+[state understand]
+settings.system_template = tasks/plan     # Which POML template to use
+role_template = roles/senior_dev          # Role template to load
+mode = agent                              # Context mode
+custom_data.some_key = some_value         # Set any nested context value
+```
+
+State variables support dot-notation for nested values (`cl_data.app.theme = dark`).
+
+### Transitions
+
+Transitions move between states when conditions are met. There are two syntaxes:
+
+**Explicit transitions section:**
+```
+[transitions]
+understand -> plan : when understood
+plan -> code : when approved
+code -> review : when done
+```
+
+**Inline transitions (in state blocks):**
+```
+[state understand]
+transition -> plan on next
+```
+
+The `on next` part means the transition triggers when the `agent_next` signal is received (LLM outputs `§next` tag, or `agent_next` tool is called).
+
+### Auto-Rules
+
+Auto-rules evaluate every turn and automatically transition if the condition is true:
+
+```
+[auto]
+turn > 10 -> use plan
+used_tools.count > 20 -> use done
+used_tools.last_call =~ "execute_terminal" -> use next_step
+```
+
+**Inline syntax (in state blocks):**
+```
+[state code]
+auto_rule: turn > 15 -> next
+auto_rule: used_tools.count > 20 -> review
+```
+
+Auto-rules are evaluated in order. The first matching rule wins.
+
+### Condition Operators
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `==` | Equal | `mode == "chat"` |
+| `!=` | Not equal | `mode != "code"` |
+| `>` | Greater than | `turn > 10` |
+| `<` | Less than | `turn < 5` |
+| `>=` | Greater or equal | `turn >= 10` |
+| `<=` | Less or equal | `turn <= 5` |
+| `=~` | Regex match | `used_tools.last_call =~ "execute_terminal"` |
+| `!~` | Regex no-match | `used_tools.last_result !~ "error"` |
+| `&&` | Logical AND | `turn > 5 && mode == "chat"` |
+| `\|\|` | Logical OR | `mode == "chat" \|\| mode == "code"` |
+| (truthy) | Value is truthy | `cl_data.ready` |
+
+### Regex Support
+
+The `=~` and `!~` operators support full regex syntax from the Rust `regex` crate:
+
+```
+# Simple substring match
+used_tools.last_call =~ "execute_terminal"
+
+# Exact match with anchors
+used_tools.last_call =~ "^execute_terminal$"
+
+# Alternation (match multiple tools)
+used_tools.last_call =~ "^(write_file|edit_file)$"
+
+# Wildcard patterns
+used_tools.last_result =~ "partition.*created"
+
+# Case-insensitive matching
+used_tools.last_result =~ "(?i)error|failed"
+
+# Character classes
+used_tools.last_call =~ "^(vm_shell|execute_terminal)$"
+
+# Quantifiers
+used_tools.last_result =~ "\\d+ packages? installed"
+
+# Complex patterns
+used_tools.last_result =~ "(?i)(success|complete|done|finished)"
+```
+
+Invalid regex patterns safely evaluate to `false` (for `=~`) or `true` (for `!~`) without crashing.
+
+### `used_tools` Context Object
+
+After each tool call, a `used_tools` object is available in the context for conditions and templates:
+
+```json
+{
+  "used_tools": {
+    "last_call": "execute_terminal",
+    "last_result": "total 248...",
+    "last_args": {"command": "ls -la"},
+    "count": 5,
+    "history": [
+      {
+        "iteration": 1,
+        "tool": "execute_terminal",
+        "args": {"command": "ls -la"},
+        "result": "total 248...",
+        "timestamp": "2026-05-07 10:30:00",
+        "duration_ms": 150
+      }
+    ]
+  }
+}
+```
+
+Use in conditions:
+```
+# Check what tool was called
+used_tools.last_call == "execute_terminal"
+used_tools.last_call =~ "^(write_file|edit_file)$"
+
+# Check tool result content
+used_tools.last_result =~ "success"
+used_tools.last_result =~ "(?i)error|failed"
+
+# Check tool count
+used_tools.count > 10
+
+# Check history length (available via custom_data)
+custom_data.tool_history.length > 5
+```
+
+Use in POML templates:
+```
+Last tool: {{used_tools.last_call}}
+Tool count: {{used_tools.count}}
+```
+
+### `tool_history_limit` Setting
+
+Control how many tool history entries are kept (default: 50):
+
+```
+set_context("tool_history_limit", "200")
+```
+
+### Overrides
+
+Overrides conditionally set context variables:
+
+```
+[overrides]
+if hour < 6 -> settings.system_template = "quiet_mode"
+if mode == "code" -> cl_data.style = "concise"
+```
+
+**Inline syntax:**
+```
+[state code]
+override: used_tools.count > 15 -> cl_data.tool_calls_exhausted = "true"
+```
+
+### Secret Overrides
+
+Secret overrides conditionally change voice/audio settings (restricted to allowed fields):
+
+```
+[secrets]
+if mode == "code" -> mimo_voice = "coder"
+if hour < 6 -> mimo_style_instruction = "whisper"
+```
+
+Allowed secret fields: `mimo_voice`, `mimo_tts_type`, `mimo_style_instruction`, `mimo_voice_design_prompt`, `minimax_voice_id`, `minimax_model`, `voice_elevenlabs_voice_id`, `qwen_tts_speaker`, `qwen_tts_language`, `qwen_voice_clone_enabled`, `qwen_voice_clone_audio_path`, `qwen_voice_clone_prompt`, `rvc_on`.
+
+### Signals
+
+Signals trigger state transitions. The LLM sends signals via tags or tools:
+
+| Signal | Tag | Tool | Description |
+|--------|-----|------|-------------|
+| Next | `§next` | `agent_next` | Advance to next state |
+| Done | `§done` | `agent_complete` | Mark workflow complete |
+| Feedback | `§feedback` | `agent_feedback` | Send progress message |
+| Push | `§push="template"` | — | Push template to queue |
+| Pop | `§pop` | — | Pop template from queue |
+| Path | `§path="/dir"` | `agent_set_path` | Set working directory |
+| Set | `§set="key":"value"` | `set_context` | Set context variable |
+
+### Full Workflow Example
+
+```
+# Linux setup wizard
+@name "Linux Setup"
+@version "1.0"
+@steps [partitioning, installing, boot_loader, configuring, done]
+
+[state partitioning]
+settings.system_template = "linux/partitioning"
+transition -> installing on next
+auto_rule: used_tools.last_result =~ "(?i)partition.*created.*success" -> installing
+
+[state installing]
+settings.system_template = "linux/installing"
+transition -> boot_loader on next
+auto_rule: used_tools.last_result =~ "(?i)installation complete" -> boot_loader
+
+[state boot_loader]
+settings.system_template = "linux/boot_loader"
+transition -> configuring on next
+auto_rule: used_tools.last_result =~ "(?i)grub.*installed" -> configuring
+
+[state configuring]
+settings.system_template = "linux/configuring"
+transition -> done on done
+auto_rule: used_tools.last_result =~ "(?i)system.*configured" -> done
+
+[state done]
+settings.system_template = "linux/done"
+```
+
+### Dashboard
+
+The Statemachine tab in the dashboard lets you:
+- View all `.sm` and `.cl` files in `contexts/`
+- Edit and save statemachine files with syntax validation
+- Create new statemachine files (auto-appends `.sm` extension)
 
 ## Plugins
 

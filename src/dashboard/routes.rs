@@ -94,13 +94,13 @@ pub struct SecretsUpdate {
 }
 
 #[derive(Serialize)]
-pub struct ClFileInfo {
+pub struct SmFileInfo {
     pub name: String,
     pub path: String,
 }
 
 #[derive(Deserialize)]
-pub struct ClFileUpdate {
+pub struct SmFileUpdate {
     pub content: String,
 }
 
@@ -199,9 +199,9 @@ pub fn routes(db: crate::db::Database) -> Router {
             "/pairings/pending/:code",
             axum::routing::delete(delete_pending_pairing),
         )
-        .route("/cl-files", axum::routing::get(list_cl_files))
-        .route("/cl-files/:name", axum::routing::get(get_cl_file))
-        .route("/cl-files/:name", axum::routing::put(save_cl_file))
+        .route("/sm-files", axum::routing::get(list_sm_files))
+        .route("/sm-files/:name", axum::routing::get(get_sm_file))
+        .route("/sm-files/:name", axum::routing::put(save_sm_file))
         .route("/cron-jobs", axum::routing::get(list_cron_jobs))
         .route("/vm", axum::routing::get(list_vm_status))
         .route("/vm/start", axum::routing::post(vm_start))
@@ -889,21 +889,22 @@ async fn delete_pending_pairing(
     Ok("Pending pairing deleted".to_string())
 }
 
-// ── CL Files ─────────────────────────────────────────────────────────────────
+// ── Statemachine Files ────────────────────────────────────────────────
 
-async fn list_cl_files(
+async fn list_sm_files(
     State(state): State<Arc<DashboardState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let cl_dir = std::path::Path::new("contexts");
-    let data_cl_dir = std::path::PathBuf::from(&state.db.data_dir).join("contexts");
+    let sm_dir = std::path::Path::new("contexts");
+    let data_sm_dir = std::path::PathBuf::from(&state.db.data_dir).join("contexts");
     let mut files = Vec::new();
 
-    for dir in [&cl_dir, &data_cl_dir.as_path()] {
+    for dir in [&sm_dir, &data_sm_dir.as_path()] {
         if dir.exists() {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("cl") {
+                    let ext = path.extension().and_then(|e| e.to_str());
+                    if ext == Some("sm") || ext == Some("cl") {
                         let name = path
                             .file_name()
                             .unwrap_or_default()
@@ -929,10 +930,10 @@ async fn list_cl_files(
             .unwrap_or("")
             .cmp(b["name"].as_str().unwrap_or(""))
     });
-    Ok(Json(serde_json::json!({ "cl_files": files })))
+    Ok(Json(serde_json::json!({ "sm_files": files })))
 }
 
-async fn get_cl_file(
+async fn get_sm_file(
     State(state): State<Arc<DashboardState>>,
     Path(name): Path<String>,
 ) -> Result<String, StatusCode> {
@@ -946,21 +947,21 @@ async fn get_cl_file(
     std::fs::read_to_string(&data_path).map_err(|_| StatusCode::NOT_FOUND)
 }
 
-async fn save_cl_file(
+async fn save_sm_file(
     State(state): State<Arc<DashboardState>>,
     Path(name): Path<String>,
-    Json(update): Json<ClFileUpdate>,
+    Json(update): Json<SmFileUpdate>,
 ) -> Result<String, StatusCode> {
-    let cl_dir = std::path::PathBuf::from(&state.db.data_dir).join("contexts");
-    std::fs::create_dir_all(&cl_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let path = cl_dir.join(&name);
+    let sm_dir = std::path::PathBuf::from(&state.db.data_dir).join("contexts");
+    std::fs::create_dir_all(&sm_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let path = sm_dir.join(&name);
 
     if let Err(e) = crate::cl::parse(&update.content) {
-        return Ok(format!("CL Error: {}", e));
+        return Ok(format!("SM Error: {}", e));
     }
 
     std::fs::write(&path, &update.content).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok("CL file saved".to_string())
+    Ok("SM file saved".to_string())
 }
 
 // ── Cron Jobs ────────────────────────────────────────────────────────────────
@@ -1640,9 +1641,9 @@ mod dashboard_tests {
     }
 
     #[test]
-    fn test_cl_file_update_deserialize() {
+    fn test_sm_file_update_deserialize() {
         let json = r#"{"content": "[state test]\nmode = chat"}"#;
-        let update: ClFileUpdate = serde_json::from_str(json).unwrap();
+        let update: SmFileUpdate = serde_json::from_str(json).unwrap();
         assert!(update.content.contains("state test"));
     }
 }

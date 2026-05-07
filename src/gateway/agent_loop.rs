@@ -64,6 +64,7 @@ pub struct AgentLoopConfig {
     pub cl_file: Option<String>,
     pub feedback_enabled: bool,
     pub message_on_toolcalling: bool,
+    pub tool_history_limit: usize,
 }
 
 impl Default for AgentLoopConfig {
@@ -75,6 +76,7 @@ impl Default for AgentLoopConfig {
             cl_file: None,
             feedback_enabled: false,
             message_on_toolcalling: false,
+            tool_history_limit: 50,
         }
     }
 }
@@ -634,7 +636,7 @@ pub async fn run_agent_loop(
                 let mut final_result = result.clone();
                 let mut image_content_parts: Option<Vec<serde_json::Value>> = None;
 
-                // Record tool call in custom_data.tool_history
+                // Record tool call in custom_data.tool_history and expose used_tools at root
                 {
                     if ctx.custom_data.is_null() {
                         ctx.custom_data = serde_json::json!({});
@@ -643,13 +645,14 @@ pub async fn run_agent_loop(
                         if !obj.contains_key("tool_history") {
                             obj.insert("tool_history".to_string(), serde_json::json!([]));
                         }
+                        let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                        let result_preview = if final_result.len() > 500 {
+                            format!("{}...", &final_result[..500])
+                        } else {
+                            final_result.clone()
+                        };
+
                         if let Some(history) = obj.get_mut("tool_history").and_then(|v| v.as_array_mut()) {
-                            let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
-                            let result_preview = if final_result.len() > 500 {
-                                format!("{}...", &final_result[..500])
-                            } else {
-                                final_result.clone()
-                            };
                             history.push(serde_json::json!({
                                 "iteration": turn,
                                 "tool": tc.function.name,
@@ -658,12 +661,23 @@ pub async fn run_agent_loop(
                                 "timestamp": tool_start_time.format("%Y-%m-%d %H:%M:%S").to_string(),
                                 "duration_ms": tool_duration.num_milliseconds()
                             }));
-                            // Keep only last 50 entries to avoid context bloat
-                            if history.len() > 50 {
-                                let drain_count = history.len() - 50;
+                            // Trim history to configured limit
+                            let limit = config.tool_history_limit;
+                            if history.len() > limit {
+                                let drain_count = history.len() - limit;
                                 history.drain(0..drain_count);
                             }
                         }
+
+                        // Build used_tools object at root of custom_data
+                        let history_arr = obj.get("tool_history").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                        obj.insert("used_tools".to_string(), serde_json::json!({
+                            "last_call": tc.function.name,
+                            "last_result": if final_result.len() > 1000 { &final_result[..1000] } else { &final_result },
+                            "last_args": args,
+                            "count": turn,
+                            "history": history_arr
+                        }));
                     }
                 }
 
@@ -1851,5 +1865,42 @@ mod agent_tests {
         // Verify oldest entries were removed
         assert_eq!(history[0]["iteration"], 5);
         assert_eq!(history[49]["iteration"], 54);
+    }
+
+    #[test]
+    fn test_used_tools_object() {
+        // Test that used_tools is properly structured
+        let mut custom_data = serde_json::json!({});
+        let obj = custom_data.as_object_mut().unwrap();
+        obj.insert("tool_history".to_string(), serde_json::json!([]));
+
+        let history = obj.get_mut("tool_history").unwrap().as_array_mut().unwrap();
+        history.push(serde_json::json!({
+            "iteration": 1,
+            "tool": "execute_terminal",
+            "args": {"command": "ls -la"},
+            "result": "total 248...",
+            "timestamp": "2026-05-06 10:30:00",
+            "duration_ms": 150
+        }));
+
+        let history_arr = obj.get("tool_history").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        obj.insert("used_tools".to_string(), serde_json::json!({
+            "last_call": "execute_terminal",
+            "last_result": "total 248...",
+            "last_args": {"command": "ls -la"},
+            "count": 1,
+            "history": history_arr
+        }));
+
+        // Verify used_tools structure
+        let used = &custom_data["used_tools"];
+        assert_eq!(used["last_call"], "execute_terminal");
+        assert_eq!(used["last_result"], "total 248...");
+        assert_eq!(used["last_args"]["command"], "ls -la");
+        assert_eq!(used["count"], 1);
+        let hist = used["history"].as_array().unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0]["tool"], "execute_terminal");
     }
 }
