@@ -1,54 +1,42 @@
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::str::FromStr;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CronJob {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub schedule: String,
-    pub timezone: String,
-    pub user_id: String,
-    pub channel_id: Option<String>,
-    pub template: String,
-    pub prompt: String,
-    pub enabled: bool,
-    pub trigger_type: String,
-    pub last_run: Option<String>,
-    pub next_run: Option<String>,
-    pub run_count: i64,
-    pub last_error: Option<String>,
-}
+pub use crate::db::cron_jobs::CronJob;
 
 pub struct CronScheduler {
-    jobs: HashMap<String, CronJob>,
+    db: crate::db::Database,
 }
 
 impl CronScheduler {
-    pub fn new() -> Self {
-        Self {
-            jobs: HashMap::new(),
-        }
+    pub fn new(db: crate::db::Database) -> Self {
+        Self { db }
     }
 
-    pub fn add_job(&mut self, job: CronJob) {
-        self.jobs.insert(job.id.clone(), job);
+    pub fn add_job(&self, job: &CronJob) -> anyhow::Result<()> {
+        self.db.create_cron_job(job)
     }
 
-    pub fn remove_job(&mut self, id: &str) -> Option<CronJob> {
-        self.jobs.remove(id)
+    pub fn remove_job(&self, id: &str) -> anyhow::Result<()> {
+        self.db.delete_cron_job(id)
     }
 
-    pub fn get_job(&self, id: &str) -> Option<&CronJob> {
-        self.jobs.get(id)
+    pub fn get_job(&self, id: &str) -> anyhow::Result<Option<CronJob>> {
+        self.db.get_cron_job(id)
     }
 
-    pub fn list_jobs(&self) -> Vec<&CronJob> {
-        self.jobs.values().collect()
+    pub fn list_jobs(&self, user_id: &str) -> anyhow::Result<Vec<CronJob>> {
+        self.db.list_cron_jobs(user_id)
     }
 
-    pub fn enabled_jobs(&self) -> Vec<&CronJob> {
-        self.jobs.values().filter(|j| j.enabled).collect()
+    pub fn list_all_jobs(&self) -> anyhow::Result<Vec<CronJob>> {
+        self.db.list_all_cron_jobs()
+    }
+
+    pub fn toggle_job(&self, id: &str, enabled: bool) -> anyhow::Result<()> {
+        self.db.toggle_cron_job(id, enabled)
+    }
+
+    pub fn record_run(&self, id: &str, success: bool, error: Option<&str>) -> anyhow::Result<()> {
+        self.db.update_cron_job_run(id, success, error)
     }
 
     pub fn validate_schedule(schedule: &str) -> bool {
@@ -56,18 +44,26 @@ impl CronScheduler {
     }
 }
 
-use std::str::FromStr;
-
 #[cfg(test)]
 mod cron_tests {
     use super::*;
+    use tempfile::TempDir;
 
-    #[test]
-    fn test_cron_scheduler_add_remove() {
-        let mut scheduler = CronScheduler::new();
-        let job = CronJob {
-            id: "test1".to_string(),
-            name: "Test Job".to_string(),
+    fn test_db() -> (crate::db::Database, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = crate::db::Database::new(dir.path()).unwrap();
+        let ctx = crate::db::contexts::Context {
+            user_id: "user1".to_string(),
+            ..Default::default()
+        };
+        db.save_context(&ctx).unwrap();
+        (db, dir)
+    }
+
+    fn test_job(id: &str) -> CronJob {
+        CronJob {
+            id: id.to_string(),
+            name: format!("Job {}", id),
             description: None,
             schedule: "0 * * * * *".to_string(),
             timezone: "UTC".to_string(),
@@ -75,63 +71,40 @@ mod cron_tests {
             channel_id: None,
             template: "test.poml".to_string(),
             prompt: "Do something".to_string(),
+            context_overrides: None,
             enabled: true,
             trigger_type: "cron".to_string(),
+            webhook_secret: None,
+            event_type: None,
             last_run: None,
             next_run: None,
             run_count: 0,
             last_error: None,
-        };
-
-        scheduler.add_job(job);
-        assert!(scheduler.get_job("test1").is_some());
-        assert_eq!(scheduler.list_jobs().len(), 1);
-
-        scheduler.remove_job("test1");
-        assert!(scheduler.get_job("test1").is_none());
+        }
     }
 
     #[test]
-    fn test_cron_scheduler_enabled_jobs() {
-        let mut scheduler = CronScheduler::new();
+    fn test_scheduler_add_remove() {
+        let (db, _dir) = test_db();
+        let scheduler = CronScheduler::new(db);
 
-        scheduler.add_job(CronJob {
-            id: "j1".to_string(),
-            name: "Job 1".to_string(),
-            description: None,
-            schedule: "0 * * * * *".to_string(),
-            timezone: "UTC".to_string(),
-            user_id: "user1".to_string(),
-            channel_id: None,
-            template: "t.poml".to_string(),
-            prompt: "p".to_string(),
-            enabled: true,
-            trigger_type: "cron".to_string(),
-            last_run: None,
-            next_run: None,
-            run_count: 0,
-            last_error: None,
-        });
+        scheduler.add_job(&test_job("test1")).unwrap();
+        assert!(scheduler.get_job("test1").unwrap().is_some());
+        assert_eq!(scheduler.list_jobs("user1").unwrap().len(), 1);
 
-        scheduler.add_job(CronJob {
-            id: "j2".to_string(),
-            name: "Job 2".to_string(),
-            description: None,
-            schedule: "0 * * * * *".to_string(),
-            timezone: "UTC".to_string(),
-            user_id: "user1".to_string(),
-            channel_id: None,
-            template: "t.poml".to_string(),
-            prompt: "p".to_string(),
-            enabled: false,
-            trigger_type: "cron".to_string(),
-            last_run: None,
-            next_run: None,
-            run_count: 0,
-            last_error: None,
-        });
+        scheduler.remove_job("test1").unwrap();
+        assert!(scheduler.get_job("test1").unwrap().is_none());
+    }
 
-        assert_eq!(scheduler.enabled_jobs().len(), 1);
+    #[test]
+    fn test_scheduler_toggle() {
+        let (db, _dir) = test_db();
+        let scheduler = CronScheduler::new(db);
+
+        scheduler.add_job(&test_job("j1")).unwrap();
+        scheduler.toggle_job("j1", false).unwrap();
+        let job = scheduler.get_job("j1").unwrap().unwrap();
+        assert!(!job.enabled);
     }
 
     #[test]

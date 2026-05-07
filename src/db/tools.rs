@@ -248,6 +248,37 @@ fn get_default_tools() -> Vec<Tool> {
             parameters: serde_json::json!({"type":"object","properties":{"document_id":{"type":"string","description":"Document ID to delete"}},"required":["document_id"]}),
             is_enabled: true,
         },
+        // Cron Tools
+        Tool {
+            name: "cron_add".into(),
+            description: Some("Create a scheduled cron job that runs on a recurring schedule. The job will execute the given prompt as an agent task.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"Human-readable job name"},"schedule":{"type":"string","description":"Cron expression (6 fields: sec min hour day month weekday). Example: '0 0 9 * * *' for daily at 9am"},"prompt":{"type":"string","description":"The prompt/task to execute when the job fires"},"template":{"type":"string","description":"Template to use (default: agent.poml)","default":"agent.poml"},"timezone":{"type":"string","description":"Timezone for the schedule (default: UTC)","default":"UTC"},"description":{"type":"string","description":"Optional description of what this job does"},"enabled":{"type":"boolean","description":"Whether the job is active (default: true)","default":true}},"required":["name","schedule","prompt"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "cron_delete".into(),
+            description: Some("Delete a cron job by ID.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"job_id":{"type":"string","description":"The cron job ID to delete"}},"required":["job_id"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "cron_list".into(),
+            description: Some("List all cron jobs for the current user.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "cron_toggle".into(),
+            description: Some("Enable or disable a cron job.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"job_id":{"type":"string","description":"The cron job ID"},"enabled":{"type":"boolean","description":"true to enable, false to disable"}},"required":["job_id","enabled"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "cron_run".into(),
+            description: Some("Manually trigger a cron job to run immediately, regardless of its schedule.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"job_id":{"type":"string","description":"The cron job ID to run now"}},"required":["job_id"]}),
+            is_enabled: true,
+        },
         Tool {
             name: "understand_image".into(),
             description: Some("Load an image for visual analysis. The image is sent to the vision API - you WILL see and understand the image content in your next response. After calling this tool, describe what you see in the image. Use for screenshots, photos, or any visual content.".into()),
@@ -561,7 +592,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 32);
+        assert_eq!(tools.len(), 66);
     }
 
     #[test]
@@ -570,7 +601,7 @@ mod tool_tests {
         init_default_tools(&db).unwrap();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 32);
+        assert_eq!(tools.len(), 66);
     }
 
     #[test]
@@ -578,7 +609,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let enabled = list_enabled(&db).unwrap();
-        assert_eq!(enabled.len(), 18); // 18 enabled (14 VM/discord tools disabled by default)
+        assert_eq!(enabled.len(), 28);
 
         disable(&db, "execute_terminal").unwrap();
         let enabled = list_enabled(&db).unwrap();
@@ -672,7 +703,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let defs = to_tool_definitions(&db).unwrap();
-        assert_eq!(defs.len(), 18); // 18 enabled (14 VM/discord tools disabled by default)
+        assert_eq!(defs.len(), 28);
         assert_eq!(defs[0].function.name, "execute_terminal");
     }
 
@@ -684,7 +715,7 @@ mod tool_tests {
         disable(&db, "write_file").unwrap();
 
         let defs = to_tool_definitions(&db).unwrap();
-        assert_eq!(defs.len(), 16);
+        assert_eq!(defs.len(), 26);
         assert!(defs.iter().all(|d| d.function.name != "execute_terminal"));
     }
 }

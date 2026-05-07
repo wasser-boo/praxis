@@ -126,6 +126,43 @@ impl Database {
         Ok(jobs)
     }
 
+    pub fn list_all_cron_jobs(&self) -> anyhow::Result<Vec<CronJob>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, schedule, timezone, user_id, channel_id, 
+             template, prompt, context_overrides, enabled, trigger_type, webhook_secret, 
+             event_type, last_run, next_run, run_count, last_error 
+             FROM cron_jobs ORDER BY name",
+        )?;
+
+        let jobs = stmt
+            .query_map([], |row| {
+                Ok(CronJob {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                    schedule: row.get(3)?,
+                    timezone: row.get(4)?,
+                    user_id: row.get(5)?,
+                    channel_id: row.get(6)?,
+                    template: row.get(7)?,
+                    prompt: row.get(8)?,
+                    context_overrides: row.get(9)?,
+                    enabled: row.get::<_, i32>(10)? != 0,
+                    trigger_type: row.get(11)?,
+                    webhook_secret: row.get(12)?,
+                    event_type: row.get(13)?,
+                    last_run: row.get(14)?,
+                    next_run: row.get(15)?,
+                    run_count: row.get(16)?,
+                    last_error: row.get(17)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(jobs)
+    }
+
     pub fn update_cron_job_run(
         &self,
         id: &str,

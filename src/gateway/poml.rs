@@ -42,7 +42,7 @@ pub enum AgentSignal {
 
 pub async fn render(template_path: &str, context: &serde_json::Value) -> anyhow::Result<String> {
     let poml_cli = std::env::var("POML_CLI")
-        .unwrap_or_else(|_| "/mnt/c/Users/blabb/Desktop/poml/python/poml/js/cli.js".to_string());
+        .unwrap_or_else(|_| "poml".to_string());
 
     let context_file = NamedTempFile::new()?;
     std::fs::write(context_file.path(), serde_json::to_string_pretty(context)?)?;

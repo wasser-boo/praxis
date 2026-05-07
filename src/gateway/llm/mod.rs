@@ -436,6 +436,96 @@ impl LLMRouter {
                             }
                         }
                     }
+                    "cron_add" => {
+                        let name = args["name"].as_str().unwrap_or("");
+                        let schedule = args["schedule"].as_str().unwrap_or("");
+                        let prompt = args["prompt"].as_str().unwrap_or("");
+                        let template = args["template"].as_str().unwrap_or("agent.poml");
+                        let timezone = args["timezone"].as_str().unwrap_or("UTC");
+                        let description = args["description"].as_str().map(|s| s.to_string());
+                        let enabled = args["enabled"].as_bool().unwrap_or(true);
+
+                        if name.is_empty() || schedule.is_empty() || prompt.is_empty() {
+                            "Error: name, schedule, and prompt are required.".to_string()
+                        } else if !crate::gateway::cron_scheduler::CronScheduler::validate_schedule(schedule) {
+                            format!("Error: Invalid cron expression '{}'.", schedule)
+                        } else {
+                            let job_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                            let job = crate::db::cron_jobs::CronJob {
+                                id: job_id.clone(),
+                                name: name.to_string(),
+                                description,
+                                schedule: schedule.to_string(),
+                                timezone: timezone.to_string(),
+                                user_id: user_id.to_string(),
+                                channel_id: None,
+                                template: template.to_string(),
+                                prompt: prompt.to_string(),
+                                context_overrides: None,
+                                enabled,
+                                trigger_type: "cron".to_string(),
+                                webhook_secret: None,
+                                event_type: None,
+                                last_run: None,
+                                next_run: None,
+                                run_count: 0,
+                                last_error: None,
+                            };
+                            match db.create_cron_job(&job) {
+                                Ok(_) => format!("Cron job created. ID: {} Name: '{}'", job_id, name),
+                                Err(e) => format!("Error: {}", e),
+                            }
+                        }
+                    }
+                    "cron_delete" => {
+                        let job_id = args["job_id"].as_str().unwrap_or("");
+                        if job_id.is_empty() {
+                            "Error: job_id required.".to_string()
+                        } else {
+                            match db.delete_cron_job(job_id) {
+                                Ok(_) => format!("Cron job {} deleted.", job_id),
+                                Err(e) => format!("Error: {}", e),
+                            }
+                        }
+                    }
+                    "cron_list" => {
+                        match db.list_cron_jobs(user_id) {
+                            Ok(jobs) if jobs.is_empty() => "No cron jobs.".to_string(),
+                            Ok(jobs) => {
+                                let mut out = String::from("Cron jobs:\n");
+                                for j in &jobs {
+                                    let s = if j.enabled { "on" } else { "off" };
+                                    out.push_str(&format!("- [{}] {} ({}) runs={} schedule='{}' prompt='{}'\n", j.id, j.name, s, j.run_count, j.schedule, j.prompt));
+                                }
+                                out
+                            }
+                            Err(e) => format!("Error: {}", e),
+                        }
+                    }
+                    "cron_toggle" => {
+                        let job_id = args["job_id"].as_str().unwrap_or("");
+                        let enabled = args["enabled"].as_bool().unwrap_or(true);
+                        if job_id.is_empty() {
+                            "Error: job_id required.".to_string()
+                        } else {
+                            match db.toggle_cron_job(job_id, enabled) {
+                                Ok(_) => format!("Job {} {}.", job_id, if enabled { "enabled" } else { "disabled" }),
+                                Err(e) => format!("Error: {}", e),
+                            }
+                        }
+                    }
+                    "cron_run" => {
+                        let job_id = args["job_id"].as_str().unwrap_or("");
+                        if job_id.is_empty() {
+                            "Error: job_id required.".to_string()
+                        } else {
+                            match db.get_cron_job(job_id) {
+                                Ok(Some(j)) => format!("Triggered '{}'. Prompt: '{}' Template: {}", j.name, j.prompt, j.template),
+                                Ok(None) => format!("Job {} not found.", job_id),
+                                Err(e) => format!("Error: {}", e),
+                            }
+                        }
+                    }
                     other => format!("Unknown tool: {}", other),
                 };
 

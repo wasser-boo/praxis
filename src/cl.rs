@@ -461,6 +461,14 @@ pub fn apply_to_context(
         }
     }
 
+    // Apply current state variables before evaluating auto rules,
+    // so auto conditions can reference state variables (e.g. regex patterns)
+    if let Some(state) = cl.states.get(&active_state) {
+        for (key, value) in &state.variables {
+            set_nested_value(context, key, serde_json::Value::String(value.clone()));
+        }
+    }
+
     let obj = match context.as_object() {
         Some(o) => o,
         None => return Vec::new(),
@@ -469,17 +477,20 @@ pub fn apply_to_context(
     // Auto-rules: always evaluate to allow automatic state transitions
     let resolved_state = resolve_auto_state(cl, obj, &active_state);
 
-    // Apply state variables
-    if let Some(state) = cl.states.get(&resolved_state) {
-        for (key, value) in &state.variables {
-            set_nested_value(context, key, serde_json::Value::String(value.clone()));
+    // Apply resolved state variables (may override current state if auto-rule triggered)
+    if resolved_state != active_state {
+        if let Some(state) = cl.states.get(&resolved_state) {
+            for (key, value) in &state.variables {
+                set_nested_value(context, key, serde_json::Value::String(value.clone()));
+            }
         }
-        set_nested_value(
-            context,
-            "active_state",
-            serde_json::Value::String(resolved_state),
-        );
     }
+
+    set_nested_value(
+        context,
+        "active_state",
+        serde_json::Value::String(resolved_state),
+    );
 
     // Apply overrides
     for overr in &cl.overrides {
@@ -576,8 +587,12 @@ pub fn evaluate_condition(
 
     let ctx_val = get_nested_value(context, var);
 
+    let resolved;
     let clean_value = if value.starts_with('"') && value.ends_with('"') {
         &value[1..value.len() - 1]
+    } else if let Some(serde_json::Value::String(s)) = get_nested_value(context, value) {
+        resolved = s.clone();
+        resolved.as_str()
     } else {
         value
     };
@@ -1247,5 +1262,50 @@ used_tools.last_result =~ "partition.*created" -> use installing
 
         let parts = split_condition_preserving_quotes("a || b", "||");
         assert_eq!(parts, vec!["a ", " b"]);
+    }
+
+    #[test]
+    fn test_evaluate_condition_rhs_variable_resolution() {
+        let mut ctx = serde_json::Map::new();
+        ctx.insert("val".to_string(), serde_json::json!("hello world"));
+        ctx.insert("my_regex".to_string(), serde_json::json!("hello.*"));
+        ctx.insert("exact".to_string(), serde_json::json!("^hello world$"));
+        ctx.insert("num".to_string(), serde_json::json!(10));
+        ctx.insert("threshold".to_string(), serde_json::json!("5"));
+
+        // Unquoted RHS resolves as context variable
+        assert!(evaluate_condition("val =~ my_regex", &ctx));
+        assert!(evaluate_condition("val =~ exact", &ctx));
+        assert!(evaluate_condition("num > threshold", &ctx));
+
+        // Quoted RHS is always a literal
+        assert!(!evaluate_condition("val =~ \"my_regex\"", &ctx));
+        assert!(!evaluate_condition("val == \"my_regex\"", &ctx));
+    }
+
+    #[test]
+    fn test_state_variables_available_in_auto_rules() {
+        let input = r#"
+[state working]
+tool_regex = "vm_input"
+
+[state done]
+mode = "idle"
+
+[auto]
+used_tools.last_call =~ tool_regex && used_tools.last_args.action == "left" -> use done
+"#;
+        let cl = parse(input).unwrap();
+        let mut ctx = serde_json::json!({
+            "active_state": "working",
+            "used_tools": {
+                "last_call": "vm_input",
+                "last_args": {"action": "left", "count": 3}
+            }
+        });
+        apply_to_context(&cl, &mut ctx);
+
+        assert_eq!(ctx["active_state"], "done");
+        assert_eq!(ctx["mode"], "idle");
     }
 }
