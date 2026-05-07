@@ -991,6 +991,7 @@ function escapeHtml(str) {
 // ── VM ───────────────────────────────────────────────────────────────────────
 
 let vncRfb = null;
+let vncConnectedVm = null;
 let vncModule = null;
 
 function vncLog(msg, level) {
@@ -1046,7 +1047,9 @@ async function loadVMStatus() {
             const runningVm = vms.find(vm => vm.status === 'running');
             if (runningVm) {
                 vncLog(`Auto-connecting to running VM: ${runningVm.name}`, 'info');
-                connectVNC(runningVm.name);
+                if (vncConnectedVm !== runningVm.name) {
+                    connectVNC(runningVm.name);
+                }
             }
         }
 
@@ -1116,6 +1119,7 @@ async function connectVNC(vmName) {
         vncRfb.addEventListener('connect', () => {
             vncLog('VNC connected successfully!', 'success');
             placeholder.style.display = 'none';
+            vncConnectedVm = vmName;
         });
 
         vncRfb.addEventListener('disconnect', (e) => {
@@ -1124,6 +1128,7 @@ async function connectVNC(vmName) {
             vncLog(`VNC disconnected: ${reason} (clean: ${clean})`, clean ? 'warn' : 'error');
             placeholder.style.display = 'block';
             placeholder.textContent = 'VNC disconnected. Click Refresh to reconnect.';
+            vncConnectedVm = null;
         });
 
         vncRfb.addEventListener('credentialsrequired', () => {
