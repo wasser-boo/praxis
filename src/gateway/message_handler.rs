@@ -581,6 +581,7 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
         } else {
             ctx.custom_data.clone()
         },
+        "used_tools_history_size": ctx.settings.tool_history_limit,
         "cl_data": if ctx.cl_data.is_null() {
             serde_json::json!({})
         } else {

@@ -121,7 +121,7 @@ pub async fn ask_question(
     let message_id =
         crate::tools::discord_send_message::send_message_rest(channel_id, &message).await?;
 
-    // Add emoji reactions for quick replies
+    // Add emoji reactions for quick replies (with delay to avoid Discord rate limiting)
     for (i, _) in suggestions.iter().enumerate() {
         if i < EMOJIS.len() {
             let _ = crate::tools::discord_send_message::add_reaction(
@@ -130,6 +130,9 @@ pub async fn ask_question(
                 EMOJIS[i],
             )
             .await;
+            if i + 1 < suggestions.len().min(EMOJIS.len()) {
+                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            }
         }
     }
 

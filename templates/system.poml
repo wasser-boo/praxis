@@ -43,6 +43,12 @@
     </list>
   </cp>
 
+  <cp caption="Used Tools Summary" if="custom_data.used_tools">
+    <p>Last tool call: <b>{{ custom_data.used_tools.last_call }}</b> (call #{{ custom_data.used_tools.count }})</p>
+    <p>Last result: {{ custom_data.used_tools.last_result }}</p>
+    <p>History size limit: {{ used_tools_history_size }}</p>
+  </cp>
+
   <cp caption="Rules">
     <list>
       <item>Be concise and direct in your responses.</item>

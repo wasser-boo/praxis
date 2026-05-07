@@ -767,6 +767,8 @@ pub async fn run_agent_loop(
                 tool_call_count += 1;
             }
             // Continue loop for next LLM turn
+            // Save context (with used_tools) before reloading from DB
+            let _ = state.db.save_context(&ctx);
             // Reload context to check if agent_complete set done=true
             ctx = state.db.load_context(user_id)?;
             if ctx.settings.done {
@@ -1145,6 +1147,8 @@ async fn build_system_prompt(
     } else {
         ctx.custom_data.clone()
     };
+
+    context_json["used_tools_history_size"] = serde_json::json!(ctx.settings.tool_history_limit);
 
     context_json["cl_data"] = if ctx.cl_data.is_null() {
         serde_json::json!({})
