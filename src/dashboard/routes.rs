@@ -1439,15 +1439,22 @@ async fn handle_vnc_proxy_noauth(socket: axum::extract::ws::WebSocket, vm_name: 
         let mut buf = vec![0u8; 65536];
         loop {
             use tokio::io::AsyncReadExt;
-            let n = match reader.read(&mut buf).await {
-                Ok(0) => {
+            let n = match tokio::time::timeout(std::time::Duration::from_secs(55), reader.read(&mut buf)).await {
+                Ok(Ok(0)) => {
                     tracing::debug!("VNC proxy: TCP read EOF");
                     break;
                 }
-                Ok(n) => n,
-                Err(e) => {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => {
                     tracing::debug!("VNC proxy: TCP read error: {}", e);
                     break;
+                }
+                Err(_) => {
+                    if ws_sink.send(axum::extract::ws::Message::Ping(vec![])).await.is_err() {
+                        tracing::debug!("VNC proxy: WS ping send failed");
+                        break;
+                    }
+                    continue;
                 }
             };
             let msg = axum::extract::ws::Message::Binary(buf[..n].to_vec());
@@ -1543,10 +1550,16 @@ async fn handle_vnc_proxy(
         let mut buf = vec![0u8; 65536];
         loop {
             use tokio::io::AsyncReadExt;
-            let n = match reader.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(_) => break,
+            let n = match tokio::time::timeout(std::time::Duration::from_secs(55), reader.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => n,
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    if ws_sink.send(axum::extract::ws::Message::Ping(vec![])).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
             };
             if ws_sink
                 .send(axum::extract::ws::Message::Binary(buf[..n].to_vec()))
