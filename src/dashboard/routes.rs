@@ -1274,17 +1274,34 @@ async fn vnc_viewer_page() -> axum::response::Html<&'static str> {
   import RFB from '/static/novnc/core/rfb.js';
   const screen = document.getElementById('screen');
   const status = document.getElementById('status');
-  const wsUrl = `ws://${location.host}/websockify`;
-  const rfb = new RFB(screen, wsUrl, { shared: true, credentials: {} });
-  rfb.scaleViewport = true;
-  rfb.resizeSession = false;
-  rfb.addEventListener('connect', () => {
-    status.textContent = 'Connected to VM';
-    status.className = 'connected';
-  });
-  rfb.addEventListener('disconnect', (e) => {
-    status.textContent = `Disconnected: ${e.detail.clean ? 'clean' : 'error'}`;
-    status.className = '';
+
+  function connectRFB() {
+    const wsUrl = `ws://${location.host}/websockify`;
+    const rfb = new RFB(screen, wsUrl, { shared: true, credentials: {} });
+    rfb.scaleViewport = true;
+    rfb.resizeSession = false;
+    rfb.addEventListener('connect', () => {
+      status.textContent = 'Connected to VM';
+      status.className = 'connected';
+    });
+    rfb.addEventListener('disconnect', (e) => {
+      if (e.detail.clean) { status.textContent = 'Disconnected cleanly'; }
+      else {
+        status.textContent = 'Disconnected, reconnecting in 2s...';
+        status.className = '';
+        setTimeout(connectRFB, 2000);
+      }
+    });
+  }
+  connectRFB();
+
+  let wasDisconnected = false;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && wasDisconnected) {
+      wasDisconnected = false;
+      status.textContent = 'Reconnecting...';
+      connectRFB();
+    }
   });
 </script>
 </body>
@@ -1338,17 +1355,32 @@ async fn vm_vnc_viewer(
   const wsUrl = token
     ? `${{wsProto}}//${{location.host}}/api/vm/vnc/ws?token=${{token}}&vm=${{vmName}}`
     : `${{wsProto}}//${{location.host}}/websockify?vm=${{vmName}}`;
-  const rfb = new RFB(screen, wsUrl, {{ shared: true, credentials: {{}} }});
-  rfb.scaleViewport = true;
-  rfb.resizeSession = false;
-  rfb.addEventListener('connect', () => {{
-    status.textContent = 'Connected';
-    status.className = 'connected';
+
+  let currentRFB = null;
+  function connectRFB() {{
+    if (currentRFB && currentRFB._rfb_connection_state === 'connected') return;
+    currentRFB = new RFB(screen, wsUrl, {{ shared: true, credentials: {{}} }});
+    currentRFB.scaleViewport = true;
+    currentRFB.resizeSession = false;
+    currentRFB.addEventListener('connect', () => {{
+      status.textContent = 'Connected';
+      status.className = 'connected';
+    }});
+    currentRFB.addEventListener('disconnect', (e) => {{
+      if (e.detail.clean) {{ status.textContent = 'Disconnected cleanly'; }}
+      else {{
+        status.textContent = 'Disconnected, reconnecting in 2s...';
+        status.className = '';
+        setTimeout(connectRFB, 2000);
+      }}
+    }});
+  }}
+  connectRFB();
+
+  document.addEventListener('visibilitychange', () => {{
+    if (document.visibilityState === 'visible') connectRFB();
   }});
-  rfb.addEventListener('disconnect', (e) => {{
-    status.textContent = `Disconnected: ${{e.detail.clean ? 'clean' : 'error'}}`;
-    status.className = '';
-  }});
+
   window.toggleFullscreen = function() {{
     const el = document.getElementById('screen');
     if (document.fullscreenElement) {{
