@@ -1,6 +1,53 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
+static REGEX_CACHE: LazyLock<Mutex<HashMap<String, Regex>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn get_cached_regex(pattern: &str) -> Option<Regex> {
+    let mut cache = REGEX_CACHE.lock().unwrap();
+    if let Some(re) = cache.get(pattern) {
+        return Some(re.clone());
+    }
+    match Regex::new(pattern) {
+        Ok(re) => {
+            cache.insert(pattern.to_string(), re.clone());
+            Some(re)
+        }
+        Err(_) => None,
+    }
+}
+
+fn split_condition_preserving_quotes<'a>(input: &'a str, delimiter: &str) -> Vec<&'a str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let del_bytes = delimiter.as_bytes();
+    let del_len = delimiter.len();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && in_quotes && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            in_quotes = !in_quotes;
+        }
+        if !in_quotes && i + del_len <= bytes.len() && &bytes[i..i + del_len] == del_bytes {
+            parts.push(&input[start..i]);
+            start = i + del_len;
+            i += del_len;
+            continue;
+        }
+        i += 1;
+    }
+    parts.push(&input[start..]);
+    parts
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContextLang {
@@ -481,15 +528,21 @@ pub fn evaluate_condition(
     let condition = condition.trim();
 
     if condition.contains("&&") {
-        return condition
-            .split("&&")
-            .all(|part| evaluate_condition(part.trim(), context));
+        let parts = split_condition_preserving_quotes(condition, "&&");
+        if parts.len() > 1 {
+            return parts
+                .iter()
+                .all(|part| evaluate_condition(part.trim(), context));
+        }
     }
 
     if condition.contains("||") {
-        return condition
-            .split("||")
-            .any(|part| evaluate_condition(part.trim(), context));
+        let parts = split_condition_preserving_quotes(condition, "||");
+        if parts.len() > 1 {
+            return parts
+                .iter()
+                .any(|part| evaluate_condition(part.trim(), context));
+        }
     }
 
     // Check regex operators first (=~ and !~) before == and != to avoid conflicts
@@ -537,9 +590,9 @@ pub fn evaluate_condition(
                 Some(serde_json::Value::Bool(b)) => b.to_string(),
                 _ => return false,
             };
-            match Regex::new(clean_value) {
-                Ok(re) => re.is_match(&haystack),
-                Err(_) => false,
+            match get_cached_regex(clean_value) {
+                Some(re) => re.is_match(&haystack),
+                None => false,
             }
         }
         "!~" => {
@@ -549,9 +602,9 @@ pub fn evaluate_condition(
                 Some(serde_json::Value::Bool(b)) => b.to_string(),
                 _ => return true,
             };
-            match Regex::new(clean_value) {
-                Ok(re) => !re.is_match(&haystack),
-                Err(_) => true,
+            match get_cached_regex(clean_value) {
+                Some(re) => !re.is_match(&haystack),
+                None => true,
             }
         }
         "==" => match ctx_val {
@@ -1171,5 +1224,28 @@ used_tools.last_result =~ "partition.*created" -> use installing
 
         assert!(evaluate_condition("count =~ \"42\"", &ctx));
         assert!(!evaluate_condition("count =~ \"^99$\"", &ctx));
+    }
+
+    #[test]
+    fn test_evaluate_condition_regex_with_ampersand_in_pattern() {
+        let mut ctx = serde_json::Map::new();
+        ctx.insert("val".to_string(), serde_json::json!("a&&b"));
+        ctx.insert("mode".to_string(), serde_json::json!("chat"));
+
+        assert!(evaluate_condition("val =~ \"a&&b\" && mode == \"chat\"", &ctx));
+        assert!(!evaluate_condition("val =~ \"a&&b\" && mode == \"code\"", &ctx));
+        assert!(evaluate_condition("val =~ \"a&&b\" || mode == \"code\"", &ctx));
+    }
+
+    #[test]
+    fn test_split_condition_preserving_quotes() {
+        let parts = split_condition_preserving_quotes("val =~ \"a&&b\" && mode == \"chat\"", "&&");
+        assert_eq!(parts, vec!["val =~ \"a&&b\" ", " mode == \"chat\""]);
+
+        let parts = split_condition_preserving_quotes("a && b && c", "&&");
+        assert_eq!(parts, vec!["a ", " b ", " c"]);
+
+        let parts = split_condition_preserving_quotes("a || b", "||");
+        assert_eq!(parts, vec!["a ", " b"]);
     }
 }
