@@ -420,15 +420,29 @@ async fn get_messages(
     Path(user_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let budget = 500000usize;
-    match state.db.get_messages_with_token_budget(&user_id, budget) {
+    // Resolve session key
+    let msg_key = match state.db.load_context(&user_id) {
+        Ok(ctx) => {
+            if !ctx.session_id.is_empty() && ctx.session_id != "default" {
+                format!("{}:::{}", user_id, ctx.session_id)
+            } else {
+                user_id.clone()
+            }
+        }
+        Err(_) => user_id.clone(),
+    };
+    match state.db.get_messages_with_token_budget(&msg_key, budget) {
         Ok((messages, total_tokens)) => {
             let msgs: Vec<serde_json::Value> = messages
                 .iter()
-                .map(|m| {
+                .enumerate()
+                .map(|(idx, m)| {
                     let mut val = serde_json::json!({
+                        "id": idx,
                         "role": m.role,
                         "content": m.content,
                         "tool_call_id": m.tool_call_id,
+                        "tool_name": m.tool_name,
                     });
                     if let Some(ref tool_calls) = m.tool_calls {
                         val["tool_calls"] = serde_json::json!(tool_calls
@@ -444,7 +458,7 @@ async fn get_messages(
                     }
                     val
                 })
-                .collect();
+                .collect::<Vec<_>>();
             Ok(Json(serde_json::json!({
                 "messages": msgs,
                 "total_tokens": total_tokens,

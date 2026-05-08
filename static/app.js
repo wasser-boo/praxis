@@ -9,6 +9,8 @@ let chatSeenIds = new Set();
 let chatLastResponse = '';
 let isAgentActive = false;
 let chatSessions = [];
+let chatBotName = 'Praxis';
+let sidebarCollapsed = false;
 
 // ═══ Auth ══════════════════════════════════════════════════════════════════════
 
@@ -74,7 +76,28 @@ function showTab(tabId) {
     document.querySelectorAll('.nav-links li').forEach(l => l.classList.remove('active'));
     document.getElementById(`tab-${tabId}`).classList.add('active');
     document.querySelector(`[data-tab="${tabId}"]`).classList.add('active');
+
+    const content = document.querySelector('.content');
+    const sidebar = document.getElementById('sidebar');
+    if (tabId === 'chat') {
+        content.classList.add('chat-expanded');
+        sidebar.classList.add('collapsed');
+        if (sidebarCollapsed) sidebar.classList.add('collapsed');
+    } else {
+        content.classList.remove('chat-expanded');
+        if (!sidebarCollapsed) sidebar.classList.remove('collapsed');
+    }
     loadTabData(tabId);
+}
+
+function toggleSidebar() {
+    sidebarCollapsed = !sidebarCollapsed;
+    const sidebar = document.getElementById('sidebar');
+    sidebar.classList.toggle('collapsed', sidebarCollapsed);
+    const isChat = document.getElementById('tab-chat').classList.contains('active');
+    if (!isChat) {
+        document.querySelector('.content').classList.toggle('chat-expanded', sidebarCollapsed);
+    }
 }
 
 async function loadTabData(tab) {
@@ -133,14 +156,28 @@ function quickStartAgent(userId) {
 
 // ═══ Chat Tab ════════════════════════════════════════════════════════════════════
 
-function initChatTab() {
-    document.getElementById('chat-user-name').textContent = chatUserId;
+async function initChatTab() {
     const input = document.getElementById('chat-input');
     input.addEventListener('input', () => {
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     });
     loadChatSessions();
+    await loadChatUserInfo();
+}
+
+async function loadChatUserInfo() {
+    try {
+        const res = await apiGet('/api/contexts/' + encodeURIComponent(chatUserId));
+        const data = await res.json();
+        if (data.context) {
+            chatBotName = data.context.settings?.agent_name || 'Praxis';
+        }
+    } catch {}
+    document.getElementById('chat-user-name-label').textContent = chatUserId;
+    const botLabel = document.getElementById('chat-bot-name');
+    if (botLabel) botLabel.textContent = chatBotName;
+    loadAvatar();
 }
 
 async function loadChatStatus() {
@@ -296,7 +333,7 @@ async function pollChatMessages() {
         const data = await res.json();
         if (data.messages && data.messages.length > 0) {
             for (const m of data.messages) {
-                const id = m.id || (m.role + ':' + (m.content || '').slice(0, 80));
+                const id = m.id !== undefined ? m.id : (m.role + ':' + (m.content || '').slice(0, 80));
                 if (!chatSeenIds.has(id)) {
                     chatSeenIds.add(id);
                     renderChatMessage(m);
@@ -307,8 +344,27 @@ async function pollChatMessages() {
     } catch {}
 }
 
+async function loadChatHistory() {
+    clearChatMessages();
+    try {
+        const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}`);
+        const data = await res.json();
+        if (data.messages && data.messages.length > 0) {
+            for (const m of data.messages) {
+                const id = m.id !== undefined ? m.id : (m.role + ':' + (m.content || '').slice(0, 80));
+                chatSeenIds.add(id);
+                renderChatMessage(m);
+            }
+        }
+    } catch (err) { console.error('History load error:', err); }
+}
+
 function renderChatMessage(m) {
-    if (m.role === 'assistant' && m.content && m.content !== 'Hello') {
+    // Skip intermediate assistant messages that have tool_calls — only show final responses
+    if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+        return; // intermediate step, not shown
+    }
+    if (m.role === 'assistant' && m.content) {
         // Check for web question
         if (m.content.includes('__WEB_QUESTION__')) {
             const parts = m.content.split('__WEB_QUESTION__');
@@ -317,11 +373,9 @@ function renderChatMessage(m) {
                 const qParts = inner.split('__');
                 const qid = qParts[0];
                 const text = qParts.slice(1).join('__');
-                // Parse suggestions from text
                 const lines = text.split('\n');
                 const suggLines = lines.filter(l => l.match(/^\d+\s/));
                 const suggestions = suggLines.map(l => l.replace(/^\d+\s/, ''));
-                // Show question text (without suggestions)
                 const questionText = lines.slice(0, lines.indexOf(suggLines[0] || '')).join('\n');
                 addChatMessage('assistant', questionText);
                 if (suggestions.length > 0) showChatOptions(qid, suggestions);
@@ -331,10 +385,15 @@ function renderChatMessage(m) {
         addChatMessage('assistant', m.content);
         stopChatTimer();
     }
-    if (m.tool_calls && m.tool_calls.length > 0) {
-        m.tool_calls.forEach(tc => {
-            addChatMessage('tool', `<span class="tool-name">${escapeHtml(tc.name)}</span>`, tc.arguments);
-        });
+    if (m.role === 'user' && m.content) {
+        addChatMessage('user', m.content);
+    }
+    if (m.role === 'tool' && m.content) {
+        const toolName = m.tool_name || 'tool';
+        addChatMessage('tool', `<span class="tool-name">${escapeHtml(toolName)}</span>`, m.content);
+    }
+    if (m.role === 'system' && m.content) {
+        addChatMessage('system', m.content);
     }
 }
 
@@ -376,24 +435,34 @@ function addChatMessage(type, content, extra = null) {
     const div = document.createElement('div');
     div.className = `chat-msg ${type}`;
 
-    // Default avatars
     const botAvatar = '/logo.svg';
     const userAvatar = `/api/avatar/${chatUserId}?t=${Date.now()}`;
+    const botName = chatBotName || 'Praxis';
+    const userName = chatUserId || 'User';
 
     if (type === 'user') {
         div.innerHTML = `<div class="msg-row">
-            <img class="msg-avatar" src="${userAvatar}" alt="" onerror="this.src='/logo.svg'">
+            <div class="msg-col">
+                <img class="msg-avatar" src="${userAvatar}" alt="" onerror="this.src='/logo.svg'">
+                <span class="msg-label">${escapeHtml(userName)}</span>
+            </div>
             <div class="msg-content">${escapeHtml(content)}</div>
         </div>`;
     } else if (type === 'assistant') {
         div.innerHTML = `<div class="msg-row">
-            <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)">
+            <div class="msg-col">
+                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)">
+                <span class="msg-label">${escapeHtml(botName)}</span>
+            </div>
             <div class="msg-content">${escapeHtml(content)}</div>
         </div>`;
     } else if (type === 'tool') {
         const args = extra || '';
         div.innerHTML = `<div class="msg-row">
-            <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-cyan)">
+            <div class="msg-col">
+                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-cyan)">
+                <span class="msg-label">Tool</span>
+            </div>
             <div class="msg-content">${content}${args ? `<div class="tool-out">${escapeHtml(args)}</div>` : ''}</div>
         </div>`;
     } else {
@@ -461,6 +530,7 @@ async function switchChatSession(id) {
         await apiPost('/api/contexts/' + encodeURIComponent(chatUserId), { session_id: id });
     } catch {}
     renderChatSessionList();
+    await loadChatHistory();
     await loadChatStatus();
 }
 
@@ -507,6 +577,32 @@ async function chatHandleFiles(files) {
         } else if (data.error) addChatMessage('feedback', data.error);
     } catch (err) { addChatMessage('feedback', 'Upload failed: ' + err.message); }
     document.getElementById('chat-file-input').value = '';
+}
+
+async function chatUploadBotAvatar() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = async () => {
+        const file = input.files[0];
+        if (!file) return;
+        const form = new FormData();
+        form.append('bot', file);
+        try {
+            const res = await fetch('/api/upload-avatar', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${authToken}` },
+                body: form
+            });
+            const data = await res.json();
+            if (data.success) {
+                const img = document.getElementById('chat-bot-avatar');
+                img.src = data.url + '?t=' + Date.now();
+            }
+            else alert(data.error || 'Upload failed');
+        } catch (err) { alert('Upload error: ' + err.message); }
+    };
+    input.click();
 }
 
 // ═══ Avatar Upload ══════════════════════════════════════════════════════════════

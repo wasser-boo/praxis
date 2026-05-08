@@ -27,7 +27,7 @@
         </div>
 
         <div id="dashboard-screen" class="screen">
-            <nav class="sidebar">
+            <nav class="sidebar" id="sidebar">
                 <div class="sidebar-header"><h2>Praxis</h2></div>
                 <ul class="nav-links">
                     <li class="active" data-tab="overview">Overview</li>
@@ -47,6 +47,7 @@
                     <button id="theme-toggle" class="btn btn-sm btn-secondary" style="width:100%;margin-bottom:0.5rem" onclick="toggleTheme()">🌙 Dark</button>
                     <button id="logout-btn" class="btn btn-secondary">Logout</button>
                 </div>
+                <button id="sidebar-toggle" class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">&#9776;</button>
             </nav>
 
             <main class="content">
@@ -66,6 +67,7 @@
                 </div>
 
                 <div id="tab-chat" class="tab">
+                    <button id="chat-sidebar-toggle" class="chat-sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">&#9776;</button>
                     <div class="chat-app">
                         <div class="chat-sidebar">
                             <div class="chat-sidebar-header">
@@ -85,12 +87,16 @@
                                 <span class="agent-badge" id="chat-agent-badge">Agent: Inactive</span>
                                 <button class="btn btn-sm btn-primary" id="chat-start-btn" onclick="chatStartAgent()">Start Agent</button>
                                 <button class="btn btn-sm btn-danger" id="chat-stop-btn" onclick="chatStopAgent()" style="display:none">Stop Agent</button>
-                                <div style="margin-left:auto;display:flex;align-items:center;gap:0.5rem">
-                                    <img id="chat-bot-avatar" class="avatar-sm" src="/logo.svg" alt="Bot" title="Bot avatar">
+                                <div style="margin-left:auto;display:flex;align-items:center;gap:0.75rem">
+                                    <div style="display:flex;flex-direction:column;align-items:center;gap:0.15rem">
+                                        <img id="chat-bot-avatar" class="avatar-sm" src="/logo.svg" alt="Bot" title="Bot avatar" onclick="chatUploadBotAvatar()" style="cursor:pointer">
+                                        <span id="chat-bot-name" class="avatar-label">Praxis</span>
+                                    </div>
                                     <span style="color:var(--text-secondary);font-size:0.85rem">&#8594;</span>
-                                    <img id="chat-user-avatar" class="avatar-sm" style="display:none" alt="User">
-                                    <span id="chat-user-name" style="color:var(--text-secondary);font-size:0.85rem"></span>
-                                    <button class="btn btn-sm btn-secondary" onclick="chatUploadAvatar()" title="Upload Avatar">&#128247;</button>
+                                    <div style="display:flex;flex-direction:column;align-items:center;gap:0.15rem">
+                                        <img id="chat-user-avatar" class="avatar-sm" style="display:none" alt="User" onclick="chatUploadAvatar()" style="cursor:pointer">
+                                        <span id="chat-user-name-label" class="avatar-label">User</span>
+                                    </div>
                                 </div>
                             </div>
                             <div class="chat-container">

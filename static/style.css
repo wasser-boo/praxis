@@ -13,7 +13,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
 .btn-danger { background: var(--error); color: white; } .btn-danger:hover { opacity: 0.9; }
 .error { color: var(--error); margin-top: 1rem; text-align: center; } .hidden { display: none; }
 #dashboard-screen { min-height: 100vh; }
-.sidebar { width: 250px; background: var(--bg-secondary); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; }
+.sidebar { width: 250px; background: var(--bg-secondary); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; transition: width 0.3s, transform 0.3s; }
+.sidebar.collapsed { width: 48px; overflow: hidden; }
+.sidebar.collapsed .sidebar-header h2,
+.sidebar.collapsed .nav-links li,
+.sidebar.collapsed .sidebar-footer { display: none; }
+.sidebar.collapsed .sidebar-toggle { position: absolute; top: 0.5rem; right: 0.5rem; left: auto; }
+.sidebar-toggle { position: absolute; top: 0.5rem; right: -1.2rem; width: 28px; height: 28px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; color: var(--text-secondary); font-size: 1rem; cursor: pointer; z-index: 20; display: flex; align-items: center; justify-content: center; }
+.sidebar-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
+.content { margin-left: 250px; padding: 2rem; min-height: 100vh; transition: margin-left 0.3s; }
+.content.chat-expanded { margin-left: 0; padding: 0; }
+.content.chat-expanded .chat-app { height: 100vh; }
 .sidebar-header { padding: 1.5rem; border-bottom: 1px solid var(--border); }
 .sidebar-header h2 { background: var(--accent-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; font-size: 1.5rem; }
 .nav-links { list-style: none; padding: 1rem 0; flex: 1; }
@@ -64,8 +74,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
 .cl-badge { font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.6rem; border-radius: 4px; background: rgba(124,77,255,0.15); color: var(--accent-purple); }
 .cl-badge.template { background: rgba(0,217,255,0.1); color: var(--accent-cyan); }
 .cl-badge.vars { background: rgba(0,255,136,0.1); color: var(--success); }
-.avatar-sm { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; border: 2px solid var(--accent-cyan); background: var(--bg-card); }
+.avatar-sm { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; border: 2px solid var(--accent-cyan); background: var(--bg-card); }
 #chat-bot-avatar { border-color: var(--accent-purple); background: var(--bg-secondary); padding: 2px; }
+.avatar-label { font-size: 0.65rem; color: var(--text-secondary); text-align: center; margin-top: 2px; max-width: 48px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .chat-container { display: flex; flex-direction: column; flex: 1; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; min-height: 0; }
 .chat-messages { flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: 0.5rem; }
@@ -78,7 +89,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
 .chat-msg.system { align-self: center; background: rgba(0,255,136,0.08); border: 1px solid rgba(0,255,136,0.2); color: var(--success); font-size: 0.75rem; padding: 0.3rem 0.7rem; border-radius: 4px; }
 .chat-msg.tool { align-self: flex-start; background: rgba(0,217,255,0.08); border-left: 3px solid var(--accent-cyan); border-radius: 0 8px 8px 0; font-size: 0.8rem; font-family: monospace; max-width: 95%; }
 .chat-msg .tool-name { color: var(--accent-cyan); font-weight: 700; } .chat-msg .tool-out { color: var(--text-secondary); font-size: 0.75rem; margin-top: 0.3rem; white-space: pre-wrap; max-height: 120px; overflow-y: auto; }
-.chat-msg .msg-avatar { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; border: 2px solid var(--accent-cyan); margin-right: 0.5rem; flex-shrink: 0; }
+.chat-msg .msg-avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; border: 2px solid var(--accent-cyan); margin-right: 0.5rem; flex-shrink: 0; }
+.chat-msg .msg-col { display: flex; flex-direction: column; align-items: center; gap: 0.15rem; }
+.chat-msg .msg-label { font-size: 0.65rem; color: var(--text-secondary); max-width: 48px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
 .chat-msg.user .msg-avatar { border-color: var(--accent-cyan); }
 .chat-msg.assistant .msg-avatar { border-color: var(--accent-purple); }
 .chat-msg .msg-row { display: flex; align-items: flex-start; gap: 0.5rem; }
@@ -141,3 +154,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
 [data-theme="light"] .chat-msg.feedback { background: rgba(255,170,0,0.08); }
 [data-theme="light"] .chat-msg.system { background: rgba(0,255,136,0.06); }
 [data-theme="light"] .chat-msg.tool { background: rgba(0,217,255,0.06); }
+
+/* Chat sidebar toggle (hamburger when main sidebar hidden) */
+.chat-sidebar-toggle { position: fixed; top: 0.5rem; left: 0.5rem; z-index: 30; width: 32px; height: 32px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; color: var(--text-secondary); font-size: 1.1rem; cursor: pointer; display: none; align-items: center; justify-content: center; }
+.chat-sidebar-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
+.content.chat-expanded .chat-sidebar-toggle { display: flex; }
