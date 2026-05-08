@@ -98,7 +98,7 @@ impl Config {
                 .unwrap_or(1337),
             dashboard_tls: env::var("DASHBOARD_TLS")
                 .map(|v| v == "true" || v == "1")
-                .unwrap_or(true),
+                .unwrap_or(false),
             dashboard_admin_password: env::var("DASHBOARD_ADMIN_PASSWORD").unwrap_or_default(),
             data_dir: env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),

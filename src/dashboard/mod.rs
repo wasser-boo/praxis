@@ -1,19 +1,22 @@
 pub mod routes;
 
+use std::net::IpAddr;
+use std::path::PathBuf;
+
 pub struct DashboardServer {
     port: u16,
     tls: bool,
     db: crate::db::Database,
+    data_dir: String,
 }
 
 impl DashboardServer {
-    pub fn new(port: u16, tls: bool, db: crate::db::Database) -> Self {
-        Self { port, tls, db }
+    pub fn new(port: u16, tls: bool, db: crate::db::Database, data_dir: &str) -> Self {
+        Self { port, tls, db, data_dir: data_dir.to_string() }
     }
 
     pub async fn start(&self) -> anyhow::Result<()> {
         let app = routes::routes(self.db.clone());
-
         let addr = format!("0.0.0.0:{}", self.port);
 
         if self.tls {
@@ -22,17 +25,18 @@ impl DashboardServer {
             )
             .expect("Failed to install TLS crypto provider");
 
-            let cert = generate_self_signed_cert()?;
-            let config = axum_server::tls_rustls::RustlsConfig::from_der(
-                vec![cert.cert_der.clone()],
-                cert.key_der.clone(),
-            )
-            .await?;
+            let cert_path = ensure_cert(&self.data_dir)?;
+            tracing::info!("Dashboard starting on https://{}", addr);
+            tracing::info!("TLS cert: {}", cert_path.display());
 
-            let proto = if self.port == 443 { "https" } else { "https" };
-            tracing::info!("Dashboard starting on {}://{}", proto, addr);
+            let tls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(
+                    cert_path.clone(),
+                    key_path(&self.data_dir),
+                )
+                .await?;
 
-            axum_server::bind_rustls(addr.parse()?, config)
+            axum_server::bind_rustls(addr.parse()?, tls_config)
                 .serve(app.into_make_service())
                 .await?;
         } else {
@@ -45,30 +49,64 @@ impl DashboardServer {
     }
 }
 
-struct SelfSignedCert {
-    cert_der: Vec<u8>,
-    key_der: Vec<u8>,
+fn key_path(data_dir: &str) -> PathBuf {
+    PathBuf::from(data_dir).join("tls").join("key.pem")
 }
 
-fn generate_self_signed_cert() -> anyhow::Result<SelfSignedCert> {
+fn cert_path(data_dir: &str) -> PathBuf {
+    PathBuf::from(data_dir).join("tls").join("cert.pem")
+}
+
+fn ensure_cert(data_dir: &str) -> anyhow::Result<PathBuf> {
+    let cp = cert_path(data_dir);
+    let kp = key_path(data_dir);
+
+    if cp.exists() && kp.exists() {
+        tracing::info!("Loaded existing TLS cert from {}", cp.display());
+        return Ok(cp);
+    }
+
+    let tls_dir = cp.parent().unwrap();
+    std::fs::create_dir_all(tls_dir)?;
+
+    let mut san_names: Vec<String> = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+
+    if let Ok(hostname) = hostname::get() {
+        if let Some(name) = hostname.to_str() {
+            san_names.push(name.to_string());
+            san_names.push(format!("{}.local", name));
+        }
+    }
+
+    if let Some(local_ip) = detect_local_ip() {
+        san_names.push(local_ip.to_string());
+    }
+
     let key = rcgen::KeyPair::generate()?;
-    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
+    let mut params = rcgen::CertificateParams::new(san_names)?;
     params.distinguished_name = rcgen::DistinguishedName::new();
-    params.distinguished_name.push(
-        rcgen::DnType::OrganizationName,
-        "Praxis Dashboard",
-    );
-    params.distinguished_name.push(
-        rcgen::DnType::CommonName,
-        "Praxis Dashboard",
-    );
+    params.distinguished_name.push(rcgen::DnType::OrganizationName, "Praxis Dashboard");
+    params.distinguished_name.push(rcgen::DnType::CommonName, "Praxis Dashboard");
 
     let cert = params.self_signed(&key)?;
 
-    Ok(SelfSignedCert {
-        cert_der: cert.der().to_vec(),
-        key_der: key.serialize_der(),
-    })
+    std::fs::write(&cp, cert.pem())?;
+    std::fs::write(&kp, key.serialize_pem())?;
+
+    tracing::info!("Generated new TLS cert at {}", cp.display());
+
+    Ok(cp)
+}
+
+fn detect_local_ip() -> Option<IpAddr> {
+    use std::net::UdpSocket;
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    socket.local_addr().ok().map(|addr| addr.ip())
 }
 
 #[cfg(test)]
@@ -79,7 +117,7 @@ mod dashboard_tests {
     fn test_dashboard_creation() {
         let dir = tempfile::TempDir::new().unwrap();
         let db = crate::db::Database::new(dir.path()).unwrap();
-        let server = DashboardServer::new(1337, false, db);
+        let server = DashboardServer::new(1337, false, db, "./data");
         assert_eq!(server.port, 1337);
     }
 }

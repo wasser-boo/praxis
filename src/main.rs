@@ -465,7 +465,7 @@ async fn run_services(
         let dashboard_db = db.clone();
         let dashboard_port = config.dashboard_port;
         tokio::spawn(async move {
-            let server = praxis::dashboard::DashboardServer::new(dashboard_port, config.dashboard_tls, dashboard_db);
+            let server = praxis::dashboard::DashboardServer::new(dashboard_port, config.dashboard_tls, dashboard_db, &config.data_dir);
             if let Err(e) = server.start().await {
                 tracing::error!("Dashboard error: {}", e);
             }
