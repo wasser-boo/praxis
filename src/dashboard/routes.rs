@@ -604,7 +604,7 @@ async fn update_template(
         Ok(rendered) => Ok(Json(TemplateSaveResult {
             success: true,
             error: None,
-            rendered_preview: Some(rendered.chars().take(2000).collect()),
+            rendered_preview: Some(rendered),
         })),
         Err(e) => Ok(Json(TemplateSaveResult {
             success: true,

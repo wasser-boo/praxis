@@ -975,7 +975,6 @@ async fn execute_tool_call(
             if channel_id.is_empty() {
                 return "Error: No channel_id provided and no originating channel found. Please specify a channel_id.".to_string();
             }
-            // Get timeout from args, then context, then default to 120
             let default_timeout = ctx_data
                 .as_ref()
                 .and_then(|c| c.get("question_timeout_secs"))
@@ -1000,7 +999,6 @@ async fn execute_tool_call(
             }
             let mut questions: Vec<(String, String, Vec<String>)> = Vec::new();
             for (i, q) in arr.iter().enumerate() {
-                // Check for invalid 'options' field
                 if q.get("options").is_some() {
                     return format!("Error: Question {}: use 'suggestions' with plain strings, not 'options' with objects. Example: \"suggestions\": [\"yes\", \"no\", \"maybe\"]", i + 1);
                 }
@@ -1033,6 +1031,46 @@ async fn execute_tool_call(
             {
                 Ok(result) => result,
                 Err(e) => format!("Error: {}", e),
+            }
+        }
+        "update_template" => {
+            let name = args["name"].as_str().unwrap_or("");
+            let content = args["content"].as_str().unwrap_or("");
+            if name.is_empty() || content.is_empty() {
+                return "Error: name and content are required.".to_string();
+            }
+            let file_path = format!("templates/{}.poml", name);
+            if let Some(parent) = std::path::Path::new(&file_path).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let ctx = db.load_context(user_id).unwrap_or_default();
+            let test_context = serde_json::json!({
+                "user_id": user_id,
+                "mode": ctx.mode,
+                "turn": 0,
+                "user_message": "Validation test",
+                "user_prompt": "Validation test",
+                "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            });
+            if let Err(e) = std::fs::write(&file_path, content) {
+                return format!("Error writing template file: {}", e);
+            }
+            match crate::gateway::poml::render(&file_path, &test_context).await {
+                Ok(rendered) if !rendered.trim().is_empty() => {
+                    let _ = db.save_template(name, content, None, false);
+                    let preview = if rendered.len() > 500 {
+                        format!("{}...", &rendered[..500])
+                    } else {
+                        rendered
+                    };
+                    format!("Template '{}' updated and validated. POML renders successfully. Preview: {}", name, preview)
+                }
+                Ok(_) => {
+                    format!("Template '{}' saved but POML render returned empty output.", name)
+                }
+                Err(e) => {
+                    format!("POML validation failed: {}. Template saved but may not render correctly.", e)
+                }
             }
         }
         _ => match plugins

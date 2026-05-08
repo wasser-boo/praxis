@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Global registry of active agent loops and their user input channels
-static ACTIVE_LOOPS: once_cell::sync::Lazy<Arc<RwLock<HashMap<String, UserInputChannel>>>> =
+/// Global registry of active agent loops and their user input senders
+static ACTIVE_LOOPS: once_cell::sync::Lazy<Arc<RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 /// Global registry of stop signals for agent loops
@@ -17,7 +17,7 @@ static STOP_SIGNALS: once_cell::sync::Lazy<Arc<RwLock<HashMap<String, bool>>>> =
 /// Get a sender for injecting user input into an active agent loop
 pub async fn get_user_input_sender(user_id: &str) -> Option<tokio::sync::mpsc::UnboundedSender<String>> {
     let loops = ACTIVE_LOOPS.read().await;
-    loops.get(user_id).map(|ch| ch.sender())
+    loops.get(user_id).cloned()
 }
 
 /// Stop an active agent loop
@@ -25,7 +25,6 @@ pub async fn stop_agent_loop(user_id: &str) {
     let mut signals = STOP_SIGNALS.write().await;
     signals.insert(user_id.to_string(), true);
     
-    // Also remove the input channel to unblock any waiting
     let mut loops = ACTIVE_LOOPS.write().await;
     loops.remove(user_id);
 }
@@ -36,10 +35,10 @@ async fn should_stop(user_id: &str) -> bool {
     signals.get(user_id).copied().unwrap_or(false)
 }
 
-/// Register an active agent loop
-async fn register_active_loop(user_id: &str, channel: UserInputChannel) {
+/// Register an active agent loop sender
+async fn register_active_loop(user_id: &str, tx: tokio::sync::mpsc::UnboundedSender<String>) {
     let mut loops = ACTIVE_LOOPS.write().await;
-    loops.insert(user_id.to_string(), channel);
+    loops.insert(user_id.to_string(), tx);
 }
 
 /// Unregister an active agent loop
@@ -97,9 +96,19 @@ impl UserInputChannel {
         self.tx.clone()
     }
 
-    /// Try to receive a user message without blocking
     pub fn try_recv(&mut self) -> Option<String> {
         self.rx.try_recv().ok()
+    }
+
+    pub fn drain_all(&mut self) -> Vec<String> {
+        let mut msgs = Vec::new();
+        if let Some(first) = self.try_recv() {
+            msgs.push(first);
+            while let Some(next) = self.try_recv() {
+                msgs.push(next);
+            }
+        }
+        msgs
     }
 }
 
@@ -116,10 +125,9 @@ pub async fn run_agent_loop(
     let mut last_tag_execution = None;
     let mut user_message = user_message_input.to_string();
 
-    // Create user input channel and register it globally
+    // Create user input channel and register sender globally
     let mut user_input = UserInputChannel::new();
-    let user_input_tx = user_input.sender();
-    register_active_loop(user_id, UserInputChannel::new()).await;
+    register_active_loop(user_id, user_input.sender()).await;
 
     // Load context
     let mut ctx = state.db.load_context(user_id)?;
@@ -294,30 +302,20 @@ pub async fn run_agent_loop(
             break;
         }
 
-        // Check for user input during execution
-        let mut last_response_mode = false;
-        if let Some(user_msg) = user_input.try_recv() {
-            tracing::info!(user_id = %user_id, turn = turn, "Received user input during agent loop: {}", user_msg);
-            
-            // Check for special signals
-            if user_msg == "__LAST_RESPONSE__" {
-                last_response_mode = true;
-                tracing::info!(user_id = %user_id, "Last response mode activated");
-            } else {
-                // Store user message in history
+        // Drain injected user messages that arrived during previous turn
+        let injected = user_input.drain_all();
+        if !injected.is_empty() {
+            tracing::info!(user_id = %user_id, injected_count = injected.len(), "Injecting {} user messages into conversation", injected.len());
+            for msg in &injected {
                 state.db.add_message(
                     user_id,
-                    &crate::db::messages::Message::user(user_msg.clone()),
+                    &crate::db::messages::Message::user(msg.clone()),
                 )?;
-                
-                // Reset turn counter to allow more turns
-                turn = 0;
-                
-                // Update user_message for subsequent turns
-                user_message = user_msg;
-                
-                tracing::info!(user_id = %user_id, "Updated user_message to: {}", user_message);
             }
+            // Use last injected message, reset turn for more turns
+            user_message = injected.last().cloned().unwrap_or(user_message);
+            turn = 0;
+            continue;
         }
 
         if turn >= config.max_turns {
@@ -980,11 +978,20 @@ pub async fn run_agent_loop(
             break;
         }
 
-        // If in last response mode, mark as completed after this response
-        if last_response_mode {
-            tracing::info!(user_id = %user_id, "Last response mode: completing after this response");
-            completed = true;
-            break;
+        // Drain all injected user messages and add them for the next turn
+        let injected = user_input.drain_all();
+        if !injected.is_empty() {
+            tracing::info!(user_id = %user_id, injected_count = injected.len(), "Injecting {} user messages into conversation", injected.len());
+            for msg in &injected {
+                state.db.add_message(
+                    user_id,
+                    &crate::db::messages::Message::user(msg.clone()),
+                )?;
+            }
+            // Use last injected message as current user_message, reset turn for more turns
+            user_message = injected.last().cloned().unwrap_or(user_message);
+            turn = 0;
+            continue;
         }
 
         // If no tool calls and not completed, we're done with this message
@@ -1814,6 +1821,49 @@ async fn execute_tool_call(
                 }
                 Ok(None) => format!("Error: Cron job {} not found.", job_id),
                 Err(e) => format!("Error fetching cron job: {}", e),
+            }
+        }
+        "update_template" => {
+            let name = args["name"].as_str().unwrap_or("");
+            let content = args["content"].as_str().unwrap_or("");
+            if name.is_empty() || content.is_empty() {
+                return "Error: name and content are required.".to_string();
+            }
+            let file_path = format!("templates/{}.poml", name);
+            if let Some(parent) = std::path::Path::new(&file_path).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            // Validate by rendering with POML
+            let ctx = db.load_context(user_id).unwrap_or_default();
+            let test_context = serde_json::json!({
+                "user_id": user_id,
+                "mode": ctx.mode,
+                "turn": 0,
+                "user_message": "Validation test",
+                "user_prompt": "Validation test",
+                "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            });
+            // Write temp file first for validation
+            if let Err(e) = std::fs::write(&file_path, content) {
+                return format!("Error writing template file: {}", e);
+            }
+            match crate::gateway::poml::render(&file_path, &test_context).await {
+                Ok(rendered) if !rendered.trim().is_empty() => {
+                    // POML compiled successfully - persist to DB
+                    let _ = db.save_template(name, content, None, false);
+                    let preview = if rendered.len() > 500 {
+                        format!("{}...", &rendered[..500])
+                    } else {
+                        rendered
+                    };
+                    format!("Template '{}' updated and validated. POML renders successfully. Preview: {}", name, preview)
+                }
+                Ok(_) => {
+                    format!("Template '{}' saved but POML render returned empty output. Template may be invalid.", name)
+                }
+                Err(e) => {
+                    format!("POML validation failed: {}. Template saved to disk but may not render correctly.", e)
+                }
             }
         }
         _ => {

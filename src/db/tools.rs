@@ -555,6 +555,12 @@ fn get_default_tools() -> Vec<Tool> {
             parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID. If omitted, sends to the channel where the request originated."},"questions":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string","description":"Short key for answer, e.g. 'color', 'choice'"},"question":{"type":"string","description":"The question text to ask"},"suggestions":{"type":"array","items":{"type":"string"},"description":"Quick reply options as plain strings, e.g. [\"red\", \"blue\", \"green\"]"}},"required":["label","question"]},"description":"Array of questions to ask"},"timeout_secs":{"type":"integer","default":120,"description":"Timeout per question in seconds"}},"required":["questions"]}),
             is_enabled: true,
         },
+        Tool {
+            name: "update_template".into(),
+            description: Some("Update or create a POML template file. The template is validated by rendering it with POML before saving. Templates control system prompts, roles, and task behaviors.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"Template name (use / for subdirectories, e.g. 'tasks/custom'). .poml extension is added automatically."},"content":{"type":"string","description":"Full POML template content as XML"}},"required":["name","content"]}),
+            is_enabled: true,
+        },
     ]
 }
 
@@ -592,7 +598,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 66);
+        assert_eq!(tools.len(), 67);
     }
 
     #[test]
@@ -601,7 +607,7 @@ mod tool_tests {
         init_default_tools(&db).unwrap();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 66);
+        assert_eq!(tools.len(), 67);
     }
 
     #[test]
@@ -609,11 +615,11 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let enabled = list_enabled(&db).unwrap();
-        assert_eq!(enabled.len(), 28);
+        assert_eq!(enabled.len(), 29);
 
         disable(&db, "execute_terminal").unwrap();
         let enabled = list_enabled(&db).unwrap();
-        assert_eq!(enabled.len(), 17);
+        assert_eq!(enabled.len(), 28);
     }
 
     #[test]
@@ -703,7 +709,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let defs = to_tool_definitions(&db).unwrap();
-        assert_eq!(defs.len(), 28);
+        assert_eq!(defs.len(), 29);
         assert_eq!(defs[0].function.name, "execute_terminal");
     }
 
@@ -715,7 +721,7 @@ mod tool_tests {
         disable(&db, "write_file").unwrap();
 
         let defs = to_tool_definitions(&db).unwrap();
-        assert_eq!(defs.len(), 26);
+        assert_eq!(defs.len(), 27);
         assert!(defs.iter().all(|d| d.function.name != "execute_terminal"));
     }
 }
