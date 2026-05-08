@@ -40,6 +40,7 @@ pub struct Config {
     pub gateway_port: u16,
     pub gateway_api_key: String,
     pub dashboard_port: u16,
+    pub dashboard_tls: bool,
     pub dashboard_admin_password: String,
     pub data_dir: String,
     pub rust_log: String,
@@ -95,6 +96,9 @@ impl Config {
                 .unwrap_or_else(|_| "1337".to_string())
                 .parse()
                 .unwrap_or(1337),
+            dashboard_tls: env::var("DASHBOARD_TLS")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(true),
             dashboard_admin_password: env::var("DASHBOARD_ADMIN_PASSWORD").unwrap_or_default(),
             data_dir: env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),

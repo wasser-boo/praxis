@@ -1276,7 +1276,8 @@ async fn vnc_viewer_page() -> axum::response::Html<&'static str> {
   const status = document.getElementById('status');
 
   function connectRFB() {
-    const wsUrl = `ws://${location.host}/websockify`;
+    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProto}//${location.host}/websockify`;
     const rfb = new RFB(screen, wsUrl, { shared: true, credentials: {} });
     rfb.scaleViewport = true;
     rfb.resizeSession = false;
