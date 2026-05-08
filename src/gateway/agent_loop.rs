@@ -718,10 +718,13 @@ pub async fn run_agent_loop(
                 // Log ALL tool calls to vm_activity_log for dashboard visibility
                 {
                     let conn = state.db.conn();
+                    let vm_name = std::env::var("VM_MODE")
+                        .map(|m| if m == "vm" { "praxis-vm".to_string() } else { "host".to_string() })
+                        .unwrap_or_else(|_| "host".to_string());
                     let _ = conn.execute(
                         "INSERT INTO vm_activity_log (vm_id, action, input, output) VALUES (?1, ?2, ?3, ?4)",
                         rusqlite::params![
-                            "praxis-vm",
+                            vm_name,
                             &tc.function.name,
                             &tc.function.arguments,
                             if result.len() > 2000 { &result[..2000] } else { &result }
@@ -1327,10 +1330,9 @@ async fn execute_tool_call(
                 .unwrap_or(false);
             if vm_enabled && vm_mode == "vm" {
                 let path = args["path"].as_str().unwrap_or("");
-                let cmd = format!("cat {}", path);
                 match crate::tools::vm_tools::dispatch_vm_tool(
-                    "vm_shell",
-                    &serde_json::json!({"command": cmd}),
+                    "vm_file_read",
+                    &serde_json::json!({"path": path}),
                 )
                 .await
                 {

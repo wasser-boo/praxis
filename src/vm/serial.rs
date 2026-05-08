@@ -70,8 +70,10 @@ impl SerialShell {
         let marker_start = "<<<PRAXIS_START>>>";
         let marker_end = "<<<PRAXIS_END>>>";
         let marker_exit = "<<<PRAXIS_EXIT>>>";
+        // Wrap command in { ...; } to prevent redirections (>>, >, etc.)
+        // from consuming the marker echoes.
         let marker_cmd = format!(
-            "echo '{}'; {}; echo '{}:{}'; echo '{}'",
+            "echo '{}'; {{ {}; }}; echo '{}:{}'; echo '{}'",
             marker_start, command, marker_exit, "$?", marker_end
         );
 

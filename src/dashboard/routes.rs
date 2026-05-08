@@ -1,4 +1,4 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::IntoResponse;
@@ -213,6 +213,11 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/vm/activity", axum::routing::get(vm_activity))
         .route("/vm/vnc", axum::routing::get(vm_vnc_viewer))
         .route("/agent/input", axum::routing::post(send_agent_input))
+        .route("/agent/begin", axum::routing::post(begin_agent))
+        .route("/agent/status/:user_id", axum::routing::get(get_agent_status))
+        .route("/agent/stop/:user_id", axum::routing::post(stop_agent))
+        .route("/cl/:user_id", axum::routing::get(get_cl_info))
+        .route("/chat/send", axum::routing::post(chat_query))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             dashboard_auth_middleware,
@@ -229,6 +234,10 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/api/vm/vnc/ws", axum::routing::get(vnc_ws_proxy))
         .route("/websockify", axum::routing::get(vnc_ws_proxy_noauth))
         .route("/vnc", axum::routing::get(vnc_viewer_page))
+        .route("/api/avatar/:name", axum::routing::get(get_avatar))
+        .route("/api/files/:name", axum::routing::get(get_chat_file))
+        .route("/api/upload-avatar", axum::routing::post(upload_avatar))
+        .route("/api/upload-file", axum::routing::post(upload_chat_file))
         .nest_service("/static", static_service)
         .nest("/api", protected)
         .with_state(state.clone())
@@ -1203,19 +1212,22 @@ async fn vm_cd(Json(req): Json<VmCdRequest>) -> Result<Json<serde_json::Value>, 
 
 async fn vm_activity(
     State(state): State<Arc<DashboardState>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let conn = state.db.conn();
+    let limit = params.get("limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(50);
     let mut stmt = conn
-        .prepare("SELECT action, input, output, created_at FROM vm_activity_log ORDER BY id DESC LIMIT 50")
+        .prepare("SELECT vm_id, action, input, output, created_at FROM vm_activity_log ORDER BY id DESC LIMIT ?1")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let activities: Vec<serde_json::Value> = stmt
-        .query_map([], |row| {
+        .query_map([limit], |row| {
             Ok(serde_json::json!({
-                "action": row.get::<_, String>(0)?,
-                "input": row.get::<_, Option<String>>(1)?,
-                "output": row.get::<_, Option<String>>(2)?,
-                "created_at": row.get::<_, Option<String>>(3)?,
+                "vm_id": row.get::<_, String>(0)?,
+                "action": row.get::<_, String>(1)?,
+                "input": row.get::<_, Option<String>>(2)?,
+                "output": row.get::<_, Option<String>>(3)?,
+                "created_at": row.get::<_, Option<String>>(4)?,
             }))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -1229,26 +1241,216 @@ async fn vm_activity(
 struct AgentInputRequest {
     user_id: String,
     message: String,
+    attachments: Option<Vec<String>>,
 }
 
 async fn send_agent_input(
     Json(req): Json<AgentInputRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let mut full_message = req.message.clone();
+    if let Some(ref atts) = req.attachments {
+        for a in atts {
+            full_message.push_str(&format!("\n[Attachment: {}]", a));
+        }
+    }
     match crate::gateway::agent_loop::get_user_input_sender(&req.user_id).await {
         Some(sender) => {
-            if let Err(e) = sender.send(req.message.clone()) {
+            if let Err(e) = sender.send(full_message) {
                 return Ok(Json(serde_json::json!({
                     "error": format!("Failed to send message: {}", e)
                 })));
             }
             Ok(Json(serde_json::json!({
                 "success": true,
-                "message": format!("Message sent to agent loop: {}", req.message)
+                "message": "Message sent"
             })))
         }
         None => Ok(Json(serde_json::json!({
             "error": "No active agent loop found for this user"
         }))),
+    }
+}
+
+async fn begin_agent(
+    State(state): State<Arc<DashboardState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let user_id = req["user_id"].as_str().unwrap_or("default").to_string();
+    let message = req["message"].as_str().unwrap_or("").to_string();
+    let gateway_key = state.gateway_api_key.clone();
+
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        let url = "http://127.0.0.1:3537/v1/chat";
+        let body = serde_json::json!({
+            "user_id": user_id,
+            "message": message,
+        });
+        if let Err(e) = client.post(url)
+            .header("x-api-key", &gateway_key)
+            .json(&body)
+            .send()
+            .await
+        {
+            tracing::error!("Failed to dispatch agent via gateway: {}", e);
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "Agent dispatched to gateway"
+    })))
+}
+
+async fn get_agent_status(
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let has_loop = crate::gateway::agent_loop::get_user_input_sender(&user_id).await.is_some();
+    Ok(Json(serde_json::json!({ "active": has_loop })))
+}
+
+async fn stop_agent(
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    crate::gateway::agent_loop::stop_agent_loop(&user_id).await;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+async fn upload_avatar(
+    State(_state): State<Arc<DashboardState>>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+    std::fs::create_dir_all(format!("{}/avatars", data_dir)).ok();
+
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("unknown").to_string();
+        let mut data = Vec::new();
+        while let Ok(Some(chunk)) = field.chunk().await {
+            data.extend_from_slice(&chunk);
+        }
+        if data.len() > 2_000_000 {
+            return Ok(Json(serde_json::json!({"error": "File too large (max 2MB)"})));
+        }
+        let ext = if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) { "png" }
+            else if data.starts_with(&[0xFF, 0xD8, 0xFF]) { "jpg" }
+            else if data.starts_with(b"GIF8") { "gif" }
+            else if data.starts_with(b"RIFF") && data.len() > 8 && &data[8..12] == b"WEBP" { "webp" }
+            else { return Ok(Json(serde_json::json!({"error": "Unsupported format. Use PNG, JPG, GIF, or WebP."}))); };
+
+        let path = format!("{}/avatars/{}.{}", data_dir, name, ext);
+        std::fs::write(&path, &data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Json(serde_json::json!({"success": true, "url": format!("/api/avatar/{}", name)})));
+    }
+    Ok(Json(serde_json::json!({"error": "No file uploaded"})))
+}
+
+async fn get_avatar(
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+    for ext in &["png", "jpg", "jpeg", "gif", "webp"] {
+        let path = format!("{}/avatars/{}.{}", data_dir, name, ext);
+        if let Ok(data) = std::fs::read(&path) {
+            let ct = match *ext {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                _ => "application/octet-stream",
+            };
+            return Ok(([(axum::http::header::CONTENT_TYPE, ct)], data));
+        }
+    }
+    Err(StatusCode::NOT_FOUND)
+}
+
+async fn upload_chat_file(
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+    std::fs::create_dir_all(format!("{}/uploads", data_dir)).ok();
+    let mut files = Vec::new();
+
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let filename = field.file_name().unwrap_or("file").to_string();
+        let mut data = Vec::new();
+        while let Ok(Some(chunk)) = field.chunk().await {
+            data.extend_from_slice(&chunk);
+        }
+        if data.len() > 50_000_000 {
+            return Ok(Json(serde_json::json!({"error": "File too large (max 50MB)"})));
+        }
+        let path = format!("{}/uploads/{}", data_dir, filename);
+        std::fs::write(&path, &data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        files.push(format!("/api/files/{}", filename));
+    }
+    if files.is_empty() {
+        return Ok(Json(serde_json::json!({"error": "No files found"})));
+    }
+    Ok(Json(serde_json::json!({"success": true, "files": files})))
+}
+
+async fn get_chat_file(
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+    let path = format!("{}/uploads/{}", data_dir, name);
+    match std::fs::read(&path) {
+        Ok(data) => Ok((
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            data,
+        )),
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+async fn chat_query(
+    State(_state): State<Arc<DashboardState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let user_id = req["user_id"].as_str().unwrap_or("default");
+    let message = req["message"].as_str().unwrap_or("");
+
+    if let Some(sender) = crate::gateway::agent_loop::get_user_input_sender(user_id).await {
+        let mut full = message.to_string();
+        if let Some(atts) = req["attachments"].as_array() {
+            for a in atts {
+                if let Some(s) = a.as_str() { full.push_str(&format!("\n[Attachment: {}]", s)); }
+            }
+        }
+        sender.send(full).ok();
+        Ok(Json(serde_json::json!({"success": true})))
+    } else {
+        Ok(Json(serde_json::json!({"error": "No active agent loop"})))
+    }
+}
+
+async fn get_cl_info(
+    State(state): State<Arc<DashboardState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let conn = state.db.conn();
+    let ctx = conn.query_row(
+        "SELECT cl_file, active_state, active_templates FROM contexts WHERE user_id = ?1",
+        [&user_id],
+        |row| Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        )),
+    ).ok();
+    if let Some((cl_file, active_state, active_templates)) = ctx {
+        let templates: Vec<String> = active_templates
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Ok(Json(serde_json::json!({
+            "cl_file": cl_file,
+            "active_state": active_state,
+            "active_templates": templates,
+        })))
+    } else {
+        Ok(Json(serde_json::json!({"cl_file": null, "active_state": null, "active_templates": []})))
     }
 }
 

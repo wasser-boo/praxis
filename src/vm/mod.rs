@@ -720,13 +720,8 @@ impl VmManager {
         Ok(format!("VM '{}' rebooted", name))
     }
 
-    /// Execute a shell command in a VM and return the output
-    pub async fn shell_exec(
-        &self,
-        name: &str,
-        command: &str,
-        timeout_secs: u64,
-    ) -> anyhow::Result<String> {
+    /// Write file content directly inside the VM using guest-agent (qemu-ga)
+    pub async fn write_file(&self, name: &str, path: &str, content: &str) -> anyhow::Result<String> {
         let mut instances = self.instances.write().await;
         let instance = instances
             .get_mut(name)
@@ -736,12 +731,120 @@ impl VmManager {
             anyhow::bail!("VM '{}' is not running", name);
         }
 
-        // Always use serial for command execution (returns output)
-        if let Some(ref mut serial) = instance.serial {
-            return serial.execute(command, timeout_secs).await;
+        // Try guest-agent direct file write (fastest, most reliable)
+        if let Some(ref mut qmp) = instance.qmp {
+            match qmp.guest_file_write_all(path, content).await {
+                Ok(_) => return Ok(format!("File written via guest-agent: {} ({} bytes)", path, content.len())),
+                Err(e) => tracing::debug!("guest-agent write_file failed for ({}): {} - falling back", path, e),
+            }
         }
 
-        // Fallback: if no serial, try to reconnect
+        // Fallback: 9p shared folder + serial cp (existing method)
+        let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let transfer_path = format!("{}/shared/{}", data_dir, filename);
+        std::fs::write(&transfer_path, content)
+            .map_err(|e| anyhow::anyhow!("Failed to write shared folder copy: {}", e))?;
+
+        let copy_result = self.shell_exec_with_instances(
+            &mut *instances,
+            name,
+            &format!("cp /mnt/shared/{} {}", filename, path),
+            10,
+        ).await;
+        match copy_result {
+            Ok(_) => Ok(format!("File written via shared folder: {} ({} bytes)", path, content.len())),
+            Err(e) => anyhow::bail!(
+                "File written to shared folder but copy in VM failed: {}. File available at /mnt/shared/{}",
+                e,
+                filename
+            ),
+        }
+    }
+
+    /// Read file content from VM using guest-agent
+    pub async fn read_file(&self, name: &str, path: &str) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            anyhow::bail!("VM '{}' is not running", name);
+        }
+
+        if let Some(ref mut qmp) = instance.qmp {
+            match qmp.guest_file_read_all(path).await {
+                Ok(content) => return Ok(content),
+                Err(e) => tracing::debug!("guest-agent read_file failed for ({}): {}", path, e),
+            }
+        }
+
+        // Fallback: use serial cat
+        self.shell_exec_with_instances(
+            &mut *instances,
+            name,
+            &format!("cat {}", path),
+            10,
+        ).await
+    }
+
+    /// Execute a shell command in a VM and return the output
+    pub async fn shell_exec(
+        &self,
+        name: &str,
+        command: &str,
+        timeout_secs: u64,
+    ) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        self.shell_exec_with_instances(&mut *instances, name, command, timeout_secs).await
+    }
+
+    async fn shell_exec_with_instances(
+        &self,
+        instances: &mut HashMap<String, VmInstance>,
+        name: &str,
+        command: &str,
+        timeout_secs: u64,
+    ) -> anyhow::Result<String> {
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            anyhow::bail!("VM '{}' is not running", name);
+        }
+
+        // Tier 1: Try guest-agent (QMP guest-exec) — most reliable
+        if let Some(ref mut qmp) = instance.qmp {
+            let shell_cmd = if cfg!(target_os = "linux") {
+                "/bin/sh"
+            } else {
+                "cmd.exe"
+            };
+            let shell_args = if cfg!(target_os = "linux") {
+                vec!["-c", command]
+            } else {
+                vec!["/c", command]
+            };
+            match qmp.guest_exec_full(shell_cmd, &shell_args).await {
+                Ok(output) => return Ok(output),
+                Err(e) => tracing::debug!("guest-agent exec failed: {} - falling back to serial", e),
+            }
+        }
+
+        // Tier 2: Use serial shell for command execution
+        if let Some(ref mut serial) = instance.serial {
+            match serial.execute(command, timeout_secs).await {
+                Ok(output) => return Ok(output),
+                Err(e) => tracing::debug!("Serial execute failed: {} - trying reconnect", e),
+            }
+        }
+
+        // Tier 3: Reconnect serial and retry
         let serial_addr = instance.config.serial_connect_addr();
         match crate::vm::serial::SerialShell::connect(&serial_addr).await {
             Ok(mut shell) => {
@@ -750,7 +853,7 @@ impl VmManager {
                 result
             }
             Err(e) => {
-                // Last resort: use QMP keystrokes (no output)
+                // Tier 4: Last resort — type via QMP keystrokes (no output)
                 if let Some(ref mut qmp) = instance.qmp {
                     let layout = instance.keyboard_layout.clone();
                     for ch in command.chars() {
@@ -763,10 +866,9 @@ impl VmManager {
                     qmp.send_key_event("ret", true).await?;
                     qmp.send_key_event("ret", false).await?;
                     tokio::time::sleep(std::time::Duration::from_millis(timeout_secs.min(5) * 1000)).await;
-                    Ok(format!("Command '{}' sent via QMP (no serial available). Output visible in VNC.", command))
-                } else {
-                    anyhow::bail!("Neither Serial nor QMP connected: {}", e)
+                    return Ok(format!("Command '{}' sent via QMP keystrokes (no return output available). Output visible in VNC.", command));
                 }
+                anyhow::bail!("Neither serial nor QMP connected: {}", e)
             }
         }
     }
@@ -1294,6 +1396,22 @@ impl VmManager {
         args.extend([
             "-drive".to_string(),
             format!("file={},format=qcow2,if=virtio", config.disk_path),
+        ]);
+
+        // Virtio-serial for guest-agent communication
+        let abs_data = std::fs::canonicalize(&self.data_dir)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| self.data_dir.clone());
+        args.extend([
+            "-device".to_string(),
+            "virtio-serial-pci".to_string(),
+            "-chardev".to_string(),
+            format!(
+                "socket,id=ga0,path={}/vm/{}/ga.sock,server=on,wait=off",
+                abs_data, config.name
+            ),
+            "-device".to_string(),
+            "virtserialport,chardev=ga0,name=org.qemu.guest_agent.0".to_string(),
         ]);
 
         // CD-ROM device (always present for hot-plug support)

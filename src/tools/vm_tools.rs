@@ -505,20 +505,9 @@ async fn handle_vm_input(manager: &VmManager, args: &serde_json::Value) -> Strin
             if path.is_empty() {
                 return "Error: path is required for write_file action".to_string();
             }
-            // Write to shared folder first
-            let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
-            let filename = std::path::Path::new(path)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
-            let transfer_path = format!("{}/shared/{}", data_dir, filename);
-            if let Err(e) = std::fs::write(&transfer_path, content) {
-                return format!("Error writing file to shared folder: {}", e);
-            }
-            // Copy from shared folder to target path in VM
-            match manager.shell_exec(name, &format!("cp /mnt/shared/{} {}", filename, path), 10).await {
-                Ok(_) => format!("File written to VM: {} ({} bytes)", path, content.len()),
-                Err(e) => format!("Error copying file in VM: {}", e),
+            match manager.write_file(name, path, content).await {
+                Ok(msg) => msg,
+                Err(e) => format!("Error writing file in VM: {}", e),
             }
         }
         
@@ -590,51 +579,15 @@ async fn handle_vm_file_transfer(manager: &VmManager, args: &serde_json::Value) 
     match direction {
         "to_vm" => {
             let content = args["content"].as_str().unwrap_or("");
-            // Write to shared folder, then copy in VM
-            let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
-            let transfer_path = format!(
-                "{}/shared/{}",
-                data_dir,
-                std::path::Path::new(path)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-            );
-            if let Err(e) = std::fs::write(&transfer_path, content) {
-                return format!("Error writing file to shared folder: {}", e);
-            }
-            // Copy from shared folder to target path in VM
-            let filename = std::path::Path::new(path)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
-            match manager.shell_exec(name, &format!("cp /mnt/shared/{} {}", filename, path), 10).await {
-                Ok(_) => format!("File transferred to VM: {}", path),
-                Err(e) => format!("File written to shared folder but copy in VM failed: {}. You can manually copy from /mnt/shared/", e),
+            match manager.write_file(name, path, content).await {
+                Ok(msg) => msg,
+                Err(e) => format!("File transfer to VM failed: {}", e),
             }
         }
-        "from_vm" => {
-            // Copy from VM path to shared folder, then read
-            let filename = std::path::Path::new(path)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
-            match manager
-                .shell_exec(name, &format!("cp {} /mnt/shared/{}", path, filename), 10)
-                .await
-            {
-                Ok(_) => {
-                    let data_dir =
-                        std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
-                    let shared_path = format!("{}/shared/{}", data_dir, filename);
-                    match std::fs::read_to_string(&shared_path) {
-                        Ok(content) => format!("File content from VM:\n{}", content),
-                        Err(e) => format!("File copied to shared folder but read failed: {}", e),
-                    }
-                }
-                Err(e) => format!("Error copying file from VM: {}", e),
-            }
-        }
+        "from_vm" => match manager.read_file(name, path).await {
+            Ok(content) => format!("File content from VM:\n{}", content),
+            Err(e) => format!("Error reading file from VM: {}", e),
+        },
         _ => "Error: direction must be 'to_vm' or 'from_vm'".to_string(),
     }
 }
@@ -990,7 +943,7 @@ async fn handle_vm_file_read(manager: &VmManager, args: &serde_json::Value) -> S
         return "Error: path is required".to_string();
     }
     
-    match manager.shell_exec(name, &format!("cat '{}'", path), 10).await {
+    match manager.read_file(name, path).await {
         Ok(output) => format!("Content of {}:\n{}", path, output),
         Err(e) => format!("Error reading file '{}': {}", path, e),
     }

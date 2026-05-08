@@ -323,4 +323,142 @@ impl QmpClient {
         .await?;
         Ok(())
     }
+
+    pub async fn guest_file_open(&mut self, path: &str, mode: &str) -> anyhow::Result<i64> {
+        let result = self
+            .execute(QmpCommand {
+                execute: "guest-file-open".to_string(),
+                arguments: Some(serde_json::json!({ "path": path, "mode": mode })),
+            })
+            .await?;
+        result
+            .as_i64()
+            .ok_or_else(|| anyhow::anyhow!("guest-file-open: no handle returned"))
+    }
+
+    pub async fn guest_file_write(&mut self, handle: i64, buf_b64: &str) -> anyhow::Result<()> {
+        let result = self
+            .execute(QmpCommand {
+                execute: "guest-file-write".to_string(),
+                arguments: Some(
+                    serde_json::json!({ "handle": handle, "buf-b64": buf_b64 }),
+                ),
+            })
+            .await?;
+        if let Some(count) = result.get("count").and_then(|v| v.as_u64()) {
+            if count == 0 {
+                anyhow::bail!("guest-file-write wrote 0 bytes");
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn guest_file_read(&mut self, handle: i64, count: i64) -> anyhow::Result<String> {
+        let result = self
+            .execute(QmpCommand {
+                execute: "guest-file-read".to_string(),
+                arguments: Some(
+                    serde_json::json!({ "handle": handle, "count": count }),
+                ),
+            })
+            .await?;
+        result
+            .get("buf-b64")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("guest-file-read: no buf-b64 returned"))
+    }
+
+    pub async fn guest_file_close(&mut self, handle: i64) -> anyhow::Result<()> {
+        self.execute(QmpCommand {
+            execute: "guest-file-close".to_string(),
+            arguments: Some(serde_json::json!({ "handle": handle })),
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn guest_file_write_all(
+        &mut self,
+        path: &str,
+        content: &str,
+    ) -> anyhow::Result<()> {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(content);
+        let handle = self.guest_file_open(path, "w").await?;
+        let result = self.guest_file_write(handle, &b64).await;
+        let _ = self.guest_file_close(handle).await;
+        result
+    }
+
+    pub async fn guest_file_read_all(&mut self, path: &str) -> anyhow::Result<String> {
+        use base64::Engine;
+        let handle = self.guest_file_open(path, "r").await?;
+        let b64_content = match self.guest_file_read(handle, 1048576).await {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = self.guest_file_close(handle).await;
+                return Err(e);
+            }
+        };
+        let _ = self.guest_file_close(handle).await;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&b64_content)
+            .map_err(|e| anyhow::anyhow!("Base64 decode error: {}", e))?;
+        String::from_utf8(bytes).map_err(|e| anyhow::anyhow!("UTF-8 decode error: {}", e))
+    }
+
+    pub async fn guest_exec_status_full(&mut self, pid: i64) -> anyhow::Result<(String, i32)> {
+        let max_retries = 30;
+        for _ in 0..max_retries {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let status = self.guest_exec_status(pid).await?;
+            if let Some(exited) = status.get("exited").and_then(|v| v.as_bool()) {
+                if exited {
+                    let exit_code = status
+                        .get("exitcode")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(-1) as i32;
+                    let out_data = status
+                        .get("out-data")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let err_data = status
+                        .get("err-data")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    use base64::Engine;
+                    let stdout = String::from_utf8_lossy(
+                        &base64::engine::general_purpose::STANDARD
+                            .decode(out_data)
+                            .unwrap_or_default(),
+                    )
+                    .to_string();
+                    let stderr = String::from_utf8_lossy(
+                        &base64::engine::general_purpose::STANDARD
+                            .decode(err_data)
+                            .unwrap_or_default(),
+                    )
+                    .to_string();
+                    let combined = if stderr.is_empty() {
+                        stdout
+                    } else {
+                        format!("{}\n{}", stdout, stderr)
+                    };
+                    return Ok((combined, exit_code));
+                }
+            }
+        }
+        anyhow::bail!("guest-exec-status: command did not exit in time")
+    }
+
+    pub async fn guest_exec_full(&mut self, command: &str, args: &[&str]) -> anyhow::Result<String> {
+        let pid = self.guest_exec(command, args).await?;
+        let (output, exit_code) = self.guest_exec_status_full(pid).await?;
+        Ok(format!(
+            "{}\nexit_code: {}",
+            output.trim(),
+            exit_code
+        ))
+    }
 }
