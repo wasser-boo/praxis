@@ -137,6 +137,29 @@ Files in `{DATA_DIR}/shared/` are automatically mounted at `/mnt/shared` in the 
 
 Access at `http://localhost:1337` (or your `DASHBOARD_PORT`).
 
+### TLS (HTTPS) — Required for noVNC
+
+noVNC (the web-based VNC viewer) requires a secure context (TLS) for keyboard/mouse input. Enable with `DASHBOARD_TLS=true`:
+
+```env
+DASHBOARD_TLS=true
+```
+
+On first startup, a self-signed certificate is generated at `./data/tls/cert.pem` with SANs for `localhost`, `127.0.0.1`, your hostname, and your local IP.
+
+**Trust the cert (Linux):**
+```bash
+sudo cp ./data/tls/cert.pem /usr/local/share/ca-certificates/praxis.crt
+sudo update-ca-certificates
+```
+
+Then access via `https://<your-ip>:1337`.
+
+**Browser workaround** (no trusting needed):  
+Add `https://<your-ip>:1337` as a secure origin:
+- **Chrome**: `chrome://flags/#unsafely-treat-insecure-origin-as-secure`
+- **Firefox**: `about:config` → `network.websocket.allowInsecureFromHTTPS` = `true`
+
 Tabs:
 - **Overview**: Version, users, messages, uptime
 - **Users**: Manage user contexts
