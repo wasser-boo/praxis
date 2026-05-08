@@ -2,11 +2,13 @@ const API_BASE = '';
 let authToken = localStorage.getItem('praxis_token');
 let chatPollInterval = null;
 let chatUserId = 'default';
+let chatSessionId = 'default';
 let chatAttachments = [];
 let vmRefreshInterval = null;
-let chatLastMsgId = 0;
+let chatSeenIds = new Set();
 let chatLastResponse = '';
 let isAgentActive = false;
+let chatSessions = [];
 
 // ═══ Auth ══════════════════════════════════════════════════════════════════════
 
@@ -138,6 +140,7 @@ function initChatTab() {
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     });
+    loadChatSessions();
 }
 
 async function loadChatStatus() {
@@ -179,7 +182,7 @@ function loadAvatar() {
     const img = document.getElementById('chat-user-avatar');
     img.src = `/api/avatar/${chatUserId}?t=${Date.now()}`;
     img.style.display = '';
-    img.onerror = () => { img.style.display = 'none'; };
+    img.onerror = () => { img.src = '/logo.svg'; };
 }
 
 async function chatStartAgent() {
@@ -216,7 +219,7 @@ async function chatSendMessage() {
     renderAttachments();
 
     const displayMsg = msg || '(attachments)';
-    addChatMessage('user', displayMsg, true);
+    addChatMessage('user', displayMsg);
     startChatTimer(60);
 
     try {
@@ -261,7 +264,7 @@ function showChatOptions(questionId, suggestions) {
 
 async function selectChatOption(questionId, idx) {
     document.getElementById('chat-options-box').style.display = 'none';
-    addChatMessage('user', `Selected option ${idx + 1}`, true);
+    addChatMessage('user', `Selected option ${idx + 1}`);
     try {
         await apiFetch('/api/chat/send', {
             method: 'POST',
@@ -289,22 +292,17 @@ function stopChatPolling() {
 
 async function pollChatMessages() {
     try {
-        // Poll messages
         const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}`);
         const data = await res.json();
         if (data.messages && data.messages.length > 0) {
-            const msgs = data.messages;
-            // Only show new messages (skip already seen)
-            for (const m of msgs) {
-                const id = m.id || (m.role + (m.content || '').slice(0, 50));
-                if (id && id !== chatLastMsgId) {
-                    chatLastMsgId = id;
+            for (const m of data.messages) {
+                const id = m.id || (m.role + ':' + (m.content || '').slice(0, 80));
+                if (!chatSeenIds.has(id)) {
+                    chatSeenIds.add(id);
                     renderChatMessage(m);
                 }
             }
         }
-
-        // Poll CL status
         await loadCLStatus();
     } catch {}
 }
@@ -370,7 +368,7 @@ function stopChatTimer() {
 
 // ═══ Chat Messages ══════════════════════════════════════════════════════════════
 
-function addChatMessage(type, content, showAvatar = false) {
+function addChatMessage(type, content, extra = null) {
     const container = document.getElementById('chat-messages');
     const welcome = container.querySelector('.chat-welcome');
     if (welcome) welcome.remove();
@@ -378,22 +376,103 @@ function addChatMessage(type, content, showAvatar = false) {
     const div = document.createElement('div');
     div.className = `chat-msg ${type}`;
 
-    // Avatar for user messages
-    if (showAvatar && type === 'user') {
-        div.innerHTML = `<div style="display:flex;align-items:flex-start;gap:0.5rem">
-            <img class="avatar-sm" src="/api/avatar/${chatUserId}?t=${Date.now()}" alt="" onerror="this.style.display='none'"
-                style="width:28px;height:28px;border-radius:50%;border:2px solid var(--accent-cyan);object-fit:cover;flex-shrink:0">
-            <span>${escapeHtml(content)}</span>
+    // Default avatars
+    const botAvatar = '/logo.svg';
+    const userAvatar = `/api/avatar/${chatUserId}?t=${Date.now()}`;
+
+    if (type === 'user') {
+        div.innerHTML = `<div class="msg-row">
+            <img class="msg-avatar" src="${userAvatar}" alt="" onerror="this.src='/logo.svg'">
+            <div class="msg-content">${escapeHtml(content)}</div>
+        </div>`;
+    } else if (type === 'assistant') {
+        div.innerHTML = `<div class="msg-row">
+            <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)">
+            <div class="msg-content">${escapeHtml(content)}</div>
         </div>`;
     } else if (type === 'tool') {
-        const args = arguments[2] || '';
-        div.innerHTML = `${content}${args ? `<div class="tool-out">${escapeHtml(args)}</div>` : ''}`;
+        const args = extra || '';
+        div.innerHTML = `<div class="msg-row">
+            <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-cyan)">
+            <div class="msg-content">${content}${args ? `<div class="tool-out">${escapeHtml(args)}</div>` : ''}</div>
+        </div>`;
     } else {
         div.textContent = content;
     }
 
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
+}
+
+function clearChatMessages() {
+    const container = document.getElementById('chat-messages');
+    container.innerHTML = '<div class="chat-welcome">Start an agent to begin chatting. Your messages appear here with tool calls visible inline.</div>';
+    chatSeenIds.clear();
+    chatLastResponse = '';
+}
+
+// ═══ Chat Sessions ══════════════════════════════════════════════════════════════
+
+function loadChatSessions() {
+    const stored = localStorage.getItem('praxis_chat_sessions');
+    if (stored) {
+        try { chatSessions = JSON.parse(stored); } catch { chatSessions = []; }
+    }
+    if (chatSessions.length === 0) {
+        chatSessions = [{ id: 'default', name: 'Default' }];
+        saveChatSessions();
+    }
+    renderChatSessionList();
+}
+
+function saveChatSessions() {
+    localStorage.setItem('praxis_chat_sessions', JSON.stringify(chatSessions));
+}
+
+function renderChatSessionList() {
+    const list = document.getElementById('chat-session-list');
+    if (!list) return;
+    list.innerHTML = chatSessions.map(s => `
+        <div class="chat-session ${s.id === chatSessionId ? 'active' : ''}" onclick="switchChatSession('${escapeHtml(s.id)}')">
+            <span class="session-name">${escapeHtml(s.name)}</span>
+            ${chatSessions.length > 1 ? `<span class="session-del" onclick="event.stopPropagation();deleteChatSession('${escapeHtml(s.id)}')">×</span>` : ''}
+        </div>
+    `).join('');
+}
+
+async function chatNewSession() {
+    const id = 'session-' + Math.random().toString(36).slice(2, 8);
+    const name = `Session ${chatSessions.length + 1}`;
+    chatSessions.push({ id, name });
+    saveChatSessions();
+    await switchChatSession(id);
+    // Persist session on backend
+    try {
+        await apiPost('/api/contexts/' + encodeURIComponent(chatUserId), { session_id: id });
+    } catch {}
+    renderChatSessionList();
+}
+
+async function switchChatSession(id) {
+    chatSessionId = id;
+    clearChatMessages();
+    // Update backend context session
+    try {
+        await apiPost('/api/contexts/' + encodeURIComponent(chatUserId), { session_id: id });
+    } catch {}
+    renderChatSessionList();
+    await loadChatStatus();
+}
+
+function deleteChatSession(id) {
+    if (chatSessions.length <= 1) return;
+    chatSessions = chatSessions.filter(s => s.id !== id);
+    saveChatSessions();
+    if (chatSessionId === id) {
+        switchChatSession(chatSessions[0].id);
+    } else {
+        renderChatSessionList();
+    }
 }
 
 // ═══ Attachments ═══════════════════════════════════════════════════════════════
