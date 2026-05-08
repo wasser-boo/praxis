@@ -210,6 +210,8 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/vm/snapshot", axum::routing::post(vm_snapshot))
         .route("/vm/shared-folder", axum::routing::post(vm_shared_folder))
         .route("/vm/cd", axum::routing::post(vm_cd))
+        .route("/vm/clipboard/set", axum::routing::post(vm_clipboard_set))
+        .route("/vm/clipboard/get", axum::routing::get(vm_clipboard_get))
         .route("/vm/activity", axum::routing::get(vm_activity))
         .route("/vm/vnc", axum::routing::get(vm_vnc_viewer))
         .route("/agent/input", axum::routing::post(send_agent_input))
@@ -1286,20 +1288,49 @@ async fn begin_agent(
             "user_id": user_id,
             "message": message,
         });
-        if let Err(e) = client.post(url)
+        let _ = client
+            .post(url)
             .header("x-api-key", &gateway_key)
             .json(&body)
             .send()
-            .await
-        {
-            tracing::error!("Failed to dispatch agent via gateway: {}", e);
-        }
+            .await;
     });
 
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Agent dispatched to gateway"
     })))
+}
+
+async fn vm_clipboard_set(
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let config = crate::config::Config::from_env();
+    let manager = match crate::tools::vm_tools::get_vm_manager().await {
+        Some(m) => m,
+        None => crate::tools::vm_tools::init_vm_manager(&config.data_dir),
+    };
+    let name = req["name"].as_str().unwrap_or("praxis-vm");
+    let content = req["content"].as_str().unwrap_or("");
+    match manager.clipboard_set(name, content).await {
+        Ok(msg) => Ok(Json(serde_json::json!({"success": true, "message": msg}))),
+        Err(e) => Ok(Json(serde_json::json!({"success": false, "error": e.to_string()}))),
+    }
+}
+
+async fn vm_clipboard_get(
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let config = crate::config::Config::from_env();
+    let manager = match crate::tools::vm_tools::get_vm_manager().await {
+        Some(m) => m,
+        None => crate::tools::vm_tools::init_vm_manager(&config.data_dir),
+    };
+    let name = params.get("name").map(|s| s.as_str()).unwrap_or("praxis-vm");
+    match manager.clipboard_get(name).await {
+        Ok(content) => Ok(Json(serde_json::json!({"success": true, "content": content}))),
+        Err(e) => Ok(Json(serde_json::json!({"success": false, "error": e.to_string()}))),
+    }
 }
 
 async fn get_agent_status(
@@ -1406,23 +1437,63 @@ async fn get_chat_file(
 }
 
 async fn chat_query(
-    State(_state): State<Arc<DashboardState>>,
+    State(state): State<Arc<DashboardState>>,
     Json(req): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let user_id = req["user_id"].as_str().unwrap_or("default");
     let message = req["message"].as_str().unwrap_or("");
+    let is_option = req["is_option"].as_bool().unwrap_or(false);
+    let option_index = req["option_index"].as_u64();
+    let question_id = req["question_id"].as_str().unwrap_or("");
 
+    // Handle option selection
+    if is_option && !question_id.is_empty() {
+        crate::tools::web_interactive::handle_web_option(question_id, option_index.unwrap_or(0) as usize).await;
+        return Ok(Json(serde_json::json!({"success": true, "type": "option"})));
+    }
+
+    // Handle text reply to pending question
+    if !message.is_empty() {
+        let consumed = crate::tools::web_interactive::handle_web_message_reply(user_id, message).await;
+        if consumed {
+            return Ok(Json(serde_json::json!({"success": true, "type": "question_reply"})));
+        }
+    }
+
+    // Check if agent loop is active
+    let has_loop = crate::gateway::agent_loop::get_user_input_sender(user_id).await.is_some();
+    if !has_loop {
+        // Auto-start agent loop via gateway API
+        let gateway_key = state.gateway_api_key.clone();
+        let uid = user_id.to_string();
+        let msg = message.to_string();
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let body = serde_json::json!({"user_id": uid, "message": msg});
+            let _ = client
+                .post("http://127.0.0.1:3537/v1/chat")
+                .header("x-api-key", &gateway_key)
+                .json(&body)
+                .send()
+                .await;
+        });
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "type": "agent_started",
+            "message": "Agent loop started. Response will appear shortly."
+        })));
+    }
+
+    // Agent loop is running: inject message
     if let Some(sender) = crate::gateway::agent_loop::get_user_input_sender(user_id).await {
         let mut full = message.to_string();
         if let Some(atts) = req["attachments"].as_array() {
-            for a in atts {
-                if let Some(s) = a.as_str() { full.push_str(&format!("\n[Attachment: {}]", s)); }
-            }
+            for a in atts { if let Some(s) = a.as_str() { full.push_str(&format!("\n[Attachment: {}]", s)); } }
         }
         sender.send(full).ok();
-        Ok(Json(serde_json::json!({"success": true})))
+        Ok(Json(serde_json::json!({"success": true, "type": "injected"})))
     } else {
-        Ok(Json(serde_json::json!({"error": "No active agent loop"})))
+        Ok(Json(serde_json::json!({"error": "Agent loop not available"})))
     }
 }
 

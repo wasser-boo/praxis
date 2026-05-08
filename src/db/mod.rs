@@ -71,6 +71,10 @@ impl Database {
             conn.execute_batch(include_str!("../../migrations/007_tool_name.sql"))?;
             conn.pragma_update(None, "user_version", 7)?;
         }
+        if version < 8 {
+            conn.execute_batch(include_str!("../../migrations/008_sessions.sql"))?;
+            conn.pragma_update(None, "user_version", 8)?;
+        }
 
         Ok(())
     }

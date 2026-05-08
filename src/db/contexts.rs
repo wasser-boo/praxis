@@ -24,6 +24,9 @@ pub struct Context {
     /// Supports deep merge via dot-notation in set_context
     #[serde(default)]
     pub cl_data: serde_json::Value,
+    /// Session identifier for multi-session support (e.g., "default", "session-2")
+    #[serde(default)]
+    pub session_id: String,
 }
 
 impl Default for Context {
@@ -39,6 +42,7 @@ impl Default for Context {
             settings: ContextSettings::default(),
             custom_data: serde_json::Value::Null,
             cl_data: serde_json::Value::Null,
+            session_id: String::new(),
         }
     }
 }
@@ -365,22 +369,47 @@ impl Database {
             |row| row.get::<_, String>(0),
         );
 
-        match result {
-            Ok(data) => Ok(serde_json::from_str(&data)?),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Context {
+        let mut base_ctx = match result {
+            Ok(data) => serde_json::from_str::<Context>(&data)?,
+            Err(rusqlite::Error::QueryReturnedNoRows) => Context {
                 user_id: user_id.to_string(),
                 ..Default::default()
-            }),
-            Err(e) => Err(e.into()),
+            },
+            Err(e) => return Err(e.into()),
+        };
+
+        // If a non-default session is active, load the session-specific context
+        if !base_ctx.session_id.is_empty() && base_ctx.session_id != "default" {
+            let key = format!("{}:::{}", user_id, base_ctx.session_id);
+            if let Ok(data) = conn.query_row(
+                "SELECT data FROM contexts WHERE user_id = ?1",
+                rusqlite::params![key],
+                |row| row.get::<_, String>(0),
+            ) {
+                if let Ok(mut session_ctx) = serde_json::from_str::<Context>(&data) {
+                    session_ctx.user_id = user_id.to_string();
+                    return Ok(session_ctx);
+                }
+            }
+            // Session context doesn't exist yet; use base as template
+            base_ctx.user_id = user_id.to_string();
+            return Ok(base_ctx);
         }
+
+        Ok(base_ctx)
     }
 
     pub fn save_context(&self, ctx: &Context) -> anyhow::Result<()> {
         let conn = self.conn();
         let data = serde_json::to_string(ctx)?;
+        let key = if !ctx.session_id.is_empty() && ctx.session_id != "default" {
+            format!("{}:::{}", ctx.user_id, ctx.session_id)
+        } else {
+            ctx.user_id.clone()
+        };
         conn.execute(
             "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
-            rusqlite::params![ctx.user_id, data],
+            rusqlite::params![key, data],
         )?;
         Ok(())
     }
@@ -411,22 +440,123 @@ impl Database {
     pub fn delete_context(&self, user_id: &str) -> anyhow::Result<()> {
         let conn = self.conn();
         conn.execute(
-            "DELETE FROM messages WHERE user_id = ?1",
-            rusqlite::params![user_id],
+            "DELETE FROM messages WHERE user_id = ?1 OR user_id LIKE ?2",
+            rusqlite::params![user_id, format!("{}:::%", user_id)],
         )?;
         conn.execute(
-            "DELETE FROM memory WHERE user_id = ?1",
-            rusqlite::params![user_id],
+            "DELETE FROM memory WHERE user_id = ?1 OR user_id LIKE ?2",
+            rusqlite::params![user_id, format!("{}:::%", user_id)],
         )?;
         conn.execute(
-            "DELETE FROM contexts WHERE user_id = ?1",
-            rusqlite::params![user_id],
+            "DELETE FROM contexts WHERE user_id = ?1 OR user_id LIKE ?2",
+            rusqlite::params![user_id, format!("{}:::%", user_id)],
         )?;
         Ok(())
     }
 
     pub fn increment_turn(&self, ctx: &mut Context) {
         ctx.turn += 1;
+    }
+
+    // ── Session Management ──────────────────────────────────────────────────
+
+    fn context_key(user_id: &str, session_id: &str) -> String {
+        if session_id.is_empty() || session_id == "default" {
+            user_id.to_string()
+        } else {
+            format!("{}:::{}", user_id, session_id)
+        }
+    }
+
+    pub fn load_session_context(
+        &self,
+        user_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<Context> {
+        let key = Self::context_key(user_id, session_id);
+        let mut ctx = self.load_context(&key)?;
+        ctx.user_id = user_id.to_string();
+        ctx.session_id = session_id.to_string();
+        Ok(ctx)
+    }
+
+    pub fn save_session_context(&self, ctx: &Context) -> anyhow::Result<()> {
+        let key = Self::context_key(&ctx.user_id, &ctx.session_id);
+        let mut persisted = ctx.clone();
+        persisted.user_id = key.clone();
+        self.save_context(&persisted)
+    }
+
+    pub fn create_session(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        name: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO user_sessions (user_id, session_id, name) VALUES (?1, ?2, ?3)
+             ON CONFLICT(user_id, session_id) DO UPDATE SET updated_at = datetime('now')",
+            rusqlite::params![user_id, session_id, name],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_session(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM user_sessions WHERE user_id = ?1 AND session_id = ?2",
+            rusqlite::params![user_id, session_id],
+        )?;
+        let key = Self::context_key(user_id, session_id);
+        let _ = conn.execute(
+            "DELETE FROM messages WHERE user_id = ?1",
+            rusqlite::params![key],
+        );
+        let _ = conn.execute(
+            "DELETE FROM contexts WHERE user_id = ?1",
+            rusqlite::params![key],
+        );
+        Ok(())
+    }
+
+    pub fn list_sessions(&self, user_id: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, name FROM user_sessions WHERE user_id = ?1 ORDER BY updated_at DESC"
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![user_id], |row| {
+                let sid: String = row.get(0)?;
+                let name: Option<String> = row.get(1)?;
+                Ok((sid.clone(), name.unwrap_or(sid)))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn rename_session(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE user_sessions SET name = ?1, updated_at = datetime('now') WHERE user_id = ?2 AND session_id = ?3",
+            rusqlite::params![name, user_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_session_messages(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
+        let key = Self::context_key(user_id, session_id);
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM messages WHERE user_id = ?1",
+            rusqlite::params![key],
+        )?;
+        Ok(())
     }
 }
 

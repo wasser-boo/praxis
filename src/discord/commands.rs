@@ -119,6 +119,33 @@ pub async fn setup_commands(http: &serenity::http::Http) -> anyhow::Result<()> {
         .dm_permission(true);
     http.create_global_command(&clear_cmd).await?;
 
+    let session_cmd = serenity::builder::CreateCommand::new("session")
+        .description("Manage sessions: list, create, switch, rename, delete")
+        .add_option(
+            serenity::builder::CreateCommandOption::new(
+                serenity::model::application::CommandOptionType::String,
+                "action",
+                "Action to perform: list, create, switch, rename, delete, clear"
+            )
+            .required(true)
+            .add_string_choice("list", "list")
+            .add_string_choice("create", "create")
+            .add_string_choice("switch", "switch")
+            .add_string_choice("rename", "rename")
+            .add_string_choice("delete", "delete")
+            .add_string_choice("clear", "clear")
+        )
+        .add_option(
+            serenity::builder::CreateCommandOption::new(
+                serenity::model::application::CommandOptionType::String,
+                "name",
+                "Session name (for create/switch/rename/delete)"
+            )
+            .required(false)
+        )
+        .dm_permission(true);
+    http.create_global_command(&session_cmd).await?;
+
     tracing::info!("All discord commands registered");
     Ok(())
 }

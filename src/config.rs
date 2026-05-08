@@ -35,6 +35,9 @@ pub struct Config {
     pub mimo_model: String,
     pub mimo_api_base: String,
     pub mimo_api_mode: ApiMode,
+    pub openrouter_api_key: Option<String>,
+    pub openrouter_model: String,
+    pub openrouter_api_base: String,
     pub vision_provider: Option<String>,
     pub vision_model: Option<String>,
     pub gateway_port: u16,
@@ -87,6 +90,11 @@ impl Config {
             ),
             vision_provider: env::var("VISION_PROVIDER").ok(),
             vision_model: env::var("VISION_MODEL").ok(),
+            openrouter_api_key: env::var("OPENROUTER_API_KEY").ok(),
+            openrouter_model: env::var("OPENROUTER_MODEL")
+                .unwrap_or_else(|_| "openai/gpt-4o".to_string()),
+            openrouter_api_base: env::var("OPENROUTER_API_BASE")
+                .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string()),
             gateway_port: env::var("GATEWAY_PORT")
                 .unwrap_or_else(|_| "3537".to_string())
                 .parse()

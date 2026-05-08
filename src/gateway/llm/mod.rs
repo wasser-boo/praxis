@@ -4,6 +4,7 @@ pub mod mimo;
 pub mod minimax;
 pub mod ollama;
 pub mod openai;
+pub mod openrouter;
 pub mod provider;
 mod tests;
 
@@ -55,6 +56,14 @@ impl LLMRouter {
                 config.mimo_model.clone(),
                 config.mimo_api_base.clone(),
                 config.mimo_api_mode.clone(),
+            )));
+        }
+
+        if let Some(ref key) = secrets.openrouter_api_key {
+            providers.push(Box::new(openrouter::OpenRouterProvider::new(
+                key.clone(),
+                config.openrouter_model.clone(),
+                config.openrouter_api_base.clone(),
             )));
         }
 
@@ -159,6 +168,8 @@ impl LLMRouter {
         tools: Vec<provider::ToolDefinition>,
         max_iterations: Option<i32>,
         feedback_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        provider: Option<&str>,
+        model: Option<&str>,
     ) -> anyhow::Result<ChatWithToolsResult> {
         let max_iterations = max_iterations.unwrap_or(200);
         let mut iteration = 0;
@@ -182,12 +193,12 @@ impl LLMRouter {
                 },
                 temperature: Some(0.7),
                 max_tokens: Some(4096),
-                model: None,
+                model: model.map(|m| m.to_string()),
                 vision_provider: None,
                 vision_model: None,
             };
 
-            let response = self.chat(request, None).await?;
+            let response = self.chat(request, provider).await?;
 
             // Add assistant message to history
             let assistant_content = response.content.clone().unwrap_or_default();

@@ -28,9 +28,7 @@
 
         <div id="dashboard-screen" class="screen">
             <nav class="sidebar">
-                <div class="sidebar-header">
-                    <h2>Praxis</h2>
-                </div>
+                <div class="sidebar-header"><h2>Praxis</h2></div>
                 <ul class="nav-links">
                     <li class="active" data-tab="overview">Overview</li>
                     <li data-tab="chat">Chat</li>
@@ -46,12 +44,12 @@
                     <li data-tab="cron-jobs">Cron Jobs</li>
                 </ul>
                 <div class="sidebar-footer">
+                    <button id="theme-toggle" class="btn btn-sm btn-secondary" style="width:100%;margin-bottom:0.5rem" onclick="toggleTheme()">🌙 Dark</button>
                     <button id="logout-btn" class="btn btn-secondary">Logout</button>
                 </div>
             </nav>
 
             <main class="content">
-                <!-- Overview Tab -->
                 <div id="tab-overview" class="tab active">
                     <h2>Overview</h2>
                     <div class="stats-grid">
@@ -59,7 +57,7 @@
                         <div class="stat-card"><h3>Version</h3><p id="version">-</p></div>
                         <div class="stat-card"><h3>Contexts</h3><p id="context-count">0</p></div>
                         <div class="stat-card"><h3>Pairings</h3><p id="pairing-count">0</p></div>
-                        <div class="stat-card"><h3>Pending Pairings</h3><p id="pending-count">0</p></div>
+                        <div class="stat-card"><h3>Pending</h3><p id="pending-count">0</p></div>
                     </div>
                     <div style="margin-top:2rem">
                         <h3>Quick Agent Start</h3>
@@ -67,45 +65,55 @@
                     </div>
                 </div>
 
-                <!-- Chat Tab -->
                 <div id="tab-chat" class="tab">
-                    <h2>Chat</h2>
-                    <div id="chat-cl-status" class="cl-status-bar" style="display:none">
-                        <span id="cl-status-file" class="cl-badge">-</span>
-                        <span id="cl-status-state" class="cl-badge">-</span>
-                        <span id="cl-status-temps" class="cl-badge">-</span>
-                    </div>
-                    <div id="chat-agent-banner" class="agent-banner" style="display:none">
-                        <span class="agent-badge active" id="chat-agent-badge">Agent: Inactive</span>
-                        <button class="btn btn-sm btn-primary" id="chat-start-btn" onclick="chatStartAgent()">Start Agent</button>
-                        <button class="btn btn-sm btn-danger" id="chat-stop-btn" onclick="chatStopAgent()" style="display:none">Stop Agent</button>
-                        <div style="margin-left:auto;display:flex;align-items:center;gap:0.5rem">
-                            <img id="chat-user-avatar" class="avatar-sm" style="display:none" alt="User">
-                            <span id="chat-user-name" style="color:var(--text-secondary);font-size:0.85rem"></span>
-                            <button class="btn btn-sm btn-secondary" onclick="chatUploadAvatar()" title="Upload Avatar">&#x1F4F7;</button>
+                    <div class="chat-app">
+                        <div class="chat-sidebar">
+                            <div class="chat-sidebar-header">
+                                <span>Conversations</span>
+                                <button class="btn btn-sm btn-primary" onclick="chatNewSession()">+ New</button>
+                            </div>
+                            <div id="chat-session-list" class="chat-session-list"></div>
                         </div>
-                    </div>
-                    <div class="chat-container">
-                        <div id="chat-messages" class="chat-messages">
-                            <div class="chat-welcome">Start an agent to begin chatting. Messages appear here with tool calls visible inline.</div>
+                        <div class="chat-main">
+                            <div id="chat-cl-status" class="cl-status-bar" style="display:none">
+                                <span id="cl-status-file" class="cl-badge">-</span>
+                                <span id="cl-status-state" class="cl-badge">-</span>
+                                <span id="cl-status-temps" class="cl-badge">-</span>
+                                <span id="cl-status-vars" class="cl-badge" title="Variables changed in this state">-</span>
+                            </div>
+                            <div id="chat-agent-banner" class="agent-banner" style="display:none">
+                                <span class="agent-badge" id="chat-agent-badge">Agent: Inactive</span>
+                                <button class="btn btn-sm btn-primary" id="chat-start-btn" onclick="chatStartAgent()">Start Agent</button>
+                                <button class="btn btn-sm btn-danger" id="chat-stop-btn" onclick="chatStopAgent()" style="display:none">Stop Agent</button>
+                                <div style="margin-left:auto;display:flex;align-items:center;gap:0.5rem">
+                                    <img id="chat-bot-avatar" class="avatar-sm" src="/logo.svg" alt="Bot" title="Bot avatar">
+                                    <span style="color:var(--text-secondary);font-size:0.85rem">&#8594;</span>
+                                    <img id="chat-user-avatar" class="avatar-sm" style="display:none" alt="User">
+                                    <span id="chat-user-name" style="color:var(--text-secondary);font-size:0.85rem"></span>
+                                    <button class="btn btn-sm btn-secondary" onclick="chatUploadAvatar()" title="Upload Avatar">&#128247;</button>
+                                </div>
+                            </div>
+                            <div class="chat-container">
+                                <div id="chat-messages" class="chat-messages">
+                                    <div class="chat-welcome">Start an agent to begin chatting. Your messages appear here with tool calls visible inline.</div>
+                                </div>
+                                <div id="chat-timer-bar" class="chat-timer" style="display:none">
+                                    <div class="chat-timer-fill" id="chat-timer-fill"></div>
+                                    <span class="chat-timer-text" id="chat-timer-text">30s</span>
+                                </div>
+                                <div id="chat-options-box" class="chat-options" style="display:none"></div>
+                                <div id="chat-attachments-preview" class="chat-attachments" style="display:none"></div>
+                                <div class="chat-input-row">
+                                    <button class="btn btn-sm btn-secondary chat-upload-btn" onclick="document.getElementById('chat-file-input').click()" title="Upload files">&#128206;</button>
+                                    <input type="file" id="chat-file-input" multiple style="display:none" onchange="chatHandleFiles(this.files)">
+                                    <textarea id="chat-input" class="chat-input" placeholder="Type a message..." rows="2" onkeydown="chatKeyDown(event)"></textarea>
+                                    <button class="btn btn-primary chat-send-btn" id="chat-send-btn" onclick="chatSendMessage()">Send</button>
+                                </div>
+                            </div>
                         </div>
-                        <div id="chat-timer-bar" class="chat-timer" style="display:none">
-                            <div class="chat-timer-fill" id="chat-timer-fill"></div>
-                            <span class="chat-timer-text" id="chat-timer-text">30s</span>
-                        </div>
-                        <div id="chat-options-box" class="chat-options" style="display:none"></div>
-                        <div id="chat-attachments-preview" class="chat-attachments" style="display:none"></div>
-                        <div class="chat-input-row">
-                            <button class="btn btn-sm btn-secondary chat-upload-btn" onclick="document.getElementById('chat-file-input').click()" title="Upload files">&#x1F4CE;</button>
-                            <input type="file" id="chat-file-input" multiple style="display:none" onchange="chatHandleFiles(this.files)">
-                            <textarea id="chat-input" class="chat-input" placeholder="Type a message..." rows="2" onkeydown="chatKeyDown(event)"></textarea>
-                            <button class="btn btn-primary chat-send-btn" id="chat-send-btn" onclick="chatSendMessage()">Send</button>
-                        </div>
-                        <div id="chat-feedback-log" class="chat-feedback" style="display:none"></div>
                     </div>
                 </div>
 
-                <!-- VM Tab -->
                 <div id="tab-vm" class="tab">
                     <h2>Virtual Machine</h2>
                     <div id="vm-controls" style="display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap">
@@ -114,23 +122,20 @@
                         <button class="btn btn-sm btn-secondary" onclick="vmReboot()">Reboot</button>
                         <button class="btn btn-sm btn-secondary" onclick="vmInsertCD()">Insert CD</button>
                         <button class="btn btn-sm btn-secondary" onclick="vmEjectCD()">Eject CD</button>
+                        <button class="btn btn-sm btn-secondary" id="vm-clipboard-btn" onclick="vmClipboardToggle()">&#128203; Clipboard: OFF</button>
+                        <button class="btn btn-sm btn-secondary" onclick="vmClipboardSet()">&#128228; Set VM Clipboard</button>
+                        <button class="btn btn-sm btn-secondary" onclick="vmClipboardGet()">&#128229; Get VM Clipboard</button>
                         <button class="btn btn-sm btn-secondary" onclick="vmRefresh()">Refresh</button>
-                        <span style="margin-left:auto;font-size:0.8rem;color:var(--text-secondary);align-self:center" id="vm-auto-refresh-indicator"></span>
                     </div>
                     <div id="vm-status-bar" class="data-list" style="margin-bottom:1rem"></div>
                     <div>
                         <h3>Desktop (VNC)</h3>
-                        <div id="vm-vnc-container">
-                            <div id="vm-vnc-placeholder">VM not running. Click "Start VM" to begin.</div>
-                            <div id="vm-vnc-screen"></div>
-                        </div>
+                        <div id="vm-vnc-container"><div id="vm-vnc-placeholder">VM not running. Click &quot;Start VM&quot; to begin.</div><div id="vm-vnc-screen"></div></div>
                         <div id="vm-vnc-log"></div>
                     </div>
                     <div style="margin-top:1rem">
                         <h3>LLM Activity Log</h3>
-                        <div id="vm-activity-log">
-                            <div style="color:var(--text-secondary)">No VM activity yet.</div>
-                        </div>
+                        <div id="vm-activity-log"><div style="color:var(--text-secondary)">No VM activity yet.</div></div>
                     </div>
                     <h3 style="margin-top:1.5rem">VM Configuration</h3>
                     <div id="vm-config" class="data-list"></div>
@@ -141,82 +146,45 @@
                     </div>
                 </div>
 
-                <!-- Contexts Tab -->
                 <div id="tab-contexts" class="tab">
                     <h2>Contexts</h2>
                     <div id="contexts-list" class="data-list"></div>
                 </div>
-
-                <!-- Messages Tab -->
                 <div id="tab-messages" class="tab">
                     <h2>Messages</h2>
                     <div class="form-group" style="display:flex;gap:0.5rem;align-items:end">
-                        <div style="flex:1">
-                            <label for="message-user-id">User</label>
-                            <select id="message-user-id" style="width:100%;padding:0.75rem 1rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:1rem">
-                                <option value="">Select user...</option>
-                            </select>
+                        <div style="flex:1"><label for="message-user-id">User</label>
+                            <select id="message-user-id"><option value="">Select user...</option></select>
                         </div>
                         <button id="load-messages-btn" class="btn btn-primary" style="width:auto">Load</button>
                     </div>
                     <div id="messages-list" class="data-list"></div>
                 </div>
-
-                <!-- Templates Tab -->
-                <div id="tab-templates" class="tab">
-                    <h2>Templates</h2>
-                    <div id="templates-list" class="data-list"></div>
-                </div>
-
-                <!-- Tools Tab -->
-                <div id="tab-tools" class="tab">
-                    <h2>Tools</h2>
-                    <div id="tools-list" class="data-list"></div>
-                </div>
-
-                <!-- Memory Tab -->
+                <div id="tab-templates" class="tab"><h2>Templates</h2><div id="templates-list" class="data-list"></div></div>
+                <div id="tab-tools" class="tab"><h2>Tools</h2><div id="tools-list" class="data-list"></div></div>
                 <div id="tab-memory" class="tab">
                     <h2>Memory</h2>
                     <div class="form-group" style="display:flex;gap:0.5rem;align-items:end">
-                        <div style="flex:1">
-                            <label for="memory-user-id">User</label>
-                            <select id="memory-user-id" style="width:100%;padding:0.75rem 1rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:1rem">
-                                <option value="">Select user...</option>
-                            </select>
+                        <div style="flex:1"><label for="memory-user-id">User</label>
+                            <select id="memory-user-id"><option value="">Select user...</option></select>
                         </div>
                         <button id="load-memory-btn" class="btn btn-primary" style="width:auto">Load</button>
                     </div>
                     <div id="memory-content"></div>
                 </div>
-
-                <!-- Secrets Tab -->
-                <div id="tab-secrets" class="tab">
-                    <h2>Secrets</h2>
-                    <div id="secrets-content"></div>
-                </div>
-
-                <!-- Pairings Tab -->
+                <div id="tab-secrets" class="tab"><h2>Secrets</h2><div id="secrets-content"></div></div>
                 <div id="tab-pairings" class="tab">
                     <h2>Pairings</h2>
                     <div id="pairings-list" class="data-list"></div>
                     <h3 style="margin-top:2rem;margin-bottom:1rem">Pending Pairings</h3>
                     <div id="pending-pairings-list" class="data-list"></div>
                 </div>
-
-                <!-- Statemachine Tab -->
                 <div id="tab-sm-files" class="tab">
                     <h2>Statemachine</h2>
-                    <div style="margin-bottom:1rem">
-                        <button class="btn btn-primary" style="width:auto;padding:0.5rem 1.5rem" onclick="createSmFile()">+ New Statemachine</button>
-                    </div>
+                    <div style="margin-bottom:1rem"><button class="btn btn-primary" style="width:auto;padding:0.5rem 1.5rem" onclick="createSmFile()">+ New Statemachine</button></div>
                     <div id="sm-files-list" class="data-list"></div>
                 </div>
-
-                <!-- Cron Jobs Tab -->
-                <div id="tab-cron-jobs" class="tab">
-                    <h2>Cron Jobs</h2>
-                    <div id="cron-jobs-list" class="data-list"></div>
-                </div>
+                <div id="tab-cron-jobs" class="tab"><h2>Cron Jobs</h2><div id="cron-jobs-list" class="data-list"></div></div>
             </main>
         </div>
     </div>

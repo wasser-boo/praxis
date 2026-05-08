@@ -48,6 +48,7 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
     let app = axum::Router::new()
         .route("/health", axum::routing::get(http_handler::health_check))
         .route("/api/auth/login", axum::routing::post(auth::login_handler))
+        .route("/v1/chat", axum::routing::post(http_handler::chat_handler))
         .with_state(state.clone());
 
     let protected = axum::Router::new()

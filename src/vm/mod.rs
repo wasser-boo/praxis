@@ -1246,6 +1246,64 @@ impl VmManager {
         }))
     }
 
+    pub async fn clipboard_set(&self, name: &str, text: &str) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            anyhow::bail!("VM '{}' is not running", name);
+        }
+
+        if let Some(ref mut qmp) = instance.qmp {
+            let res = qmp.guest_file_write_all("/tmp/praxis_clipboard.txt", text).await;
+            match res {
+                Ok(_) => {
+                    let _ = qmp.guest_exec_full("/bin/sh", &["-c", "cat /tmp/praxis_clipboard.txt | xclip -selection clipboard 2>/dev/null; cat /tmp/praxis_clipboard.txt | wl-copy 2>/dev/null; cat /tmp/praxis_clipboard.txt | xsel --clipboard --input 2>/dev/null; true"]).await;
+                    return Ok(format!("Clipboard set ({} bytes)", text.len()));
+                }
+                Err(e) => tracing::debug!("guest-agent clipboard_set failed: {}", e),
+            }
+        }
+
+        // Fallback: type via QMP keystrokes
+        if let Some(ref mut qmp) = instance.qmp {
+            let layout = instance.keyboard_layout.clone();
+            for ch in text.chars() {
+                let events = Self::char_to_qmp_events(ch, &layout)?;
+                for (qcode, down) in events {
+                    qmp.send_key_event(&qcode, down).await?;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            return Ok("Clipboard text typed via keystrokes".to_string());
+        }
+
+        anyhow::bail!("No QMP connection available")
+    }
+
+    pub async fn clipboard_get(&self, name: &str) -> anyhow::Result<String> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+
+        if instance.status != VmStatus::Running {
+            anyhow::bail!("VM '{}' is not running", name);
+        }
+
+        if let Some(ref mut qmp) = instance.qmp {
+            let _ = qmp.guest_exec_full("/bin/sh", &["-c", "(xclip -selection clipboard -o 2>/dev/null || wl-paste 2>/dev/null || xsel --clipboard --output 2>/dev/null) > /tmp/praxis_clipboard_out.txt; true"]).await;
+            match qmp.guest_file_read_all("/tmp/praxis_clipboard_out.txt").await {
+                Ok(content) => return Ok(content),
+                Err(e) => tracing::debug!("guest-agent clipboard_get failed: {}", e),
+            }
+        }
+
+        anyhow::bail!("Could not read clipboard from VM")
+    }
+
     /// List all VMs
     pub async fn list_vms(&self) -> Vec<serde_json::Value> {
         let instances = self.instances.read().await;

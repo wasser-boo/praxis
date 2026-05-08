@@ -12,6 +12,7 @@ pub mod rag_query;
 pub mod understand_image;
 pub mod vector;
 pub mod vm_tools;
+pub mod web_interactive;
 pub mod write_file;
 
 use serde::{Deserialize, Serialize};

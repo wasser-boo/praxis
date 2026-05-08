@@ -19,6 +19,19 @@ pub struct StatusResponse {
     pub default_provider: String,
 }
 
+#[derive(serde::Deserialize)]
+pub struct ChatRequest {
+    user_id: String,
+    message: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct ChatResponse {
+    pub success: bool,
+    pub response: Option<String>,
+    pub error: Option<String>,
+}
+
 pub async fn health_check(State(state): State<GatewayState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -40,10 +53,30 @@ pub async fn status(State(state): State<GatewayState>) -> Json<StatusResponse> {
     })
 }
 
-#[cfg(test)]
-mod gateway_tests {
-    #[test]
-    fn test_health_compiles() {
-        assert!(true);
+/// REST endpoint for web chat - same as WebSocket but via HTTP POST
+pub async fn chat_handler(
+    State(state): State<GatewayState>,
+    Json(req): Json<ChatRequest>,
+) -> Json<ChatResponse> {
+    tracing::info!(user_id = %req.user_id, "Web chat message received");
+
+    match crate::gateway::message_handler::handle_message(
+        &state,
+        &req.user_id,
+        &req.message,
+        Some("web"),
+    )
+    .await
+    {
+        Ok(reply) => Json(ChatResponse {
+            success: true,
+            response: Some(reply),
+            error: None,
+        }),
+        Err(e) => Json(ChatResponse {
+            success: false,
+            response: None,
+            error: Some(e.to_string()),
+        }),
     }
 }

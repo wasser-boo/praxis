@@ -506,6 +506,20 @@ pub async fn run_agent_loop(
             ">>> LLM REQUEST >>>"
         );
 
+        // Log the LLM call itself into activity log so dashboard shows what the LLM is doing
+        {
+            let conn = state.db.conn();
+            let vm_name = ctx.custom_data.get("active_vm").and_then(|v| v.as_str()).unwrap_or("host");
+            let _ = conn.execute(
+                "INSERT INTO vm_activity_log (vm_id, action, input) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    vm_name,
+                    "llm_request",
+                    &format!("turn={} provider={:?} model={:?} messages={} tools={}", ctx.turn, ctx.settings.provider, request.model, msg_count, tool_count)
+                ],
+            );
+        }
+
         // Call LLM
         let response = match state
             .llm
@@ -515,6 +529,14 @@ pub async fn run_agent_loop(
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(user_id = %user_id, error = %e, "<<< LLM ERROR <<<");
+                {
+                    let conn = state.db.conn();
+                    let vm_name = ctx.custom_data.get("active_vm").and_then(|v| v.as_str()).unwrap_or("host");
+                    let _ = conn.execute(
+                        "INSERT INTO vm_activity_log (vm_id, action, input) VALUES (?1, ?2, ?3)",
+                        rusqlite::params![vm_name, "llm_error", &e.to_string()],
+                    );
+                }
                 if let Some(ref tx) = feedback_tx {
                     let _ = tx.send(format!("LLM error: {}", e));
                 }
@@ -533,8 +555,24 @@ pub async fn run_agent_loop(
             has_tool_calls = has_tool_calls,
             tool_calls_count = tool_calls_count,
             response_preview = %response_preview,
+            agent_name = %ctx.settings.agent_name,
             "<<< LLM RESPONSE <<<"
         );
+
+        // Log LLM response into activity log
+        {
+            let conn = state.db.conn();
+            let vm_name = ctx.custom_data.get("active_vm").and_then(|v| v.as_str()).unwrap_or("host");
+            let _ = conn.execute(
+                "INSERT INTO vm_activity_log (vm_id, action, input, output) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    vm_name,
+                    if has_tool_calls { "llm_tool_calls" } else { "llm_response" },
+                    &format!("tool_calls={}", tool_calls_count),
+                    &response_preview,
+                ],
+            );
+        }
 
         // Handle tool calls
         if let Some(tool_calls) = &response.tool_calls {
@@ -718,9 +756,14 @@ pub async fn run_agent_loop(
                 // Log ALL tool calls to vm_activity_log for dashboard visibility
                 {
                     let conn = state.db.conn();
-                    let vm_name = std::env::var("VM_MODE")
-                        .map(|m| if m == "vm" { "praxis-vm".to_string() } else { "host".to_string() })
-                        .unwrap_or_else(|_| "host".to_string());
+                    let vm_name = if tc.function.name.starts_with("vm_") {
+                        // Try to extract real vm name from tool arguments
+                        let args_parsed: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
+                        args_parsed.get("name").and_then(|v| v.as_str()).or_else(|| args_parsed.get("vm_name").and_then(|v| v.as_str())).unwrap_or("praxis-vm").to_string()
+                    } else {
+                        // For non-vm tools in VM mode, tag with the active VM name if available
+                        ctx.custom_data.get("active_vm").and_then(|v| v.as_str()).unwrap_or("host").to_string()
+                    };
                     let _ = conn.execute(
                         "INSERT INTO vm_activity_log (vm_id, action, input, output) VALUES (?1, ?2, ?3, ?4)",
                         rusqlite::params![
@@ -738,8 +781,10 @@ pub async fn run_agent_loop(
                     if auto_screenshot {
                         let data_dir =
                             std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+                        let args_parsed: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
+                        let vm_name = args_parsed.get("name").and_then(|v| v.as_str()).or_else(|| args_parsed.get("vm_name").and_then(|v| v.as_str())).unwrap_or("praxis-vm");
                         if let Some(path) =
-                            crate::tools::vm_tools::save_screenshot_to_disk("praxis-vm", &data_dir)
+                            crate::tools::vm_tools::save_screenshot_to_disk(vm_name, &data_dir)
                                 .await
                         {
                             final_result = format!("{}\n\nScreenshot saved to: {}", result, path);
@@ -1623,29 +1668,67 @@ async fn execute_tool_call(
                 .unwrap_or(fallback_ch);
             let caption = args["caption"].as_str();
             let vm_name = args["vm_name"].as_str().unwrap_or("praxis-vm");
-            match crate::tools::discord_interactive::send_screenshot_to_discord(
-                channel_id, caption, vm_name,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(e) => format!("Error: {}", e),
+            if channel_id == "web" {
+                match crate::tools::web_interactive::send_screenshot_to_web(
+                    user_id, caption, vm_name,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => format!("Error: {}", e),
+                }
+            } else {
+                match crate::tools::discord_interactive::send_screenshot_to_discord(
+                    channel_id, caption, vm_name,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => format!("Error: {}", e),
+                }
             }
         }
         "screenshot_with_feedback" => {
             let channel_id = args["channel_id"].as_str().unwrap_or("");
             let feedback = args["feedback"].as_str().unwrap_or("");
             let vm_name = args["vm_name"].as_str().unwrap_or("praxis-vm");
-            match crate::tools::discord_interactive::screenshot_with_feedback(
-                channel_id, feedback, vm_name,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(e) => format!("Error: {}", e),
+            if channel_id == "web" {
+                match crate::tools::web_interactive::screenshot_with_feedback_web(
+                    user_id, feedback, vm_name,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => format!("Error: {}", e),
+                }
+            } else {
+                match crate::tools::discord_interactive::screenshot_with_feedback(
+                    channel_id, feedback, vm_name,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => format!("Error: {}", e),
+                }
             }
         }
         "ask_questions" => {
+            // Get timeout from args, then context, then default to 120
+            let default_timeout = ctx_data
+                .as_ref()
+                .and_then(|c| c.get("question_timeout_secs"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(120);
+            let timeout = args["timeout_secs"].as_u64().unwrap_or(default_timeout);
+
+            // Detect if this is a web user (no Discord pairing)
+            let paired_discord_user_id = db
+                .get_pairing_by_internal_user(user_id)
+                .ok()
+                .flatten()
+                .map(|p| p.discord_user_id)
+                .unwrap_or_default();
+
             let fallback_ch = ctx_data
                 .as_ref()
                 .and_then(|c| c.get("channel_id"))
@@ -1655,25 +1738,9 @@ async fn execute_tool_call(
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(fallback_ch);
-            if channel_id.is_empty() {
-                return "Error: No channel_id provided and no originating channel found. Please specify a channel_id.".to_string();
-            }
-            // Get timeout from args, then context, then default to 120
-            let default_timeout = ctx_data
-                .as_ref()
-                .and_then(|c| c.get("question_timeout_secs"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(120);
-            let timeout = args["timeout_secs"].as_u64().unwrap_or(default_timeout);
-            let paired_discord_user_id = db
-                .get_pairing_by_internal_user(user_id)
-                .ok()
-                .flatten()
-                .map(|p| p.discord_user_id)
-                .unwrap_or_default();
-            if paired_discord_user_id.is_empty() {
-                return "Error: No Discord user pairing found. The user must be paired with a Discord account first.".to_string();
-            }
+
+            let is_web = channel_id == "web" || paired_discord_user_id.is_empty();
+
             let questions_raw = args["questions"].as_array();
             let Some(arr) = questions_raw else {
                 return "Error: 'questions' field is required and must be an array.".to_string();
@@ -1683,9 +1750,8 @@ async fn execute_tool_call(
             }
             let mut questions: Vec<(String, String, Vec<String>)> = Vec::new();
             for (i, q) in arr.iter().enumerate() {
-                // Check for invalid 'options' field
                 if q.get("options").is_some() {
-                    return format!("Error: Question {}: use 'suggestions' with plain strings, not 'options' with objects. Example: \"suggestions\": [\"yes\", \"no\", \"maybe\"]", i + 1);
+                    return format!("Error: Question {}: use 'suggestions' with plain strings, not 'options' with objects.", i + 1);
                 }
                 let label = q["label"].as_str().filter(|s| !s.is_empty());
                 let Some(label) = label else {
@@ -1705,17 +1771,37 @@ async fn execute_tool_call(
                     .unwrap_or_default();
                 questions.push((label.to_string(), text.to_string(), suggestions));
             }
-            tracing::info!(timeout_secs = timeout, "ask_questions: waiting for responses");
-            match crate::tools::discord_interactive::ask_questions(
-                channel_id,
-                &questions,
-                timeout,
-                &paired_discord_user_id,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(e) => format!("Error: {}", e),
+            tracing::info!(timeout_secs = timeout, is_web, "ask_questions: waiting for responses");
+
+            if is_web {
+                match crate::tools::web_interactive::ask_questions_web(
+                    user_id,
+                    &questions,
+                    timeout,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => format!("Error: {}", e),
+                }
+            } else {
+                if channel_id.is_empty() {
+                    return "Error: No channel_id provided and no originating channel found. Please specify a channel_id.".to_string();
+                }
+                if paired_discord_user_id.is_empty() {
+                    return "Error: No Discord user pairing found.".to_string();
+                }
+                match crate::tools::discord_interactive::ask_questions(
+                    channel_id,
+                    &questions,
+                    timeout,
+                    &paired_discord_user_id,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => format!("Error: {}", e),
+                }
             }
         }
         "cron_add" => {

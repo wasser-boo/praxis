@@ -4,6 +4,9 @@ let chatPollInterval = null;
 let chatUserId = 'default';
 let chatAttachments = [];
 let vmRefreshInterval = null;
+let chatLastMsgId = 0;
+let chatLastResponse = '';
+let isAgentActive = false;
 
 // ═══ Auth ══════════════════════════════════════════════════════════════════════
 
@@ -42,10 +45,9 @@ async function apiFetch(path, options = {}) {
 function apiPost(path, body) {
     return apiFetch(path, { method: 'POST', body: JSON.stringify(body) });
 }
-
 function apiGet(path) { return apiFetch(path); }
 
-// ═══ Screen & Tab Management ═══════════════════════════════════════════════════
+// ═══ Screen & Tab ══════════════════════════════════════════════════════════════
 
 async function validateTokenAndLoad() {
     try {
@@ -92,7 +94,7 @@ async function loadTabData(tab) {
     } catch (err) { console.error(`Failed to load ${tab}:`, err); }
 }
 
-// ═══ Overview ═══════════════════════════════════════════════════════════════════
+// ═══ Overview ═════════════════════════════════════════════════════════════════════
 
 async function loadOverview() {
     try {
@@ -116,7 +118,7 @@ async function loadOverview() {
                 <div class="actions">
                 <button class="btn btn-sm btn-primary" onclick="quickStartAgent('${escapeHtml(uid)}')">Start Agent</button>
                 </div></div>`).join('')
-            : '<div class="data-item"><span class="name">No users. Pair a bot or create a context first.</span></div>';
+            : '<div class="data-item"><span class="name">No users yet. Pair a bot or create a context first.</span></div>';
     } catch (err) { console.error('Overview error:', err); }
 }
 
@@ -127,11 +129,10 @@ function quickStartAgent(userId) {
     setTimeout(() => chatStartAgent(), 300);
 }
 
-// ═══ Chat Tab ═══════════════════════════════════════════════════════════════════
+// ═══ Chat Tab ════════════════════════════════════════════════════════════════════
 
 function initChatTab() {
     document.getElementById('chat-user-name').textContent = chatUserId;
-    // Auto-expand textarea
     const input = document.getElementById('chat-input');
     input.addEventListener('input', () => {
         input.style.height = 'auto';
@@ -140,8 +141,8 @@ function initChatTab() {
 }
 
 async function loadChatStatus() {
-    const isActive = await checkAgentActive(chatUserId);
-    updateAgentUI(isActive);
+    const active = await checkAgentActive(chatUserId);
+    updateAgentUI(active);
     await loadCLStatus();
     loadAvatar();
 }
@@ -155,6 +156,7 @@ async function checkAgentActive(userId) {
 }
 
 function updateAgentUI(active) {
+    isAgentActive = active;
     const badge = document.getElementById('chat-agent-badge');
     const startBtn = document.getElementById('chat-start-btn');
     const stopBtn = document.getElementById('chat-stop-btn');
@@ -196,8 +198,7 @@ async function chatStartAgent() {
 
 async function chatStopAgent() {
     try {
-        const res = await apiFetch(`/api/agent/stop/${encodeURIComponent(chatUserId)}`, { method: 'POST' });
-        await res.json();
+        await apiFetch(`/api/agent/stop/${encodeURIComponent(chatUserId)}`, { method: 'POST' });
         addChatMessage('system', 'Agent stopped');
         updateAgentUI(false);
     } catch (err) { addChatMessage('feedback', 'Failed to stop: ' + err.message); }
@@ -211,13 +212,12 @@ async function chatSendMessage() {
     input.style.height = 'auto';
 
     const attList = [...chatAttachments];
-    // Clear attachments UI
     chatAttachments = [];
     renderAttachments();
 
     const displayMsg = msg || '(attachments)';
-    addChatMessage('user', displayMsg);
-    startChatTimer(30);
+    addChatMessage('user', displayMsg, true);
+    startChatTimer(60);
 
     try {
         const res = await apiFetch('/api/chat/send', {
@@ -232,6 +232,9 @@ async function chatSendMessage() {
         if (data.error) {
             addChatMessage('feedback', data.error);
             stopChatTimer();
+        } else if (data.type === 'agent_started') {
+            addChatMessage('system', data.message);
+            updateAgentUI(true);
         }
     } catch (err) {
         addChatMessage('feedback', 'Send failed: ' + err.message);
@@ -243,7 +246,37 @@ function chatKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSendMessage(); }
 }
 
-// ═══ Chat Polling (for responses & feedback) ════════════════════════════════════
+function showChatOptions(questionId, suggestions) {
+    const box = document.getElementById('chat-options-box');
+    if (!suggestions || suggestions.length === 0) { box.style.display = 'none'; return; }
+    box.style.display = 'flex';
+    box.dataset.questionId = questionId;
+    box.innerHTML = suggestions.map((s, i) => {
+        const emoji = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][i] || '◾';
+        return `<div class="chat-option" onclick="selectChatOption('${questionId}', ${i})">
+            <span class="emoji">${emoji}</span> ${escapeHtml(s)}
+        </div>`;
+    }).join('');
+}
+
+async function selectChatOption(questionId, idx) {
+    document.getElementById('chat-options-box').style.display = 'none';
+    addChatMessage('user', `Selected option ${idx + 1}`, true);
+    try {
+        await apiFetch('/api/chat/send', {
+            method: 'POST',
+            body: JSON.stringify({
+                user_id: chatUserId,
+                message: '',
+                is_option: true,
+                question_id: questionId,
+                option_index: idx
+            })
+        });
+    } catch (err) { console.error('Option send failed:', err); }
+}
+
+// ═══ Chat Polling ════════════════════════════════════════════════════════════════
 
 function startChatPolling() {
     stopChatPolling();
@@ -256,12 +289,19 @@ function stopChatPolling() {
 
 async function pollChatMessages() {
     try {
-        // Poll messages for this user
+        // Poll messages
         const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}`);
         const data = await res.json();
         if (data.messages && data.messages.length > 0) {
-            const last = data.messages[data.messages.length - 1];
-            renderLastActivity(last);
+            const msgs = data.messages;
+            // Only show new messages (skip already seen)
+            for (const m of msgs) {
+                const id = m.id || (m.role + (m.content || '').slice(0, 50));
+                if (id && id !== chatLastMsgId) {
+                    chatLastMsgId = id;
+                    renderChatMessage(m);
+                }
+            }
         }
 
         // Poll CL status
@@ -269,26 +309,38 @@ async function pollChatMessages() {
     } catch {}
 }
 
-let lastDisplayedMsgId = 0;
-function renderLastActivity(msg) {
-    // Simple dedup by content length
-    const msgs = document.getElementById('chat-messages');
-    const existing = msgs.querySelectorAll('.chat-msg');
-    if (msg.content && msg.content !== lastDisplayedMsgId) {
-        lastDisplayedMsgId = msg.content;
-        if (msg.role === 'assistant' && msg.content && msg.content !== 'Hello') {
-            addChatMessage('assistant', msg.content);
-            stopChatTimer();
+function renderChatMessage(m) {
+    if (m.role === 'assistant' && m.content && m.content !== 'Hello') {
+        // Check for web question
+        if (m.content.includes('__WEB_QUESTION__')) {
+            const parts = m.content.split('__WEB_QUESTION__');
+            if (parts.length >= 2) {
+                const inner = parts[1];
+                const qParts = inner.split('__');
+                const qid = qParts[0];
+                const text = qParts.slice(1).join('__');
+                // Parse suggestions from text
+                const lines = text.split('\n');
+                const suggLines = lines.filter(l => l.match(/^\d+\s/));
+                const suggestions = suggLines.map(l => l.replace(/^\d+\s/, ''));
+                // Show question text (without suggestions)
+                const questionText = lines.slice(0, lines.indexOf(suggLines[0] || '')).join('\n');
+                addChatMessage('assistant', questionText);
+                if (suggestions.length > 0) showChatOptions(qid, suggestions);
+                return;
+            }
         }
-        if (msg.tool_calls && msg.tool_calls.length > 0) {
-            msg.tool_calls.forEach(tc => {
-                addChatMessage('tool', `<span class="tool-name">${escapeHtml(tc.name)}</span> ${escapeHtml(tc.arguments)}`);
-            });
-        }
+        addChatMessage('assistant', m.content);
+        stopChatTimer();
+    }
+    if (m.tool_calls && m.tool_calls.length > 0) {
+        m.tool_calls.forEach(tc => {
+            addChatMessage('tool', `<span class="tool-name">${escapeHtml(tc.name)}</span>`, tc.arguments);
+        });
     }
 }
 
-// ═══ Chat Timer ═════════════════════════════════════════════════════════════════
+// ═══ Chat Timer ════════════════════════════════════════════════════════════════
 
 let chatTimerId = null;
 let chatTimerTotal = 0;
@@ -307,7 +359,7 @@ function startChatTimer(seconds) {
         const pct = (remaining / chatTimerTotal) * 100;
         document.getElementById('chat-timer-fill').style.width = pct + '%';
         document.getElementById('chat-timer-text').textContent = Math.ceil(remaining) + 's';
-        if (remaining <= 0) { stopChatTimer(); }
+        if (remaining <= 0) stopChatTimer();
     }, 200);
 }
 
@@ -318,34 +370,43 @@ function stopChatTimer() {
 
 // ═══ Chat Messages ══════════════════════════════════════════════════════════════
 
-function addChatMessage(type, content) {
+function addChatMessage(type, content, showAvatar = false) {
     const container = document.getElementById('chat-messages');
-    // Remove welcome message
     const welcome = container.querySelector('.chat-welcome');
     if (welcome) welcome.remove();
 
     const div = document.createElement('div');
     div.className = `chat-msg ${type}`;
-    div.innerHTML = content;
+
+    // Avatar for user messages
+    if (showAvatar && type === 'user') {
+        div.innerHTML = `<div style="display:flex;align-items:flex-start;gap:0.5rem">
+            <img class="avatar-sm" src="/api/avatar/${chatUserId}?t=${Date.now()}" alt="" onerror="this.style.display='none'"
+                style="width:28px;height:28px;border-radius:50%;border:2px solid var(--accent-cyan);object-fit:cover;flex-shrink:0">
+            <span>${escapeHtml(content)}</span>
+        </div>`;
+    } else if (type === 'tool') {
+        const args = arguments[2] || '';
+        div.innerHTML = `${content}${args ? `<div class="tool-out">${escapeHtml(args)}</div>` : ''}`;
+    } else {
+        div.textContent = content;
+    }
+
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
 }
 
-// ═══ Attachments ════════════════════════════════════════════════════════════════
+// ═══ Attachments ═══════════════════════════════════════════════════════════════
 
 function renderAttachments() {
     const preview = document.getElementById('chat-attachments-preview');
-    if (chatAttachments.length === 0) {
-        preview.style.display = 'none';
-        return;
-    }
+    if (chatAttachments.length === 0) { preview.style.display = 'none'; return; }
     preview.style.display = 'flex';
     preview.innerHTML = chatAttachments.map((a, i) => `
         <div class="chat-attachment">
             <span>${escapeHtml(a.split('/').pop())}</span>
-            <span class="remove" onclick="removeAttachment(${i})">&#10005;</span>
-        </div>
-    `).join('');
+            <span class="remove" onclick="removeAttachment(${i})">✕</span>
+        </div>`).join('');
 }
 
 function removeAttachment(i) { chatAttachments.splice(i, 1); renderAttachments(); }
@@ -364,9 +425,7 @@ async function chatHandleFiles(files) {
         if (data.files) {
             chatAttachments.push(...data.files);
             renderAttachments();
-        } else if (data.error) {
-            addChatMessage('feedback', data.error);
-        }
+        } else if (data.error) addChatMessage('feedback', data.error);
     } catch (err) { addChatMessage('feedback', 'Upload failed: ' + err.message); }
     document.getElementById('chat-file-input').value = '';
 }
@@ -396,7 +455,7 @@ async function chatUploadAvatar() {
     input.click();
 }
 
-// ═══ CL Status ══════════════════════════════════════════════════════════════════
+// ═══ CL Status ════════════════════════════════════════════════════════════════
 
 async function loadCLStatus() {
     try {
@@ -418,27 +477,7 @@ async function loadCLStatus() {
     } catch {}
 }
 
-// ═══ Options Box ════════════════════════════════════════════════════════════════
-
-function showOptions(options) {
-    const box = document.getElementById('chat-options-box');
-    if (!options || options.length === 0) { box.style.display = 'none'; return; }
-    box.style.display = 'flex';
-    box.innerHTML = options.map((o, i) => {
-        const label = typeof o === 'string' ? o : o.label;
-        const emoji = ['1⃣','2⃣','3⃣','4⃣','5⃣','6⃣'][i] || '◾';
-        return `<div class="chat-option" onclick="selectOption(${i})"><span class="emoji">${emoji}</span> ${escapeHtml(label)}</div>`;
-    }).join('');
-}
-
-function selectOption(i) {
-    document.getElementById('chat-options-box').style.display = 'none';
-    const input = document.getElementById('chat-input');
-    input.value = i.toString();
-    chatSendMessage();
-}
-
-// ═══ Contexts ═══════════════════════════════════════════════════════════════════
+// ═══ Contexts ════════════════════════════════════════════════════════════════
 
 async function loadContexts() {
     try {
@@ -447,8 +486,7 @@ async function loadContexts() {
         const data = await res.json();
         const list = document.getElementById('contexts-list');
         if (!data.contexts || data.contexts.length === 0) {
-            list.innerHTML = '<div class="data-item"><span class="name">No contexts found</span></div>';
-            return;
+            list.innerHTML = '<div class="data-item"><span class="name">No contexts found</span></div>'; return;
         }
         list.innerHTML = data.contexts.map(ctx => {
             const uid = ctx.user_id || '';
@@ -499,12 +537,9 @@ async function viewContext(userId) {
                     <div class="data-item"><span class="name">Active State</span><span class="meta">${escapeHtml(ctx.active_state || '-')}</span></div>
                     <div class="data-item"><span class="name">Active Templates</span><span class="meta">${(ctx.active_templates || []).join(', ') || '-'}</span></div>
                 </div>
-                <h3>Settings</h3>
-                <div class="data-list" style="margin-bottom:1rem;max-height:200px;overflow-y:auto">${settingsHtml}</div>
-                <h3>Custom Data</h3>
-                <div class="data-list" style="margin-bottom:1rem">${customDataHtml}</div>
-                <h3>SM Data</h3>
-                <div class="data-list" style="margin-bottom:1rem">${clDataHtml}</div>
+                <h3>Settings</h3><div class="data-list" style="margin-bottom:1rem;max-height:200px;overflow-y:auto">${settingsHtml}</div>
+                <h3>Custom Data</h3><div class="data-list" style="margin-bottom:1rem">${customDataHtml}</div>
+                <h3>SM Data</h3><div class="data-list" style="margin-bottom:1rem">${clDataHtml}</div>
                 <button class="btn btn-primary" style="width:auto" id="ctx-edit-btn">Edit</button>
                 <button class="btn btn-danger" style="width:auto" id="ctx-delete-btn">Delete</button>
             </div>
@@ -550,7 +585,7 @@ async function deleteContext(userId) {
     } catch (err) { alert('Failed: ' + err.message); }
 }
 
-// ═══ Templates ═════════════════════════════════════════════════════════════════
+// ═══ Templates ════════════════════════════════════════════════════════════════
 
 async function loadTemplates() {
     try {
@@ -576,7 +611,7 @@ async function loadTemplates() {
             for (const t of root) html += renderTpl(t);
             for (const folder of Object.keys(folders).sort()) {
                 html += `<div class="data-item" style="cursor:pointer;border-left:2px solid var(--border);margin-top:0.5rem" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">
-                    <span class="name" style="font-weight:600">&#x1F4C1; ${escapeHtml(folder)}/</span><span class="meta">${folders[folder].length} template(s)</span></div><div style="display:block">`;
+                    <span class="name" style="font-weight:600">&#128193; ${escapeHtml(folder)}/</span><span class="meta">${folders[folder].length} template(s)</span></div><div style="display:block">`;
                 for (const t of folders[folder]) html += renderTpl(t);
                 html += '</div>';
             }
@@ -589,22 +624,26 @@ function createTemplate() {
     showModal('Create Template', `
         <div style="margin-bottom:0.5rem">
             <label style="font-size:0.8rem;color:var(--text-secondary)">Template name (use / for folders):</label>
-            <input id="new-template-name" type="text" placeholder="tasks/my_task">
+            <input id="new-template-name" type="text" placeholder="tasks/my_task" style="width:100%;padding:0.3rem;margin-top:0.2rem">
         </div>
-        <textarea id="template-content" class="code-editor"><poml><task><p>Your content here</p></task></poml></textarea>
+        <textarea id="template-content" class="code-editor"><poml>
+  <task>
+    <p>Your template content here</p>
+  </task>
+</poml></textarea>
         <button class="btn btn-primary" style="margin-top:1rem" onclick="saveNewTemplate()">Create</button>`);
 }
 
 async function saveNewTemplate() {
     const name = document.getElementById('new-template-name').value.trim();
     const content = document.getElementById('template-content').value;
-    if (!name) { alert('Name required'); return; }
+    if (!name) { alert('Name is required'); return; }
     await apiFetch('/api/templates', { method: 'POST', body: JSON.stringify({ name, content }) });
     closeModal(); loadTemplates();
 }
 
 async function deleteTemplate(name) {
-    if (!confirm(`Delete "${name}"?`)) return;
+    if (!confirm(`Delete template "${name}"?`)) return;
     await apiFetch(`/api/templates/${name}`, { method: 'DELETE' });
     loadTemplates();
 }
@@ -612,19 +651,19 @@ async function deleteTemplate(name) {
 async function editTemplate(name) {
     const res = await apiGet(`/api/templates/${name}`);
     const tpl = await res.json();
-    let userOpts = '<option value="">No user</option>';
+    let userOptions = '<option value="">No user (skip preview)</option>';
     try {
         const ctxRes = await apiGet('/api/contexts');
         if (ctxRes.ok) {
             const ctxData = await ctxRes.json();
-            userOpts += (ctxData.contexts || []).map(c => c.user_id).filter(Boolean)
+            userOptions += (ctxData.contexts || []).map(c => c.user_id).filter(Boolean)
                 .map(uid => `<option value="${escapeHtml(uid)}">${escapeHtml(uid)}</option>`).join('');
         }
     } catch {}
-    showModal('Edit: ' + name, `
+    showModal('Edit Template: ' + name, `
         <div style="margin-bottom:0.5rem">
-            <label style="font-size:0.8rem;color:var(--text-secondary)">Preview as:</label>
-            <select id="template-preview-user">${userOpts}</select>
+            <label style="font-size:0.8rem;color:var(--text-secondary)">Preview as user:</label>
+            <select id="template-preview-user" style="width:100%;padding:0.3rem;margin-top:0.2rem">${userOptions}</select>
         </div>
         <textarea id="template-content" class="code-editor">${escapeHtml(tpl.content || '')}</textarea>
         <button class="btn btn-primary" style="margin-top:1rem" onclick="saveTemplate('${escapeHtml(name)}')">Save & Preview</button>
@@ -633,22 +672,22 @@ async function editTemplate(name) {
 
 async function saveTemplate(name) {
     const content = document.getElementById('template-content').value;
-    const userId = document.getElementById('template-preview-user').value;
+    const userId = document.getElementById('template-preview-user')?.value || '';
+    const previewEl = document.getElementById('template-preview');
     const res = await apiFetch(`/api/templates/${name}`, {
         method: 'PUT', body: JSON.stringify({ content, user_id: userId })
     });
     const data = await res.json();
-    const preview = document.getElementById('template-preview');
-    if (preview) {
-        preview.style.display = 'block';
-        preview.innerHTML = data.rendered_preview
-            ? `<div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:0.3rem">Rendered:</div><pre style="background:var(--bg-tertiary);padding:0.75rem;border-radius:6px;white-space:pre-wrap;font-size:0.8rem;max-height:400px;overflow:auto">${escapeHtml(data.rendered_preview)}</pre>`
-            : `<div style="color:var(--error)">${escapeHtml(data.error || '')}</div>`;
+    if (previewEl) {
+        previewEl.style.display = 'block';
+        previewEl.innerHTML = data.rendered_preview
+            ? `<div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:0.3rem">Rendered preview:</div><pre style="background:var(--bg-tertiary,#1a1a2e);padding:0.75rem;border-radius:6px;white-space:pre-wrap;font-size:0.8rem;max-height:400px;overflow:auto">${escapeHtml(data.rendered_preview)}</pre>`
+            : `<div style="color:var(--error,#f44)">${escapeHtml(data.error || '')}</div>`;
     }
     if (data.success) loadTemplates();
 }
 
-// ═══ Tools ══════════════════════════════════════════════════════════════════════
+// ═══ Tools ════════════════════════════════════════════════════════════════
 
 async function loadTools() {
     try {
@@ -656,7 +695,7 @@ async function loadTools() {
         const data = await res.json();
         const list = document.getElementById('tools-list');
         if (!data.tools || data.tools.length === 0) {
-            list.innerHTML = '<div class="data-item"><span class="name">No tools</span></div>'; return;
+            list.innerHTML = '<div class="data-item"><span class="name">No tools found</span></div>'; return;
         }
         list.innerHTML = data.tools.map(t => `<div class="data-item">
             <div><span class="name">${escapeHtml(t.name)}</span><span class="meta">${escapeHtml(t.description || '')}</span></div>
@@ -670,36 +709,43 @@ async function toggleTool(name, enabled) {
     loadTools();
 }
 
-// ═══ Secrets ═══════════════════════════════════════════════════════════════════
+// ═══ Secrets ════════════════════════════════════════════════════════════════
 
 async function loadSecrets() {
     try {
         const res = await apiGet('/api/secrets');
         const data = await res.json();
+        const container = document.getElementById('secrets-content');
         const knownKeys = ['discord_bot_token', 'openai_api_key', 'anthropic_api_key', 'minimax_api_key',
             'mimo_api_key', 'elevenlabs_api_key', 'gateway_api_key', 'dashboard_admin_password'];
         const customKeys = Object.keys(data).filter(k => !knownKeys.includes(k));
 
-        container = document.getElementById('secrets-content');
+        const builtInHtml = knownKeys.map(key => `<div class="data-item">
+            <span class="name">${escapeHtml(key)}</span><span class="meta">${escapeHtml(data[key] || 'Not set')}</span>
+        </div>`).join('');
+
+        const customHtml = customKeys.length > 0 ? `<h3 style="margin-top:1rem">Custom Secrets</h3>
+            <div class="data-list">${customKeys.map(key => `<div class="data-item">
+                <span class="name">${escapeHtml(key)}</span><span class="meta">${escapeHtml(data[key] || 'Not set')}</span>
+                <button class="btn btn-sm btn-danger" style="margin-left:auto" onclick="deleteCustomSecret('${escapeHtml(key)}')">Delete</button>
+            </div>`).join('')}</div>` : '';
+
         container.innerHTML = `
-            <div class="data-list">${knownKeys.map(k => `<div class="data-item"><span class="name">${escapeHtml(k)}</span><span class="meta">${escapeHtml(data[k] || 'Not set')}</span></div>`).join('')}</div>
-            ${customKeys.length > 0 ? `<h3 style="margin-top:1rem">Custom</h3><div class="data-list">${customKeys.map(k => `<div class="data-item"><span class="name">${escapeHtml(k)}</span><span class="meta">${escapeHtml(data[k] || 'Not set')}</span><button class="btn btn-sm btn-danger" onclick="deleteCustomSecret('${escapeHtml(k)}')">Delete</button></div>`).join('')}</div>` : ''}
+            <div class="data-list">${builtInHtml}</div>${customHtml}
             <div style="margin-top:1.5rem"><h3>Update Secret</h3>
             <div class="form-group"><label>Field</label><select id="secret-field" style="width:100%;padding:0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary)">
                 ${knownKeys.map(k => `<option value="${k}">${escapeHtml(k)}</option>`).join('')}
                 ${customKeys.map(k => `<option value="${k}">${escapeHtml(k)} (custom)</option>`).join('')}
             </select></div>
-            <div class="form-group"><label>New Value</label><input type="password" id="secret-value" placeholder="Enter value"></div>
-            <div class="form-group"><label>Master Password</label><input type="password" id="secret-master" placeholder="MASTER_KEY"></div>
-            <button class="btn btn-primary" onclick="saveSecret()">Save</button>
-            <p id="secret-msg" class="hidden" style="margin-top:0.5rem"></p></div>
-            <div style="margin-top:1.5rem"><h3>Add Custom</h3>
-            <div class="form-group"><label>Key</label><input type="text" id="custom-secret-key" placeholder="MY_KEY"></div>
-            <div class="form-group"><label>Value</label><input type="password" id="custom-secret-value" placeholder="Value"></div>
-            <div class="form-group"><label>Master Password</label><input type="password" id="custom-secret-master" placeholder="MASTER_KEY"></div>
-            <button class="btn btn-primary" onclick="addCustomSecret()">Add</button>
-            <p id="custom-secret-msg" class="hidden" style="margin-top:0.5rem"></p></div>`;
-    } catch (err) { console.error(err); }
+            <div class="form-group"><label>New Value</label><input type="password" id="secret-value" placeholder="Enter new value"></div>
+            <div class="form-group"><label>Master Password (required to save to disk)</label><input type="password" id="secret-master" placeholder="Enter MASTER_KEY"></div>
+            <button class="btn btn-primary" onclick="saveSecret()">Save Secret</button><p id="secret-msg" class="hidden" style="margin-top:0.5rem"></p></div>
+            <div style="margin-top:1.5rem"><h3>Add Custom Secret</h3>
+            <div class="form-group"><label>Key Name</label><input type="text" id="custom-secret-key" placeholder="e.g. MY_API_KEY"></div>
+            <div class="form-group"><label>Value</label><input type="password" id="custom-secret-value" placeholder="Enter value"></div>
+            <div class="form-group"><label>Master Password</label><input type="password" id="custom-secret-master" placeholder="Enter MASTER_KEY"></div>
+            <button class="btn btn-primary" onclick="addCustomSecret()">Add Custom Secret</button><p id="custom-secret-msg" class="hidden" style="margin-top:0.5rem"></p></div>`;
+    } catch (err) { console.error('Secrets error:', err); }
 }
 
 async function saveSecret() {
@@ -707,22 +753,17 @@ async function saveSecret() {
     const value = document.getElementById('secret-value').value;
     const master = document.getElementById('secret-master').value;
     const msgEl = document.getElementById('secret-msg');
-    if (!value) { msgEl.textContent = 'Value required'; msgEl.style.color = 'var(--error)'; msgEl.classList.remove('hidden'); return; }
+    if (!value) { msgEl.textContent = 'Value is required'; msgEl.style.color = 'var(--error)'; msgEl.classList.remove('hidden'); return; }
     const body = { [field]: value };
     if (master) body.master_password = master;
     try {
         const res = await apiFetch('/api/secrets', { method: 'PUT', body: JSON.stringify(body) });
         msgEl.textContent = await res.text();
-        msgEl.style.color = 'var(--success)';
-        msgEl.classList.remove('hidden');
+        msgEl.style.color = 'var(--success)'; msgEl.classList.remove('hidden');
         document.getElementById('secret-value').value = '';
         document.getElementById('secret-master').value = '';
         setTimeout(loadSecrets, 1500);
-    } catch (err) {
-        msgEl.textContent = 'Failed: ' + err.message;
-        msgEl.style.color = 'var(--error)';
-        msgEl.classList.remove('hidden');
-    }
+    } catch (err) { msgEl.textContent = 'Failed: ' + err.message; msgEl.style.color = 'var(--error)'; msgEl.classList.remove('hidden'); }
 }
 
 async function addCustomSecret() {
@@ -730,14 +771,13 @@ async function addCustomSecret() {
     const value = document.getElementById('custom-secret-value').value;
     const master = document.getElementById('custom-secret-master').value;
     const msgEl = document.getElementById('custom-secret-msg');
-    if (!key || !value) { msgEl.textContent = 'Key and value required'; msgEl.style.color = 'var(--error)'; msgEl.classList.remove('hidden'); return; }
+    if (!key || !value) { msgEl.textContent = 'Key and value are required'; msgEl.style.color = 'var(--error)'; msgEl.classList.remove('hidden'); return; }
     const body = { [key]: value };
     if (master) body.master_password = master;
     try {
         const res = await apiFetch('/api/secrets', { method: 'PUT', body: JSON.stringify(body) });
         msgEl.textContent = await res.text();
-        msgEl.style.color = 'var(--success)';
-        msgEl.classList.remove('hidden');
+        msgEl.style.color = 'var(--success)'; msgEl.classList.remove('hidden');
         document.getElementById('custom-secret-key').value = '';
         document.getElementById('custom-secret-value').value = '';
         document.getElementById('custom-secret-master').value = '';
@@ -746,34 +786,42 @@ async function addCustomSecret() {
 }
 
 async function deleteCustomSecret(key) {
-    if (!confirm(`Delete "${key}"?`)) return;
+    if (!confirm(`Delete custom secret "${key}"?`)) return;
     try {
         await apiFetch('/api/secrets', { method: 'PUT', body: JSON.stringify({ [key]: '' }) });
         loadSecrets();
-    } catch (err) { alert('Failed: ' + err.message); }
+    } catch (err) { alert('Failed to delete: ' + err.message); }
 }
 
-// ═══ Pairings ══════════════════════════════════════════════════════════════════
+// ═══ Pairings ════════════════════════════════════════════════════════════════
 
 async function loadPairings() {
     try {
-        const [pRes, ppRes] = await Promise.all([apiGet('/api/pairings'), apiGet('/api/pairings/pending')]);
-        const data = await pRes.json();
-        const pendingData = await ppRes.json();
+        const [pairingsRes, pendingRes] = await Promise.all([apiGet('/api/pairings'), apiGet('/api/pairings/pending')]);
+        const data = await pairingsRes.json();
+        const pendingData = await pendingRes.json();
         document.getElementById('pairings-list').innerHTML = (data.pairings || []).length
-            ? data.pairings.map(p => `<div class="data-item"><div><span class="name">${escapeHtml(p.user_id)}</span><span class="meta">Discord: ${escapeHtml(p.discord_user_id)}</span></div><div class="actions"><button class="btn btn-sm btn-danger" onclick="deletePairing('${escapeHtml(p.user_id)}')">Delete</button></div></div>`).join('')
-            : '<div class="data-item"><span class="name">No pairings</span></div>';
+            ? data.pairings.map(p => `<div class="data-item">
+                <div><span class="name">${escapeHtml(p.user_id)}</span><span class="meta">Discord: ${escapeHtml(p.discord_user_id)} | Paired: ${escapeHtml(p.paired_at || '-')}</span></div>
+                <div class="actions"><button class="btn btn-sm btn-danger" onclick="deletePairing('${escapeHtml(p.user_id)}')">Delete</button></div>
+            </div>`).join('')
+            : '<div class="data-item"><span class="name">No pairings found</span></div>';
         document.getElementById('pending-pairings-list').innerHTML = (pendingData.pending_pairings || []).length
-            ? pendingData.pending_pairings.map(p => `<div class="data-item"><div><span class="name">${escapeHtml(p.code)}</span><span class="meta">Discord: ${escapeHtml(p.discord_user_id)}</span></div><div class="actions"><button class="btn btn-sm btn-primary" onclick="approvePendingPairing('${escapeHtml(p.code)}')">Approve</button><button class="btn btn-sm btn-danger" onclick="deletePendingPairing('${escapeHtml(p.code)}')">Delete</button></div></div>`).join('')
-            : '<div class="data-item"><span class="name">No pending</span></div>';
-    } catch (err) { console.error(err); }
+            ? pendingData.pending_pairings.map(p => `<div class="data-item">
+                <div><span class="name">${escapeHtml(p.code)}</span><span class="meta">Discord: ${escapeHtml(p.discord_user_id)} | Expires: ${escapeHtml(p.expires_at)}</span></div>
+                <div class="actions">
+                <button class="btn btn-sm btn-primary" onclick="approvePendingPairing('${escapeHtml(p.code)}')">Approve</button>
+                <button class="btn btn-sm btn-danger" onclick="deletePendingPairing('${escapeHtml(p.code)}')">Delete</button>
+                </div></div>`).join('')
+            : '<div class="data-item"><span class="name">No pending pairings</span></div>';
+    } catch (err) { console.error('Pairings error:', err); }
 }
 
-async function deletePairing(userId) { if (!confirm('Delete?')) return; await apiFetch(`/api/pairings/${userId}`, { method: 'DELETE' }); loadPairings(); }
-async function approvePendingPairing(code) { if (!confirm('Approve?')) return; await apiFetch(`/api/pairings/pending/${code}/approve`, { method: 'POST' }); loadPairings(); }
-async function deletePendingPairing(code) { if (!confirm('Delete?')) return; await apiFetch(`/api/pairings/pending/${code}`, { method: 'DELETE' }); loadPairings(); }
+async function deletePairing(userId) { if (!confirm('Delete this pairing?')) return; await apiFetch(`/api/pairings/${userId}`, { method: 'DELETE' }); loadPairings(); }
+async function approvePendingPairing(code) { if (!confirm('Approve this pending pairing?')) return; await apiFetch(`/api/pairings/pending/${code}/approve`, { method: 'POST' }); loadPairings(); }
+async function deletePendingPairing(code) { if (!confirm('Delete this pending pairing?')) return; await apiFetch(`/api/pairings/pending/${code}`, { method: 'DELETE' }); loadPairings(); }
 
-// ═══ Statemachine Files ════════════════════════════════════════════════════════
+// ═══ Statemachine Files ═════════════════════════════════════════════════════
 
 async function loadSmFiles() {
     try {
@@ -781,37 +829,37 @@ async function loadSmFiles() {
         const data = await res.json();
         const list = document.getElementById('sm-files-list');
         if (!data.sm_files || data.sm_files.length === 0) {
-            list.innerHTML = '<div class="data-item"><span class="name">No SM files</span></div>'; return;
+            list.innerHTML = '<div class="data-item"><span class="name">No statemachine files found</span></div>'; return;
         }
         list.innerHTML = data.sm_files.map(f => `<div class="data-item">
             <span class="name">${escapeHtml(f.name)}</span>
             <div class="actions"><button class="btn btn-sm btn-primary" onclick="editSmFile('${escapeHtml(f.name)}')">Edit</button></div>
         </div>`).join('');
-    } catch (err) { console.error(err); }
+    } catch (err) { console.error('SM files error:', err); }
 }
 
 function createSmFile() {
     showModal('New Statemachine', `
-        <div class="form-group"><label>File Name</label><input type="text" id="new-sm-name" placeholder="workflow.sm"></div>
-        <textarea id="sm-content" class="code-editor">[state start]\nmode = chat\n\n[transitions]\n-> done</textarea>
+        <div class="form-group"><label for="new-sm-name">File Name</label><input type="text" id="new-sm-name" placeholder="e.g. my_workflow.sm"></div>
+        <textarea id="sm-content" class="code-editor" placeholder="[state start]\nmode = chat\n\n[transitions]\n-> done"></textarea>
         <button class="btn btn-primary" style="margin-top:1rem" onclick="saveNewSmFile()">Create</button>`);
 }
 
 async function saveNewSmFile() {
     let name = document.getElementById('new-sm-name').value.trim();
     const content = document.getElementById('sm-content').value;
-    if (!name) { alert('Name required'); return; }
+    if (!name) { alert('File name is required'); return; }
     if (!name.endsWith('.sm')) name += '.sm';
     const res = await apiFetch(`/api/sm-files/${name}`, { method: 'PUT', body: JSON.stringify({ content }) });
-    const text = await res.text();
-    if (text.includes('Error')) { alert(text); }
+    const result = await res.text();
+    if (result.includes('Error')) alert(result);
     else { closeModal(); loadSmFiles(); }
 }
 
 async function editSmFile(name) {
     const res = await apiGet(`/api/sm-files/${name}`);
     const content = await res.text();
-    showModal('Edit: ' + name, `
+    showModal('Edit Statemachine: ' + name, `
         <textarea id="sm-content" class="code-editor">${escapeHtml(content)}</textarea>
         <button class="btn btn-primary" style="margin-top:1rem" onclick="saveSmFile('${escapeHtml(name)}')">Save</button>`);
 }
@@ -819,24 +867,29 @@ async function editSmFile(name) {
 async function saveSmFile(name) {
     const content = document.getElementById('sm-content').value;
     const res = await apiFetch(`/api/sm-files/${name}`, { method: 'PUT', body: JSON.stringify({ content }) });
-    const text = await res.text();
-    if (text.includes('Error')) alert(text);
+    const result = await res.text();
+    if (result.includes('Error')) alert(result);
     else { closeModal(); loadSmFiles(); }
 }
 
-// ═══ Cron Jobs ═════════════════════════════════════════════════════════════════
+// ═══ Cron Jobs ════════════════════════════════════════════════════════════════
 
 async function loadCronJobs() {
     try {
         const res = await apiGet('/api/cron-jobs');
         const data = await res.json();
-        document.getElementById('cron-jobs-list').innerHTML = (data.cron_jobs || []).length
-            ? data.cron_jobs.map(j => `<div class="data-item"><div><span class="name">${escapeHtml(j.name)}</span><span class="meta">${escapeHtml(j.schedule)} | Runs: ${j.run_count}</span></div><div class="toggle ${j.enabled ? 'active' : ''}"></div></div>`).join('')
-            : '<div class="data-item"><span class="name">No cron jobs</span></div>';
-    } catch (err) { console.error(err); }
+        const list = document.getElementById('cron-jobs-list');
+        if (!data.cron_jobs || data.cron_jobs.length === 0) {
+            list.innerHTML = '<div class="data-item"><span class="name">No cron jobs found</span></div>'; return;
+        }
+        list.innerHTML = data.cron_jobs.map(j => `<div class="data-item">
+            <div><span class="name">${escapeHtml(j.name)}</span><span class="meta">${escapeHtml(j.schedule)} | Runs: ${j.run_count}</span></div>
+            <div class="toggle ${j.enabled ? 'active' : ''}"></div>
+        </div>`).join('');
+    } catch (err) { console.error('Cron error:', err); }
 }
 
-// ═══ Messages & Memory ═════════════════════════════════════════════════════════
+// ═══ Messages & Memory ══════════════════════════════════════════════════════
 
 async function populateUserDropdowns() {
     try {
@@ -844,58 +897,71 @@ async function populateUserDropdowns() {
         if (!res.ok) return;
         const data = await res.json();
         const users = (data.contexts || []).map(c => c.user_id).filter(Boolean);
-        for (const sid of ['message-user-id', 'memory-user-id']) {
-            const s = document.getElementById(sid);
-            if (!s) continue;
-            const cur = s.value;
-            s.innerHTML = '<option value="">Select user...</option>' + users.map(u => `<option value="${escapeHtml(u)}">${escapeHtml(u)}</option>`).join('');
-            if (cur && users.includes(cur)) s.value = cur;
+        for (const selectId of ['message-user-id', 'memory-user-id']) {
+            const select = document.getElementById(selectId);
+            if (!select) continue;
+            const current = select.value;
+            select.innerHTML = '<option value="">Select user...</option>' +
+                users.map(uid => `<option value="${escapeHtml(uid)}">${escapeHtml(uid)}</option>`).join('');
+            if (current && users.includes(current)) select.value = current;
         }
     } catch {}
 }
 
 async function loadMessages() {
-    const uid = document.getElementById('message-user-id').value;
-    if (!uid) { alert('Select a user'); return; }
+    const userId = document.getElementById('message-user-id').value;
+    if (!userId) { alert('Please select a User'); return; }
     const list = document.getElementById('messages-list');
-    list.innerHTML = '<div class="data-item">Loading...</div>';
+    list.innerHTML = '<div class="data-item"><span class="name">Loading...</span></div>';
     try {
-        const res = await apiGet(`/api/messages/${encodeURIComponent(uid)}`);
+        const res = await apiGet(`/api/messages/${encodeURIComponent(userId)}`);
+        if (!res.ok) { list.innerHTML = `<div class="data-item"><span style="color:var(--error)">Error ${res.status}</span></div>`; return; }
         const data = await res.json();
-        if (!data.messages || data.messages.length === 0) {
-            list.innerHTML = '<div class="data-item">No messages</div>'; return;
-        }
-        list.innerHTML = data.messages.map(m => `<div class="data-item">
-            <span class="name">${escapeHtml(m.role)}</span>
-            <span class="meta">${escapeHtml((m.content || '').substring(0, 100))}</span>
-        </div>`).join('');
-        const info = document.createElement('div');
-        info.className = 'data-item';
-        info.innerHTML = `<span class="name">${data.message_count} msgs (~${data.total_tokens} tokens)</span>`;
+        if (!data.messages || data.messages.length === 0) { list.innerHTML = '<div class="data-item"><span class="name">No messages found</span></div>'; return; }
+        list.innerHTML = data.messages.map(m => {
+            let toolCallsHtml = '';
+            if (m.tool_calls && m.tool_calls.length > 0) {
+                toolCallsHtml = '<div class="tool-calls">' + m.tool_calls.map(tc =>
+                    `<div class="tool-call"><span class="tool-name">${escapeHtml(tc.name)}</span>: <span class="tool-args">${escapeHtml(tc.arguments)}</span></div>`
+                ).join('') + '</div>';
+            }
+            return `<div class="message ${m.role}">
+                <div class="role">${escapeHtml(m.role)}${m.tool_call_id ? ' (tool: ' + escapeHtml(m.tool_call_id) + ')' : ''}</div>
+                ${toolCallsHtml}
+                <div class="content">${escapeHtml(m.content || '')}</div>
+            </div>`;
+        }).join('');
+        const info = document.createElement('div'); info.className = 'data-item';
+        info.innerHTML = `<span class="name">${data.message_count} messages (~${data.total_tokens} tokens)</span>`;
         list.prepend(info);
-    } catch (err) { list.innerHTML = errorHtml(err.message); }
+    } catch (err) { list.innerHTML = `<div class="data-item"><span style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`; }
 }
 
 async function loadMemory() {
-    const uid = document.getElementById('memory-user-id').value;
-    if (!uid) { alert('Select a user'); return; }
+    const userId = document.getElementById('memory-user-id').value;
+    if (!userId) { alert('Please select a User'); return; }
     const container = document.getElementById('memory-content');
-    container.innerHTML = '<div class="data-item">Loading...</div>';
+    container.innerHTML = '<div class="data-item"><span class="name">Loading...</span></div>';
     try {
-        const res = await apiGet(`/api/memory/${encodeURIComponent(uid)}`);
+        const res = await apiGet(`/api/memory/${encodeURIComponent(userId)}`);
+        if (!res.ok) { container.innerHTML = `<div class="data-item"><span style="color:var(--error)">Error ${res.status}</span></div>`; return; }
         const data = await res.json();
         container.innerHTML = `
-            <h3>Facts</h3><div class="data-list">${(data.learned_facts || []).map(f => `<div class="data-item"><span class="name">${escapeHtml(f)}</span></div>`).join('') || '<div class="data-item">None</div>'}</div>
-            <h3 style="margin-top:1rem">Topics</h3><div class="data-list">${(data.last_topics || []).map(t => `<div class="data-item"><span class="name">${escapeHtml(t)}</span></div>`).join('') || '<div class="data-item">None</div>'}</div>
-            <h3 style="margin-top:1rem">Variables</h3><pre class="code-editor">${JSON.stringify(data.custom_variables || {}, null, 2)}</pre>`;
-    } catch (err) { container.innerHTML = errorHtml(err.message); }
+            <h3>Learned Facts</h3>
+            <div class="data-list">${(data.learned_facts || []).map(f => `<div class="data-item"><span class="name">${escapeHtml(f)}</span></div>`).join('') || '<div class="data-item"><span class="name">None</span></div>'}</div>
+            <h3 style="margin-top:1rem">Last Topics</h3>
+            <div class="data-list">${(data.last_topics || []).map(t => `<div class="data-item"><span class="name">${escapeHtml(t)}</span></div>`).join('') || '<div class="data-item"><span class="name">None</span></div>'}</div>
+            <h3 style="margin-top:1rem">Custom Variables</h3>
+            <pre class="code-editor">${JSON.stringify(data.custom_variables || {}, null, 2)}</pre>`;
+    } catch (err) { container.innerHTML = `<div class="data-item"><span style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`; }
 }
 
-// ═══ VM ════════════════════════════════════════════════════════════════════════
+// ═══ VM ════════════════════════════════════════════════════════════════
 
 let vncRfb = null;
 let vncConnectedVm = null;
 let vncModule = null;
+let clipboardEnabled = false;
 
 function vncLog(msg, level) {
     const log = document.getElementById('vm-vnc-log');
@@ -908,19 +974,14 @@ function vncLog(msg, level) {
 }
 
 async function loadVM() {
-    try {
-        await loadVMStatus();
-        await loadVMActivity();
-    } catch (err) { console.error('VM load error:', err); }
+    try { await loadVMStatus(); await loadVMActivity(); }
+    catch (err) { console.error('Failed to load VM:', err); }
     startVMRefreshLoop();
 }
 
 function startVMRefreshLoop() {
     if (vmRefreshInterval) clearInterval(vmRefreshInterval);
-    vmRefreshInterval = setInterval(() => {
-        loadVMStatus();
-    }, 5000);
-    document.getElementById('vm-auto-refresh-indicator').textContent = '(auto-refresh 5s)';
+    vmRefreshInterval = setInterval(() => { loadVMStatus(); }, 5000);
 }
 
 async function loadVMStatus() {
@@ -928,7 +989,7 @@ async function loadVMStatus() {
     try {
         const res = await apiGet('/api/vm');
         if (!res.ok) {
-            container.innerHTML = '<div class="data-item"><span class="name" style="color:var(--text-secondary)">VM not available. Set VM_ENABLED=true</span></div>';
+            container.innerHTML = '<div class="data-item"><span class="name" style="color:var(--text-secondary)">VM feature not available. Add VM_ENABLED=true to .env</span></div>';
             return;
         }
         const data = await res.json();
@@ -937,72 +998,65 @@ async function loadVMStatus() {
         if (vms.length === 0) {
             container.innerHTML = '<div class="data-item"><span class="name">No VMs running</span></div>';
             disconnectVNC();
-            updateVMButtons(null);
         } else {
             container.innerHTML = vms.map(vm => {
-                const isStopped = vm.status === 'stopped';
+                const isStopped = vm.status === 'stopped' || vm.status === 'stopped';
                 return `<div class="data-item">
-                    <div><span class="name">${escapeHtml(vm.name)}</span>
-                    <span class="meta">Status: <span style="color:${isStopped ? 'var(--text-secondary)' : 'var(--success)'}">${escapeHtml(vm.status)}</span> | PID: ${vm.pid || '-'} | VNC: ${vm.vnc_port || '-'}${vm.current_iso ? ' | CD: ' + escapeHtml(vm.current_iso.split('/').pop()) : ''}</span></div>
+                    <div>
+                        <span class="name">${escapeHtml(vm.name)}</span>
+                        <span class="meta">Status: ${escapeHtml(vm.status)} | PID: ${vm.pid || '-'} | VNC: ${vm.vnc_port || '-'} | Layout: ${(vm.keyboard_layout || 'us').toUpperCase()}${vm.current_iso ? ' | CD: ' + escapeHtml(vm.current_iso.split('/').pop()) : ''}</span>
+                    </div>
                     <div class="actions">
                         ${isStopped ? `<button class="btn btn-sm btn-primary" onclick="vmStartByName('${escapeHtml(vm.name)}')">Start</button>` : ''}
                         ${vm.status === 'running' ? `<button class="btn btn-sm btn-danger" onclick="vmStop('${escapeHtml(vm.name)}')">Stop</button>` : ''}
                         ${vm.status === 'running' ? `<button class="btn btn-sm btn-secondary" onclick="vmReboot('${escapeHtml(vm.name)}')">Reboot</button>` : ''}
-                    </div></div>`;
+                    </div>
+                </div>`;
             }).join('');
 
             const runningVm = vms.find(vm => vm.status === 'running');
             if (runningVm) {
                 if (vncConnectedVm !== runningVm.name) connectVNC(runningVm.name);
-                updateVMButtons(runningVm);
-            } else {
-                disconnectVNC();
-                updateVMButtons(vms.length > 0 ? vms[0] : null);
-            }
+            } else { disconnectVNC(); }
         }
 
         const config = data.config || {};
         if (config.vm_enabled !== undefined) {
             document.getElementById('vm-config').innerHTML = `
                 <div class="data-item"><span class="name">VM Enabled</span><span class="meta">${config.vm_enabled ? 'Yes' : 'No'}</span></div>
-                <div class="data-item"><span class="name">CPU</span><span class="meta">${config.vm_cpu_cores || '-'}</span></div>
-                <div class="data-item"><span class="name">RAM</span><span class="meta">${config.vm_ram_mb || '-'} MB</span></div>
-                <div class="data-item"><span class="name">Disk</span><span class="meta">${config.vm_disk_size || '-'}</span></div>
-                <div class="data-item"><span class="name">Arch</span><span class="meta">${config.vm_arch || '-'}</span></div>`;
+                <div class="data-item"><span class="name">CPU Cores</span><span class="meta">${config.vm_cpu_cores || '-'}</span></div>
+                <div class="data-item"><span class="name">RAM (MB)</span><span class="meta">${config.vm_ram_mb || '-'}</span></div>
+                <div class="data-item"><span class="name">Disk Size</span><span class="meta">${config.vm_disk_size || '-'}</span></div>
+                <div class="data-item"><span class="name">Architecture</span><span class="meta">${config.vm_arch || '-'}</span></div>`;
         }
-    } catch (err) { container.innerHTML = errorHtml(err.message); }
-}
-
-function updateVMButtons(vm) {
-    const stopBtn = document.querySelector('#vm-controls .btn-danger');
-    const rebootBtn = Array.from(document.querySelectorAll('#vm-controls .btn-secondary')).find(b => b.textContent === 'Reboot');
-    const cdBtns = Array.from(document.querySelectorAll('#vm-controls .btn-secondary')).filter(b => b.textContent.includes('Insert CD') || b.textContent.includes('Eject CD'));
-    const running = vm && vm.status === 'running';
-    [stopBtn, rebootBtn, ...cdBtns].forEach(b => { if (b) b.style.display = running ? '' : 'none'; });
+    } catch (err) { container.innerHTML = `<div class="data-item"><span class="name" style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`; }
 }
 
 async function vmStartByName(name) {
-    const layouts = [{v:'us',l:'US (QWERTY)'},{v:'de',l:'DE (QWERTZ)'},{v:'fr',l:'FR (AZERTY)'},{v:'es',l:'ES'},{v:'it',l:'IT'},{v:'gb',l:'GB'}];
-    let layout = 'us';
+    let savedLayout = 'us';
     try {
         const ctxRes = await apiGet('/api/contexts/default');
-        if (ctxRes.ok) { const ctx = await ctxRes.json(); layout = ctx.settings?.vm_keyboard_layout || 'us'; }
+        if (ctxRes.ok) { const ctx = await ctxRes.json(); savedLayout = ctx.settings?.vm_keyboard_layout || 'us'; }
     } catch {}
 
+    const layouts = [
+        { value: 'us', label: 'US (QWERTY)' }, { value: 'de', label: 'DE (QWERTZ)' },
+        { value: 'fr', label: 'FR (AZERTY)' }, { value: 'es', label: 'ES (Spanish)' },
+        { value: 'it', label: 'IT (Italian)' }, { value: 'gb', label: 'GB (British)' },
+    ];
+    const layoutOptions = layouts.map(l => `<option value="${l.value}" ${l.value === savedLayout ? 'selected' : ''}>${l.label}</option>`).join('');
+
     showModal('Start VM', `
-        <div class="form-group"><label>Name</label><input type="text" id="vm-start-name" value="${escapeHtml(name)}"></div>
-        <div class="form-group"><label>CPU Cores</label><input type="number" id="vm-start-cpu" value="2"></div>
-        <div class="form-group"><label>RAM (MB)</label><input type="number" id="vm-start-ram" value="4096"></div>
-        <div class="form-group"><label>Disk Size</label><input type="text" id="vm-start-disk" value="40G"></div>
-        <div class="form-group"><label>ISO Path (optional)</label><input type="text" id="vm-start-iso" placeholder="/path/to/linux.iso"></div>
-        <div class="form-group"><label>Keyboard Layout</label>
-        <select id="vm-start-layout">${layouts.map(l => `<option value="${l.v}" ${l.v===layout?'selected':''}>${l.l}</option>`).join('')}</select></div>
-        <button class="btn btn-primary" style="margin-top:1rem" onclick="vmDoStart()">Start</button>`);
+        <div class="form-group"><label>VM Name</label><input type="text" id="vm-start-name" value="${escapeHtml(name)}" style="width:100%;padding:0.5rem"></div>
+        <div class="form-group"><label>CPU Cores</label><input type="number" id="vm-start-cpu" value="2" style="width:100%;padding:0.5rem"></div>
+        <div class="form-group"><label>RAM (MB)</label><input type="number" id="vm-start-ram" value="4096" style="width:100%;padding:0.5rem"></div>
+        <div class="form-group"><label>Disk Size</label><input type="text" id="vm-start-disk" value="40G" style="width:100%;padding:0.5rem"></div>
+        <div class="form-group"><label>ISO Path (optional)</label><input type="text" id="vm-start-iso" placeholder="/path/to/linux.iso" style="width:100%;padding:0.5rem"></div>
+        <div class="form-group"><label>Keyboard Layout</label><select id="vm-start-layout" style="width:100%;padding:0.5rem">${layoutOptions}</select></div>
+        <button class="btn btn-primary" style="margin-top:1rem" onclick="vmDoStart()">Start VM</button>`);
 }
 
-async function vmStart() {
-    vmStartByName('praxis-vm');
-}
+async function vmStart() { vmStartByName('praxis-vm'); }
 
 async function vmDoStart() {
     const body = {
@@ -1018,13 +1072,14 @@ async function vmDoStart() {
         const res = await apiFetch('/api/vm/start', { method: 'POST', body: JSON.stringify(body) });
         const data = await res.json();
         closeModal();
-        alert(data.message || data.error || 'Started');
+        alert(data.message || data.error || 'Done');
         loadVM();
     } catch (err) { alert('Failed: ' + err.message); }
 }
 
 async function vmStop(name) {
     name = name || 'praxis-vm';
+    if (!confirm(`Stop VM "${name}"?`)) return;
     try {
         const res = await apiFetch('/api/vm/stop', { method: 'POST', body: JSON.stringify({ name }) });
         const data = await res.json();
@@ -1035,7 +1090,7 @@ async function vmStop(name) {
 
 async function vmReboot(name) {
     name = name || 'praxis-vm';
-    if (!confirm('Reboot?')) return;
+    if (!confirm('Reboot VM?')) return;
     try {
         const res = await apiFetch('/api/vm/reboot', { method: 'POST', body: JSON.stringify({ name }) });
         const data = await res.json();
@@ -1045,24 +1100,96 @@ async function vmReboot(name) {
 }
 
 function vmRefresh() { loadVM(); }
-async function vmInsertCD() { const iso = prompt('ISO path:'); if (iso) { const res = await apiFetch('/api/vm/cd', { method: 'POST', body: JSON.stringify({ iso_path: iso }) }); const d = await res.json(); alert(d.message || d.error); } }
-async function vmEjectCD() { const res = await apiFetch('/api/vm/cd', { method: 'POST', body: JSON.stringify({ iso_path: null }) }); const d = await res.json(); alert(d.message || d.error); }
-async function vmCreateSnapshot() { const n = prompt('Name:'); if (n) { const r = await apiFetch('/api/vm/snapshot', { method: 'POST', body: JSON.stringify({ snapshot_name: n }) }); const d = await r.json(); alert(d.message || d.error); } }
+
+async function vmInsertCD() {
+    const iso = prompt('Path to ISO file:');
+    if (!iso) return;
+    try {
+        const res = await apiFetch('/api/vm/cd', { method: 'POST', body: JSON.stringify({ name: 'praxis-vm', iso_path: iso }) });
+        const data = await res.json();
+        alert(data.message || data.error || 'CD inserted');
+    } catch (err) { alert('Failed: ' + err.message); }
+}
+
+async function vmEjectCD() {
+    try {
+        const res = await apiFetch('/api/vm/cd', { method: 'POST', body: JSON.stringify({ name: 'praxis-vm', iso_path: null }) });
+        const data = await res.json();
+        alert(data.message || data.error || 'CD ejected');
+    } catch (err) { alert('Failed: ' + err.message); }
+}
+
+async function vmCreateSnapshot() {
+    const name = prompt('Snapshot name:');
+    if (!name) return;
+    try {
+        const res = await apiFetch('/api/vm/snapshot', { method: 'POST', body: JSON.stringify({ snapshot_name: name }) });
+        const data = await res.json();
+        alert(data.message || data.error || 'Snapshot created');
+    } catch (err) { alert('Failed: ' + err.message); }
+}
 
 async function vmAddSharedFolder() {
     showModal('Add Shared Folder', `
-        <div class="form-group"><label>Host Path</label><input type="text" id="vm-sf-host" placeholder="/path/on/host"></div>
-        <div class="form-group"><label>Mount Point (in VM)</label><input type="text" id="vm-sf-mount" value="/mnt/shared"></div>
+        <div class="form-group"><label>Host Path</label><input type="text" id="vm-sf-host" placeholder="/home/user/projects" style="width:100%;padding:0.5rem"></div>
+        <div class="form-group"><label>Mount Point (in VM)</label><input type="text" id="vm-sf-mount" value="/mnt/projects" style="width:100%;padding:0.5rem"></div>
         <button class="btn btn-primary" style="margin-top:1rem" onclick="vmDoAddSharedFolder()">Add</button>`);
 }
+
 async function vmDoAddSharedFolder() {
     const host_path = document.getElementById('vm-sf-host').value;
     const mount_point = document.getElementById('vm-sf-mount').value;
     if (!host_path) { alert('Host path required'); return; }
-    const res = await apiFetch('/api/vm/shared-folder', { method: 'POST', body: JSON.stringify({ host_path, mount_point }) });
-    const data = await res.json();
-    closeModal();
-    alert(data.message || data.error);
+    try {
+        const res = await apiFetch('/api/vm/shared-folder', { method: 'POST', body: JSON.stringify({ host_path, mount_point }) });
+        const data = await res.json();
+        closeModal();
+        alert(data.message || data.error || 'Shared folder added');
+    } catch (err) { alert('Failed: ' + err.message); }
+}
+
+async function vmClipboardToggle() {
+    clipboardEnabled = !clipboardEnabled;
+    const btn = document.getElementById('vm-clipboard-btn');
+    if (clipboardEnabled) {
+        btn.textContent = '📋 Clipboard: ON';
+        btn.style.background = 'rgba(0,217,255,0.2)';
+        btn.style.color = 'var(--accent-cyan)';
+        btn.style.borderColor = 'var(--accent-cyan)';
+        alert('Shared clipboard enabled. You can now copy text from the dashboard to the VM clipboard and vice versa.');
+    } else {
+        btn.textContent = '📋 Clipboard: OFF';
+        btn.style.background = '';
+        btn.style.color = '';
+        btn.style.borderColor = '';
+    }
+}
+
+async function vmClipboardSet() {
+    const text = prompt('Enter text to copy to VM clipboard:');
+    if (!text) return;
+    try {
+        const res = await apiFetch('/api/vm/clipboard/set', {
+            method: 'POST',
+            body: JSON.stringify({ name: 'praxis-vm', content: text })
+        });
+        const data = await res.json();
+        if (data.success) vncLog(`Clipboard set: ${text.substring(0, 30)}${text.length > 30 ? '...' : ''}`, 'success');
+        else vncLog(`Clipboard failed: ${data.error}`, 'error');
+    } catch (err) { vncLog(`Clipboard error: ${err.message}`, 'error'); }
+}
+
+async function vmClipboardGet() {
+    try {
+        const res = await apiFetch('/api/vm/clipboard/get?name=praxis-vm');
+        const data = await res.json();
+        if (data.success && data.content) {
+            await navigator.clipboard.writeText(data.content);
+            vncLog(`Clipboard copied to host: ${data.content.substring(0, 30)}${data.content.length > 30 ? '...' : ''}`, 'success');
+        } else {
+            vncLog(`Clipboard read failed: ${data.error || 'empty'}`, 'error');
+        }
+    } catch (err) { vncLog(`Clipboard error: ${err.message}`, 'error'); }
 }
 
 // VNC
@@ -1080,26 +1207,32 @@ async function connectVNC(vmName) {
         if (vncRfb) { vncRfb.disconnect(); vncRfb = null; }
         const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/websockify?vm=${encodeURIComponent(vmName)}`;
 
-        placeholder.textContent = 'Connecting...';
+        placeholder.textContent = 'Connecting to VNC...';
         placeholder.style.display = 'block';
         screen.innerHTML = '';
 
         vncRfb = new RFB(screen, wsUrl, { credentials: { password: '' }, shared: true, wsProtocols: ['binary'] });
-        vncRfb.addEventListener('connect', () => { vncLog('VNC connected!', 'success'); placeholder.style.display = 'none'; vncConnectedVm = vmName; });
+        vncRfb.addEventListener('connect', () => {
+            vncLog('VNC connected!', 'success');
+            placeholder.style.display = 'none';
+            vncConnectedVm = vmName;
+        });
         vncRfb.addEventListener('disconnect', e => {
             vncLog(`Disconnected: ${e.detail?.reason || 'unknown'}`, e.detail?.clean ? 'warn' : 'error');
-            placeholder.style.display = 'block'; placeholder.textContent = 'VNC disconnected.'; vncConnectedVm = null;
+            placeholder.style.display = 'block';
+            placeholder.textContent = 'VNC disconnected. Click Refresh to reconnect.';
+            vncConnectedVm = null;
         });
         vncRfb.scaleViewport = true;
         vncRfb.resizeSession = false;
-    } catch (err) { vncLog(`Error: ${err.message}`, 'error'); }
+    } catch (err) { vncLog(`VNC error: ${err.message}`, 'error'); }
 }
 
 function disconnectVNC() {
     if (vncRfb) { vncRfb.disconnect(); vncRfb = null; }
     const placeholder = document.getElementById('vm-vnc-placeholder');
     const screen = document.getElementById('vm-vnc-screen');
-    if (placeholder) { placeholder.style.display = 'block'; placeholder.textContent = 'VM not running.'; }
+    if (placeholder) { placeholder.style.display = 'block'; placeholder.textContent = 'VM not running. Click "Start VM" to begin.'; }
     if (screen) screen.innerHTML = '';
     vncConnectedVm = null;
 }
@@ -1113,12 +1246,12 @@ async function loadVMActivity() {
         const data = await res.json();
         const activities = data.activities || [];
         if (activities.length === 0) {
-            container.innerHTML = '<div style="color:var(--text-secondary)">No activity yet.</div>'; return;
+            container.innerHTML = '<div style="color:var(--text-secondary)">No VM activity yet.</div>'; return;
         }
         container.innerHTML = activities.map(a => {
             const time = a.created_at ? new Date(a.created_at).toLocaleTimeString() : '';
+            let color = 'var(--text-primary)'; let icon = '[TOOL]';
             const name = a.action || '';
-            let color = 'var(--text-primary)', icon = '[TOOL]';
             if (name === 'vm_shell') { color = '#00D9FF'; icon = '[SHELL]'; }
             else if (name === 'vm_keys') { color = '#FFD600'; icon = '[KEYS]'; }
             else if (name === 'vm_mouse') { color = '#FF9800'; icon = '[MOUSE]'; }
@@ -1135,36 +1268,37 @@ async function loadVMActivity() {
             else if (name.startsWith('agent_')) { color = '#FFA726'; icon = '[AGENT]'; }
             else if (name.startsWith('discord_')) { color = '#7289DA'; icon = '[DISCORD]'; }
             else if (name.startsWith('learn_')) { color = '#CE93D8'; icon = '[LEARN]'; }
+            else if (name.startsWith('llm_')) { color = '#FF5252'; icon = '[LLM]'; }
 
-            let inputSum = '';
+            let inputSummary = '';
             try {
                 const inp = JSON.parse(a.input || '{}');
-                if (inp.command) inputSum = inp.command.substring(0, 80);
-                else if (inp.keys) inputSum = `"${inp.keys}"`;
-                else if (inp.path) inputSum = inp.path;
-                else if (inp.message) inputSum = inp.message.substring(0, 60);
-                else if (inp.action) inputSum = inp.action;
-                else inputSum = (a.input || '').substring(0, 80);
-            } catch { inputSum = (a.input || '').substring(0, 80); }
-            const outPrev = (a.output || '').substring(0, 120).replace(/\n/g, ' ');
+                if (inp.command) inputSummary = inp.command.substring(0, 80);
+                else if (inp.keys) inputSummary = `"${inp.keys}"`;
+                else if (inp.path) inputSummary = inp.path;
+                else if (inp.message) inputSummary = inp.message.substring(0, 60);
+                else if (inp.action) inputSummary = inp.action;
+                else inputSummary = (a.input || '').substring(0, 80);
+            } catch { inputSummary = (a.input || '').substring(0, 80); }
+            const outputPreview = (a.output || '').substring(0, 120).replace(/\n/g, ' ');
             const vmTag = a.vm_id ? ` [${a.vm_id}]` : '';
 
             return `<div style="margin-bottom:0.3rem;padding:0.2rem 0;border-bottom:1px solid rgba(255,255,255,0.05)">
                 <span style="color:var(--text-secondary);font-size:0.75rem">${time}</span>
                 <span style="color:${color};font-weight:600;font-size:0.8rem">${icon}${vmTag} ${escapeHtml(name)}</span>
-                <span style="color:var(--text-primary);font-size:0.8rem"> ${escapeHtml(inputSum)}</span>
-                ${outPrev ? `<div style="color:var(--text-secondary);font-size:0.75rem;padding-left:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(outPrev)}</div>` : ''}
+                <span style="color:var(--text-primary);font-size:0.8rem"> ${escapeHtml(inputSummary)}</span>
+                ${outputPreview ? `<div style="color:var(--text-secondary);font-size:0.75rem;padding-left:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(outputPreview)}</div>` : ''}
             </div>`;
         }).join('');
     } catch (err) { console.error('Activity load error:', err); }
 }
 
-// ═══ Helpers ═══════════════════════════════════════════════════════════════════
+// ═══ Helpers ════════════════════════════════════════════════════════════════
 
 function escapeHtml(str) { const d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
 function errorHtml(msg) { return `<div class="data-item"><span style="color:var(--error)">${escapeHtml(msg)}</span></div>`; }
 
-// ═══ Modal ═════════════════════════════════════════════════════════════════════
+// ═══ Modal ════════════════════════════════════════════════════════════════
 
 function showModal(title, content) {
     closeModal();
@@ -1174,11 +1308,26 @@ function showModal(title, content) {
     overlay.innerHTML = `<div class="modal"><h3>${title}</h3>${content}<button class="btn btn-secondary" style="margin-top:1rem" onclick="closeModal()">Close</button></div>`;
     document.body.appendChild(overlay);
 }
+
 function closeModal() { const o = document.getElementById('modal-overlay'); if (o) o.remove(); }
 
-// ═══ Events ════════════════════════════════════════════════════════════════════
+function toggleTheme() {
+    const current = document.body.getAttribute('data-theme') || 'dark';
+    const next = current === 'light' ? 'dark' : 'light';
+    document.body.setAttribute('data-theme', next);
+    localStorage.setItem('praxis-theme', next);
+    const btn = document.getElementById('theme-toggle');
+    if (btn) btn.textContent = next === 'light' ? '☀️ Light' : '🌙 Dark';
+}
+
+// ═══ Events ════════════════════════════════════════════════════════════════
 
 document.addEventListener('DOMContentLoaded', () => {
+    const savedTheme = localStorage.getItem('praxis-theme') || 'dark';
+    document.body.setAttribute('data-theme', savedTheme);
+    const themeBtn = document.getElementById('theme-toggle');
+    if (themeBtn) themeBtn.textContent = savedTheme === 'light' ? '☀️ Light' : '🌙 Dark';
+
     if (authToken) validateTokenAndLoad();
 
     document.getElementById('login-form').addEventListener('submit', async e => {
@@ -1190,8 +1339,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     document.getElementById('logout-btn').addEventListener('click', logout);
-    document.querySelectorAll('.nav-links li').forEach(li => { li.addEventListener('click', () => showTab(li.dataset.tab)); });
+    document.querySelectorAll('.nav-links li').forEach(li => {
+        li.addEventListener('click', () => showTab(li.dataset.tab));
+    });
     document.getElementById('load-messages-btn').addEventListener('click', loadMessages);
     document.getElementById('load-memory-btn').addEventListener('click', loadMemory);
 });
-

@@ -1190,6 +1190,142 @@ impl EventHandler for DiscordHandler {
                             .await;
                     }
                 }
+                "session" => {
+                    let discord_user_id = command.user.id.to_string();
+                    let pairing = match self.db.get_pairing_by_discord(&discord_user_id) {
+                        Ok(Some(p)) => p,
+                        _ => {
+                            let _ = command
+                                .create_response(
+                                    &ctx.http,
+                                    serenity::builder::CreateInteractionResponse::Message(
+                                        serenity::builder::CreateInteractionResponseMessage::new()
+                                            .content("Please pair first with /pair"),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let action_opt = command.data.options.iter().find(|o| o.name == "action");
+                    let name_opt = command.data.options.iter().find(|o| o.name == "name");
+
+                    let action = action_opt
+                        .and_then(|o| o.value.as_str())
+                        .unwrap_or("list");
+                    let name = name_opt
+                        .and_then(|o| o.value.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    let user_id = &pairing.user_id;
+
+                    let response = match action {
+                        "list" => {
+                            match self.db.list_sessions(user_id) {
+                                Ok(sessions) => {
+                                    if sessions.is_empty() {
+                                        "No sessions found. Use `/session action:create name:my-session` to create one.".to_string()
+                                    } else {
+                                        let mut lines = vec!["**Your sessions:**".to_string()];
+                                        for (sid, sname) in sessions {
+                                            lines.push(format!("- `{}` — {}", sid, sname));
+                                        }
+                                        lines.join("\n")
+                                    }
+                                }
+                                Err(e) => format!("Error listing sessions: {}", e),
+                            }
+                        }
+                        "create" => {
+                            let sid = if name.is_empty() {
+                                format!("session-{}", uuid::Uuid::new_v4().to_string()[..8].to_string())
+                            } else {
+                                name.clone()
+                            };
+                            let _ = self.db.create_session(user_id, &sid, Some(&sid));
+                            // Switch into it immediately
+                            if let Ok(mut ctx) = self.db.load_context(user_id) {
+                                ctx.session_id = sid.clone();
+                                let _ = self.db.save_context(&ctx);
+                            }
+                            format!("Created and switched to session `{}`.", sid)
+                        }
+                        "switch" => {
+                            if name.is_empty() {
+                                "Please provide a session name to switch to.".to_string()
+                            } else {
+                                if let Ok(mut ctx) = self.db.load_context(user_id) {
+                                    ctx.session_id = name.clone();
+                                    if let Err(e) = self.db.save_context(&ctx) {
+                                        format!("Failed to switch session: {}", e)
+                                    } else {
+                                        format!("Switched to session `{}`.", name)
+                                    }
+                                } else {
+                                    "Failed to load context.".to_string()
+                                }
+                            }
+                        }
+                        "rename" => {
+                            if name.is_empty() {
+                                "Please provide the current session name and target name. Usage: `/session action:rename name:old new-name`.".to_string()
+                            } else {
+                                let parts: Vec<&str> = name.splitn(2, ' ').collect();
+                                if parts.len() < 2 {
+                                    "Usage: `/session action:rename name:old-session new-name`.".to_string()
+                                } else {
+                                    let _ = self.db.rename_session(user_id, parts[0], parts[1]);
+                                    format!("Renamed session `{}` to `{}`.", parts[0], parts[1])
+                                }
+                            }
+                        }
+                        "delete" => {
+                            if name.is_empty() {
+                                "Please provide a session name to delete.".to_string()
+                            } else {
+                                let _ = self.db.delete_session(user_id, &name);
+                                // Reset to default if the deleted session was active
+                                if let Ok(ctx) = self.db.load_context(user_id) {
+                                    if ctx.session_id == name {
+                                        let _ = self.db.merge_context(user_id, serde_json::json!({"session_id": ""}));
+                                    }
+                                }
+                                format!("Deleted session `{}` and its messages.", name)
+                            }
+                        }
+                        "clear" => {
+                            let sid = if name.is_empty() {
+                                if let Ok(ctx) = self.db.load_context(user_id) {
+                                    ctx.session_id.clone()
+                                } else {
+                                    String::new()
+                                }
+                            } else {
+                                name.clone()
+                            };
+                            if sid.is_empty() || sid == "default" {
+                                let _ = self.db.clear_messages(user_id);
+                                "Cleared messages for the default session.".to_string()
+                            } else {
+                                let _ = self.db.clear_session_messages(user_id, &sid);
+                                format!("Cleared messages for session `{}`.", sid)
+                            }
+                        }
+                        _ => "Unknown action. Use list, create, switch, rename, delete, or clear.".to_string(),
+                    };
+
+                    let _ = command
+                        .create_response(
+                            &ctx.http,
+                            serenity::builder::CreateInteractionResponse::Message(
+                                serenity::builder::CreateInteractionResponseMessage::new()
+                                    .content(response),
+                            ),
+                        )
+                        .await;
+                }
                 _ => {}
             }
         }
