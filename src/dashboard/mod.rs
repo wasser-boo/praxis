@@ -17,6 +17,11 @@ impl DashboardServer {
         let addr = format!("0.0.0.0:{}", self.port);
 
         if self.tls {
+            rustls::crypto::CryptoProvider::install_default(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            )
+            .expect("Failed to install TLS crypto provider");
+
             let cert = generate_self_signed_cert()?;
             let config = axum_server::tls_rustls::RustlsConfig::from_der(
                 vec![cert.cert_der.clone()],

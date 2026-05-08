@@ -29,6 +29,7 @@ png = "0.18"
 serenity = { version = "0.12", features = ["voice"] }
 axum = { version = "0.7", features = ["ws", "json"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 rcgen = "0.13"
 tokio-stream = "0.1"
 tempfile = "3"
