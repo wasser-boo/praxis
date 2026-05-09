@@ -153,6 +153,7 @@ impl LLMRouter {
                     if p.name() == "ollama" {
                         if let Some(ollama) = p.as_any().downcast_ref::<ollama::OllamaProvider>() {
                             let uid = user_id.to_string();
+                            crate::dashboard::stream::wait_for_subscriber(&uid, 2000).await;
                             crate::dashboard::stream::send(&uid, "typing", "true");
                             tracing::info!(user_id = %uid, "[STREAM] starting Ollama real streaming");
                             let result = ollama.chat_streaming(req, move |token| {

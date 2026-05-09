@@ -259,18 +259,33 @@ fn process_stream_line(
         // Thinking models (kimi-k2.6, qwen3, etc.) send full content only in the done chunk.
         // Fire any remaining content we haven't seen via progressive tokens.
         if let Some(final_content) = data["message"]["content"].as_str() {
-            let remaining = &final_content[full_content.len()..];
-            if !remaining.is_empty() {
-                if *in_thinking {
-                    *in_thinking = false;
-                    tracing::info!("[STREAM] Ollama thinking phase ended, content in done chunk");
-                }
-                full_content.push_str(remaining);
-                *token_count += 1;
-                tracing::info!(token_count = *token_count, final_content_len = final_content.len(), "[STREAM] Ollama stream done (content in final chunk)");
-                on_token(remaining.to_string());
+            let remaining: Option<&str> = if full_content.is_empty() {
+                Some(final_content)
+            } else if final_content.starts_with(full_content.as_str()) {
+                Some(&final_content[full_content.len()..])
             } else {
-                tracing::info!(token_count = *token_count, total_content_len = full_content.len(), "[STREAM] Ollama stream done");
+                // Prefix mismatch — accumulated content differs from final. Replace it.
+                tracing::warn!(accumulated_len = full_content.len(), final_len = final_content.len(), "[STREAM] Ollama content prefix mismatch, replacing with final");
+                on_token(final_content.to_string());
+                full_content.clear();
+                full_content.push_str(final_content);
+                None
+            };
+            if let Some(delta) = remaining {
+                if !delta.is_empty() {
+                    if *in_thinking {
+                        *in_thinking = false;
+                        tracing::info!("[STREAM] Ollama thinking phase ended, content in done chunk");
+                    }
+                    full_content.push_str(delta);
+                    *token_count += 1;
+                    tracing::info!(token_count = *token_count, final_content_len = final_content.len(), "[STREAM] Ollama stream done (content in final chunk)");
+                    on_token(delta.to_string());
+                } else {
+                    tracing::info!(token_count = *token_count, total_content_len = full_content.len(), "[STREAM] Ollama stream done");
+                }
+            } else {
+                tracing::info!(token_count = *token_count, total_content_len = full_content.len(), "[STREAM] Ollama stream done (replaced)");
             }
         } else {
             tracing::info!(token_count = *token_count, total_content_len = full_content.len(), "[STREAM] Ollama stream done");
