@@ -33,12 +33,15 @@ impl OllamaProvider {
         });
         add_tools(&mut body, &request);
 
+        tracing::info!("[OLLAMA-STREAM] HTTP body: {}", serde_json::to_string(&body).unwrap_or_default());
+
         let mut req = self.client.post(&url).json(&body);
         if let Some(ref key) = self.api_key {
             if !key.is_empty() {
                 req = req.header("Authorization", format!("Bearer {}", key));
             }
         }
+        tracing::info!("[OLLAMA-STREAM] sending HTTP POST to {}", url);
         let resp = req.send().await?;
 
         if !resp.status().is_success() {

@@ -58,7 +58,7 @@ pub async fn chat_handler(
     State(state): State<GatewayState>,
     Json(req): Json<ChatRequest>,
 ) -> Json<ChatResponse> {
-    tracing::info!(user_id = %req.user_id, "Web chat message received");
+    tracing::info!(user_id = %req.user_id, "[GATEWAY] Web chat message received");
 
     match crate::gateway::message_handler::handle_message(
         &state,
@@ -68,15 +68,21 @@ pub async fn chat_handler(
     )
     .await
     {
-        Ok(reply) => Json(ChatResponse {
-            success: true,
-            response: Some(reply),
-            error: None,
-        }),
-        Err(e) => Json(ChatResponse {
-            success: false,
-            response: None,
-            error: Some(e.to_string()),
-        }),
+        Ok(reply) => {
+            tracing::info!(user_id = %req.user_id, reply_len = reply.len(), "[GATEWAY] handle_message returned OK");
+            Json(ChatResponse {
+                success: true,
+                response: Some(reply),
+                error: None,
+            })
+        },
+        Err(e) => {
+            tracing::warn!(user_id = %req.user_id, "[GATEWAY] handle_message failed: {}", e);
+            Json(ChatResponse {
+                success: false,
+                response: None,
+                error: Some(e.to_string()),
+            })
+        },
     }
 }

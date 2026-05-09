@@ -88,7 +88,7 @@ pub fn send(user_id: &str, event: &str, data: &str) {
         data: data.to_string(),
     }) {
         Ok(num_receivers) => {
-            tracing::debug!(
+            tracing::info!(
                 user_id = %user_id,
                 event = %event,
                 data_preview = %data_preview,

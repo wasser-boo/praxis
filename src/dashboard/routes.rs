@@ -1451,6 +1451,7 @@ async fn chat_query(
     let is_option = req["is_option"].as_bool().unwrap_or(false);
     let option_index = req["option_index"].as_u64();
     let question_id = req["question_id"].as_str().unwrap_or("");
+    tracing::info!(user_id = %user_id, message = %message, "[DASHBOARD] chat_query received");
 
     // Handle option selection
     if is_option && !question_id.is_empty() {
