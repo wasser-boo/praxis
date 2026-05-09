@@ -435,14 +435,14 @@ function addChatMessage(type, content, extra = null) {
     const div = document.createElement('div');
     div.className = `chat-msg ${type}`;
 
-    const botAvatar = '/logo.svg';
+    const botAvatar = `/api/avatar/bot?t=${Date.now()}`;
     const userAvatar = `/api/avatar/${chatUserId}?t=${Date.now()}`;
     const botName = chatBotName || 'Praxis';
     const userName = chatUserId || 'User';
 
     if (type === 'user') {
         div.innerHTML = `<div class="msg-row">
-            <div class="msg-col">
+            <div class="msg-col" style="cursor:pointer" onclick="chatUploadAvatar()">
                 <img class="msg-avatar" src="${userAvatar}" alt="" onerror="this.src='/logo.svg'">
                 <span class="msg-label">${escapeHtml(userName)}</span>
             </div>
@@ -450,8 +450,8 @@ function addChatMessage(type, content, extra = null) {
         </div>`;
     } else if (type === 'assistant') {
         div.innerHTML = `<div class="msg-row">
-            <div class="msg-col">
-                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)">
+            <div class="msg-col" style="cursor:pointer" onclick="chatUploadBotAvatar()">
+                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.svg'">
                 <span class="msg-label">${escapeHtml(botName)}</span>
             </div>
             <div class="msg-content">${escapeHtml(content)}</div>
@@ -459,8 +459,8 @@ function addChatMessage(type, content, extra = null) {
     } else if (type === 'tool') {
         const args = extra || '';
         div.innerHTML = `<div class="msg-row">
-            <div class="msg-col">
-                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-cyan)">
+            <div class="msg-col" style="cursor:pointer" onclick="chatUploadBotAvatar()">
+                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-cyan)" onerror="this.src='/logo.svg'">
                 <span class="msg-label">Tool</span>
             </div>
             <div class="msg-content">${content}${args ? `<div class="tool-out">${escapeHtml(args)}</div>` : ''}</div>
@@ -639,7 +639,7 @@ async function loadCLStatus() {
         const res = await apiGet(`/api/cl/${encodeURIComponent(chatUserId)}`);
         const data = await res.json();
         const bar = document.getElementById('chat-cl-status');
-        if (data.cl_file || data.active_state) {
+        if (data.cl_file || data.active_state || (data.sm_data && Object.keys(data.sm_data).length > 0)) {
             bar.style.display = 'flex';
             document.getElementById('cl-status-file').textContent = data.cl_file ? `SM: ${data.cl_file}` : '-';
             document.getElementById('cl-status-state').textContent = data.active_state ? `State: ${data.active_state}` : '-';
@@ -648,6 +648,16 @@ async function loadCLStatus() {
                 ? `Templates: ${temps.join(', ')}`
                 : '-';
             document.getElementById('cl-status-temps').className = temps.length ? 'cl-badge template' : 'cl-badge';
+            // Show SM variables
+            const vars = data.sm_data || {};
+            const varKeys = Object.keys(vars).filter(k => k !== 'active_state' && k !== 'active_templates');
+            const varsEl = document.getElementById('cl-status-vars');
+            if (varKeys.length > 0) {
+                varsEl.textContent = varKeys.slice(0, 5).map(k => `${k}: ${JSON.stringify(vars[k]).substring(0, 40)}`).join(', ');
+                varsEl.style.display = '';
+            } else {
+                varsEl.style.display = 'none';
+            }
         } else {
             bar.style.display = 'none';
         }

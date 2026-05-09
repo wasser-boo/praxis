@@ -107,7 +107,24 @@ pub fn estimate_message_tokens(msg: &Message) -> usize {
 }
 
 impl Database {
+    fn resolve_user_key(&self, conn: &rusqlite::Connection, user_id: &str) -> String {
+        if let Ok(data) = conn.query_row(
+            "SELECT data FROM contexts WHERE user_id = ?1",
+            rusqlite::params![user_id],
+            |row| row.get::<_, String>(0),
+        ) {
+            if let Ok(ctx) = serde_json::from_str::<super::contexts::Context>(&data) {
+                if !ctx.session_id.is_empty() && ctx.session_id != "default" {
+                    return format!("{}:::{}", user_id, ctx.session_id);
+                }
+            }
+        }
+        user_id.to_string()
+    }
+
     pub fn add_message(&self, user_id: &str, msg: &Message) -> anyhow::Result<i64> {
+        let conn = self.conn();
+        let key = self.resolve_user_key(&conn, user_id);
         let tool_calls_json = msg
             .tool_calls
             .as_ref()
@@ -116,22 +133,22 @@ impl Database {
             .content_parts
             .as_ref()
             .map(|cp| serde_json::to_string(cp).unwrap_or_default());
-        let conn = self.conn();
         let id = conn.execute(
             "INSERT INTO messages (user_id, role, content, tool_call_id, tool_name, tool_calls, content_parts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![user_id, msg.role, msg.content, msg.tool_call_id, msg.tool_name, tool_calls_json, content_parts_json],
+            rusqlite::params![key, msg.role, msg.content, msg.tool_call_id, msg.tool_name, tool_calls_json, content_parts_json],
         )?;
         Ok(id as i64)
     }
 
     pub fn get_messages(&self, user_id: &str, limit: i32) -> anyhow::Result<Vec<Message>> {
         let conn = self.conn();
+        let key = self.resolve_user_key(&conn, user_id);
         let mut stmt = conn.prepare(
             "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts FROM messages WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2"
         )?;
 
         let messages = stmt
-            .query_map(rusqlite::params![user_id, limit], |row| {
+            .query_map(rusqlite::params![key, limit], |row| {
                 let tool_calls_json: Option<String> = row.get(4)?;
                 let tool_calls: Option<Vec<ToolCallData>> =
                     tool_calls_json.and_then(|json| serde_json::from_str(&json).ok());
@@ -158,13 +175,14 @@ impl Database {
         token_budget: usize,
     ) -> anyhow::Result<(Vec<Message>, usize)> {
         let conn = self.conn();
+        let key = self.resolve_user_key(&conn, user_id);
         let mut stmt = conn.prepare(
             "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts FROM messages WHERE user_id = ?1 ORDER BY id DESC",
         )?;
 
         let mut messages = Vec::new();
         let mut total_tokens = 0usize;
-        let rows = stmt.query_map(rusqlite::params![user_id], |row| {
+        let rows = stmt.query_map(rusqlite::params![key], |row| {
             let tool_calls_json: Option<String> = row.get(4)?;
             let tool_calls: Option<Vec<ToolCallData>> =
                 tool_calls_json.and_then(|json| serde_json::from_str(&json).ok());
@@ -197,9 +215,10 @@ impl Database {
 
     pub fn count_messages(&self, user_id: &str) -> anyhow::Result<usize> {
         let conn = self.conn();
+        let key = self.resolve_user_key(&conn, user_id);
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE user_id = ?1",
-            rusqlite::params![user_id],
+            rusqlite::params![key],
             |row| row.get(0),
         )?;
         Ok(count as usize)
@@ -207,9 +226,10 @@ impl Database {
 
     pub fn clear_messages(&self, user_id: &str) -> anyhow::Result<()> {
         let conn = self.conn();
+        let key = self.resolve_user_key(&conn, user_id);
         conn.execute(
             "DELETE FROM messages WHERE user_id = ?1",
-            rusqlite::params![user_id],
+            rusqlite::params![key],
         )?;
         Ok(())
     }

@@ -1515,28 +1515,25 @@ async fn get_cl_info(
     State(state): State<Arc<DashboardState>>,
     Path(user_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let conn = state.db.conn();
-    let ctx = conn.query_row(
-        "SELECT cl_file, active_state, active_templates FROM contexts WHERE user_id = ?1",
-        [&user_id],
-        |row| Ok((
-            row.get::<_, Option<String>>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?,
-        )),
-    ).ok();
-    if let Some((cl_file, active_state, active_templates)) = ctx {
-        let templates: Vec<String> = active_templates
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        Ok(Json(serde_json::json!({
-            "cl_file": cl_file,
-            "active_state": active_state,
-            "active_templates": templates,
-        })))
+    let ctx = state.db.load_context(&user_id).unwrap_or_default();
+    let templates: Vec<String> = ctx.active_templates.clone();
+    let sm_data = if ctx.cl_data.is_object() {
+        let mut flat = serde_json::Map::new();
+        for (k, v) in ctx.cl_data.as_object().unwrap() {
+            if !v.is_null() {
+                flat.insert(k.clone(), v.clone());
+            }
+        }
+        serde_json::Value::Object(flat)
     } else {
-        Ok(Json(serde_json::json!({"cl_file": null, "active_state": null, "active_templates": []})))
-    }
+        serde_json::json!({})
+    };
+    Ok(Json(serde_json::json!({
+        "cl_file": ctx.cl_file,
+        "active_state": ctx.active_state,
+        "active_templates": templates,
+        "sm_data": sm_data,
+    })))
 }
 
 async fn vnc_viewer_page() -> axum::response::Html<&'static str> {

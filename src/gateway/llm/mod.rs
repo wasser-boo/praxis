@@ -376,11 +376,9 @@ impl LLMRouter {
                             .get_pairing_by_internal_user(user_id)
                             .ok()
                             .flatten();
-                        let is_web = channel_id == "web";
-                        if channel_id.is_empty() {
+                        let is_web = channel_id == "web" || channel_id.is_empty() || discord_pairing.is_none();
+                        if channel_id.is_empty() && discord_pairing.is_some() {
                             "Error: No channel_id provided and no originating channel found. Please specify a channel_id.".to_string()
-                        } else if !is_web && discord_pairing.is_none() {
-                            "Error: No Discord user pairing found. The user must be paired with a Discord account first.".to_string()
                         } else {
                             let default_timeout = ctx_data
                                 .as_ref()
