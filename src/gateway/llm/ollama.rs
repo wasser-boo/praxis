@@ -255,9 +255,26 @@ fn process_stream_line(
 
     if data.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
         *final_tool_calls = parse_tool_calls_from_message(&data["message"]);
-        let total_len = full_content.len();
-        let think_len = if *in_thinking { "[thinking]".len() } else { 0 };
-        tracing::info!(token_count = *token_count, total_content_len = total_len, "[STREAM] Ollama stream done");
+
+        // Thinking models (kimi-k2.6, qwen3, etc.) send full content only in the done chunk.
+        // Fire any remaining content we haven't seen via progressive tokens.
+        if let Some(final_content) = data["message"]["content"].as_str() {
+            let remaining = &final_content[full_content.len()..];
+            if !remaining.is_empty() {
+                if *in_thinking {
+                    *in_thinking = false;
+                    tracing::info!("[STREAM] Ollama thinking phase ended, content in done chunk");
+                }
+                full_content.push_str(remaining);
+                *token_count += 1;
+                tracing::info!(token_count = *token_count, final_content_len = final_content.len(), "[STREAM] Ollama stream done (content in final chunk)");
+                on_token(remaining.to_string());
+            } else {
+                tracing::info!(token_count = *token_count, total_content_len = full_content.len(), "[STREAM] Ollama stream done");
+            }
+        } else {
+            tracing::info!(token_count = *token_count, total_content_len = full_content.len(), "[STREAM] Ollama stream done");
+        }
         return;
     }
 
@@ -270,8 +287,6 @@ fn process_stream_line(
                 *in_thinking = true;
                 tracing::info!("[STREAM] Ollama thinking phase started");
             }
-            // Don't emit thinking tokens to the UI — they're internal reasoning
-            // full_content.push_str(thinking);
         }
     }
 
