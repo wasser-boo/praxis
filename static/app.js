@@ -436,20 +436,33 @@ function startChatStream() {
     stopChatStream();
     if (!chatUserId || !authToken) return;
     const url = `/api/chat/stream/${encodeURIComponent(chatUserId)}?token=${encodeURIComponent(authToken)}`;
+    console.log('[SSE] connecting to', url);
     const es = new EventSource(url);
     let streamBuffer = '';
     let streamMsg = null;
+
+    es.onopen = () => {
+        console.log('[SSE] connection opened for user', chatUserId);
+    };
+
+    es.addEventListener('typing', (e) => {
+        console.log('[SSE] typing event:', e.data);
+    });
+
     es.addEventListener('feedback', (e) => {
+        console.log('[SSE] feedback event received');
         try {
             const d = JSON.parse(e.data);
             if (d.data) addChatMessage('feedback', d.data);
-        } catch {}
+        } catch (err) { console.error('[SSE feedback error]', err); }
     });
     es.addEventListener('char', (e) => {
+        const t0 = performance.now();
         try {
             const d = JSON.parse(e.data);
             if (d.data) {
                 if (!streamMsg) {
+                    console.log('[SSE] first char received, creating stream message element');
                     streamMsg = document.createElement('div');
                     streamMsg.className = 'chat-msg assistant';
                     const botAvatar = `/api/avatar/bot?t=${Date.now()}`;
@@ -475,40 +488,48 @@ function startChatStream() {
                 }
                 autoScrollChat();
             }
+            const elapsed = performance.now() - t0;
+            if (elapsed > 5) console.warn('[SSE] slow char render:', elapsed.toFixed(1), 'ms');
         } catch (err) { console.error('[SSE char error]', err, e.data); }
     });
     es.addEventListener('assistant', (e) => {
+        console.log('[SSE] assistant (final) event received');
         try {
             const d = JSON.parse(e.data);
-                if (d.data) {
-                    if (streamMsg) {
-                        const contentEl = streamMsg.querySelector('.msg-content');
-                        if (contentEl) {
-                            contentEl.classList.remove('stream-live');
-                            contentEl.innerHTML = renderMarkdown(d.data);
-                        }
-                        streamMsg = null;
-                        streamBuffer = '';
-                    } else {
-                        addChatMessage('assistant', d.data);
+            if (d.data) {
+                if (streamMsg) {
+                    console.log('[SSE] finalizing stream message, buffer length:', streamBuffer.length);
+                    const contentEl = streamMsg.querySelector('.msg-content');
+                    if (contentEl) {
+                        contentEl.classList.remove('stream-live');
+                        contentEl.innerHTML = renderMarkdown(d.data);
                     }
-                    stopChatTimer();
-                    autoScrollChat();
+                    streamMsg = null;
+                    streamBuffer = '';
+                } else {
+                    console.log('[SSE] no stream message — adding as regular assistant message');
+                    addChatMessage('assistant', d.data);
                 }
-        } catch {}
+                stopChatTimer();
+                autoScrollChat();
+            }
+        } catch (err) { console.error('[SSE assistant error]', err); }
     });
     es.addEventListener('question', (e) => {
+        console.log('[SSE] question event received');
         try {
             const d = JSON.parse(e.data);
             const inner = JSON.parse(d.data);
             showChatQuestion(inner.question_id, inner.text, inner.suggestions);
-        } catch {}
+        } catch (err) { console.error('[SSE question error]', err); }
     });
-    es.onerror = () => {
+    es.onerror = (err) => {
+        console.error('[SSE] connection error (EventSource readyState=' + es.readyState + '), reconnecting in 3s');
         stopChatStream();
         setTimeout(startChatStream, 3000);
     };
     chatEventSource = es;
+    console.log('[SSE] EventSource created, readyState:', es.readyState);
 }
 
 function stopChatStream() {
@@ -537,9 +558,11 @@ async function pollChatMessages() {
 
 async function loadChatHistory() {
     clearChatMessages();
+    console.log('[HISTORY] loading history for session', chatSessionId);
     try {
         const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}`);
         const data = await res.json();
+        console.log('[HISTORY] got', (data.messages || []).length, 'messages');
         if (data.messages && data.messages.length > 0) {
             for (const m of data.messages) {
                 const id = m.id !== undefined ? m.id : (m.role + ':' + (m.content || '').slice(0, 80));
@@ -547,7 +570,7 @@ async function loadChatHistory() {
                 renderChatMessage(m);
             }
         }
-    } catch (err) { console.error('History load error:', err); }
+    } catch (err) { console.error('[HISTORY] load error:', err); }
 }
 
 function renderChatMessage(m) {
@@ -739,24 +762,28 @@ function startRenameSession(id, el) {
 async function chatNewSession() {
     const id = 'session-' + Math.random().toString(36).slice(2, 8);
     const name = `Session ${chatSessions.length + 1}`;
+    console.log('[SESSION] creating new session:', id, name);
     chatSessions.push({ id, name });
     saveChatSessions();
     await switchChatSession(id);
     // Persist session on backend
     try {
         await apiPost('/api/contexts/' + encodeURIComponent(chatUserId), { session_id: id });
-    } catch {}
+        console.log('[SESSION] backend persistence done for', id);
+    } catch (err) { console.error('[SESSION] backend persistence failed:', err); }
     renderChatSessionList();
 }
 
 async function switchChatSession(id) {
+    console.log('[SESSION] switching to session:', id, '(from', chatSessionId, ')');
     stopChatPolling();
     chatSessionId = id;
     clearChatMessages();
     // Update backend context session
     try {
         await apiPost('/api/contexts/' + encodeURIComponent(chatUserId), { session_id: id });
-    } catch {}
+        console.log('[SESSION] context updated on backend for', id);
+    } catch (err) { console.error('[SESSION] context update failed:', err); }
     renderChatSessionList();
     await loadChatHistory();
     await loadChatStatus();

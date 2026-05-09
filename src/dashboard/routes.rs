@@ -422,18 +422,8 @@ async fn get_messages(
     Path(user_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let budget = 500000usize;
-    // Resolve session key
-    let msg_key = match state.db.load_context(&user_id) {
-        Ok(ctx) => {
-            if !ctx.session_id.is_empty() && ctx.session_id != "default" {
-                format!("{}:::{}", user_id, ctx.session_id)
-            } else {
-                user_id.clone()
-            }
-        }
-        Err(_) => user_id.clone(),
-    };
-    match state.db.get_messages_with_token_budget(&msg_key, budget) {
+    tracing::debug!(user_id = %user_id, "[MESSAGES] fetching messages");
+    match state.db.get_messages_with_token_budget(&user_id, budget) {
         Ok((messages, total_tokens)) => {
             let msgs: Vec<serde_json::Value> = messages
                 .iter()
@@ -1528,23 +1518,36 @@ async fn chat_stream_auth(
         jwt.is_ok() || t == state.gateway_api_key
     });
     if !valid {
+        tracing::warn!(user_id = %user_id, "[SSE] auth failed");
         return Err(StatusCode::UNAUTHORIZED);
     }
+    tracing::info!(user_id = %user_id, "[SSE] connection opened");
     let rx = crate::dashboard::stream::get_or_create(&user_id).subscribe();
-    let stream = futures_util::stream::unfold(rx, |mut r| async move {
-        loop {
-            match r.recv().await {
-                Ok(ev) => {
-                    let data = serde_json::to_string(&ev).unwrap_or_default();
-                    let event = Event::default().event(ev.event).data(data);
-                    return Some((Ok(event), r));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    // Receiver lagged behind, skip missed messages and keep listening
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return None;
+    let uid = user_id.clone();
+    let stream = futures_util::stream::unfold(rx, move |mut r| {
+        let uid = uid.clone();
+        async move {
+            loop {
+                match r.recv().await {
+                    Ok(ev) => {
+                        tracing::debug!(
+                            user_id = %uid,
+                            event = %ev.event,
+                            data_len = ev.data.len(),
+                            "[SSE] forwarding event to client"
+                        );
+                        let data = serde_json::to_string(&ev).unwrap_or_default();
+                        let event = Event::default().event(ev.event).data(data);
+                        return Some((Ok(event), r));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(user_id = %uid, skipped = n, "[SSE] receiver lagged");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::info!(user_id = %uid, "[SSE] channel closed, ending stream");
+                        return None;
+                    }
                 }
             }
         }

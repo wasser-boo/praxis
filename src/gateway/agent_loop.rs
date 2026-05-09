@@ -835,17 +835,36 @@ pub async fn run_agent_loop(
         if !raw_response.is_empty() {
             let uid = user_id.to_string();
             let resp = raw_response.clone();
-            let uid = user_id.to_string();
-            let resp = raw_response.clone();
+            tracing::info!(
+                user_id = %uid,
+                response_len = resp.len(),
+                "[AGENT] starting character-by-character streaming"
+            );
             tokio::spawn(async move {
                 // Show typing indicator immediately
                 crate::dashboard::stream::send(&uid, "typing", "true");
+                let mut char_count = 0usize;
+                let start = std::time::Instant::now();
                 for ch in resp.chars() {
                     crate::dashboard::stream::send(&uid, "char", &ch.to_string());
+                    char_count += 1;
                     tokio::time::sleep(std::time::Duration::from_millis(3)).await;
                 }
                 crate::dashboard::stream::send(&uid, "assistant", &resp);
+                let elapsed = start.elapsed();
+                tracing::info!(
+                    user_id = %uid,
+                    char_count = char_count,
+                    elapsed_ms = elapsed.as_millis(),
+                    "[AGENT] finished character streaming, sent final assistant event"
+                );
             });
+        } else {
+            tracing::warn!(
+                user_id = %user_id,
+                turn = ctx.turn,
+                "[AGENT] empty response content — no streaming"
+            );
         }
 
         // Strip think tags
