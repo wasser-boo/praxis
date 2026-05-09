@@ -146,40 +146,62 @@ impl LLMRouter {
     ) -> anyhow::Result<ChatResponse> {
         let provider_name = provider.unwrap_or(&self.default_provider);
 
+        let ollama_stream = || {
+            let req = request.clone();
+            async move {
+                for p in &self.providers {
+                    if p.name() == "ollama" {
+                        if let Some(ollama) = p.as_any().downcast_ref::<ollama::OllamaProvider>() {
+                            let uid = user_id.to_string();
+                            crate::dashboard::stream::send(&uid, "typing", "true");
+                            tracing::info!(user_id = %uid, "[STREAM] starting Ollama real streaming");
+                            let result = ollama.chat_streaming(req, move |token| {
+                                crate::dashboard::stream::send(&uid, "char", &token);
+                            }).await;
+                            return Ok(result?);
+                        }
+                    }
+                }
+                Err(anyhow::anyhow!("Ollama not available"))
+            }
+        };
+
         if provider_name == "ollama" {
-            let stream_req = request.clone();
+            match ollama_stream().await {
+                Ok(r) => {
+                    let reply = r.content.clone().unwrap_or_default();
+                    if !reply.is_empty() {
+                        crate::dashboard::stream::send(user_id, "assistant", &reply);
+                    }
+                    return Ok(r);
+                }
+                Err(e) => {
+                    tracing::warn!(user_id = %user_id, "[STREAM] Ollama streaming failed: {}", e);
+                }
+            }
+        } else {
             for p in &self.providers {
-                if p.name() == "ollama" {
-                    if let Some(ollama) = p.as_any().downcast_ref::<ollama::OllamaProvider>() {
-                        let uid = user_id.to_string();
-                        crate::dashboard::stream::send(&uid, "typing", "true");
-                        let resp = ollama.chat_streaming(stream_req, move |token| {
-                            crate::dashboard::stream::send(&uid, "char", &token);
-                        }).await;
-                        match resp {
-                            Ok(r) => {
-                                let reply = r.content.clone().unwrap_or_default();
-                                if !reply.is_empty() {
-                                    crate::dashboard::stream::send(user_id, "assistant", &reply);
-                                }
-                                tracing::info!(user_id = %user_id, "[STREAM] Ollama real streaming done");
-                                return Ok(r);
+                if p.name() == provider_name {
+                    match p.chat(request.clone()).await {
+                        Ok(r) => {
+                            let reply = r.content.clone().unwrap_or_default();
+                            if !reply.is_empty() {
+                                crate::dashboard::stream::send(user_id, "assistant", &reply);
                             }
-                            Err(e) => {
-                                tracing::warn!(user_id = %user_id, "[STREAM] Ollama streaming failed: {}", e);
-                                break;
-                            }
+                            return Ok(r);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Provider {} failed: {}", provider_name, e);
+                            break;
                         }
                     }
                 }
             }
         }
 
-        // Fallback for non-Ollama providers: single call, no fake playback
-        let resp = self.chat(request, provider).await?;
+        let resp = self.chat(request, Some("ollama")).await?;
         let reply = resp.content.clone().unwrap_or_default();
         if !reply.is_empty() {
-            crate::dashboard::stream::send(user_id, "typing", "true");
             crate::dashboard::stream::send(user_id, "assistant", &reply);
         }
         Ok(resp)

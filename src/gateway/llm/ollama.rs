@@ -31,7 +31,6 @@ impl OllamaProvider {
             "messages": messages,
             "stream": true,
         });
-        add_tools(&mut body, &request);
 
         let mut req = self.client.post(&url).json(&body);
         if let Some(ref key) = self.api_key {
@@ -51,6 +50,8 @@ impl OllamaProvider {
         let mut stream = resp.bytes_stream();
         let mut full_content = String::new();
         let mut final_tool_calls: Option<Vec<ToolCall>> = None;
+        let mut token_count = 0usize;
+        tracing::info!("[STREAM] Ollama byte stream started");
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
@@ -67,16 +68,24 @@ impl OllamaProvider {
 
                 if data.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
                     final_tool_calls = parse_tool_calls_from_message(&data["message"]);
+                    tracing::info!(token_count = token_count, "[STREAM] Ollama stream done");
                     break;
                 }
 
                 if let Some(token) = data["message"]["content"].as_str() {
-                    full_content.push_str(token);
-                    on_token(token.to_string());
+                    if !token.is_empty() {
+                        full_content.push_str(token);
+                        token_count += 1;
+                        if token_count <= 3 || token_count % 10 == 0 {
+                            tracing::info!(token_count = token_count, token = ?token, "[STREAM] Ollama token");
+                        }
+                        on_token(token.to_string());
+                    }
                 }
             }
         }
 
+        tracing::info!(total_len = full_content.len(), "[STREAM] Ollama full content collected");
         Ok(ChatResponse {
             content: if full_content.is_empty() { None } else { Some(full_content) },
             tool_calls: final_tool_calls,
