@@ -372,14 +372,14 @@ impl LLMRouter {
                             .as_str()
                             .filter(|s| !s.is_empty())
                             .unwrap_or(fallback_ch);
-                        if channel_id.is_empty() {
-                            "Error: No channel_id provided and no originating channel found. Please specify a channel_id.".to_string()
-                        } else if db
+                        let discord_pairing = db
                             .get_pairing_by_internal_user(user_id)
                             .ok()
-                            .flatten()
-                            .is_none()
-                        {
+                            .flatten();
+                        let is_web = channel_id == "web";
+                        if channel_id.is_empty() {
+                            "Error: No channel_id provided and no originating channel found. Please specify a channel_id.".to_string()
+                        } else if !is_web && discord_pairing.is_none() {
                             "Error: No Discord user pairing found. The user must be paired with a Discord account first.".to_string()
                         } else {
                             let default_timeout = ctx_data
@@ -388,10 +388,7 @@ impl LLMRouter {
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(120);
                             let timeout = args["timeout_secs"].as_u64().unwrap_or(default_timeout);
-                            let paired_discord_user_id = db
-                                .get_pairing_by_internal_user(user_id)
-                                .ok()
-                                .flatten()
+                            let paired_discord_user_id = discord_pairing
                                 .map(|p| p.discord_user_id)
                                 .unwrap_or_default();
                             let questions_raw = args["questions"].as_array();
@@ -431,6 +428,18 @@ impl LLMRouter {
                                 "Error: 'questions' field is required and must be an array.".to_string()
                             } else if questions.is_empty() {
                                 "Error: 'questions' array must contain at least one question.".to_string()
+                            } else if is_web {
+                                tracing::info!(timeout_secs = timeout, "ask_questions: web mode");
+                                match crate::tools::web_interactive::ask_questions_web(
+                                    user_id,
+                                    &questions,
+                                    timeout,
+                                )
+                                .await
+                                {
+                                    Ok(result) => result,
+                                    Err(e) => format!("Error: {}", e),
+                                }
                             } else {
                                 tracing::info!(timeout_secs = timeout, "ask_questions: waiting for responses");
                                 match crate::tools::discord_interactive::ask_questions(

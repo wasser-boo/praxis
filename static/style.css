@@ -23,6 +23,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
 .sidebar-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
 .content { margin-left: 250px; padding: 2rem; min-height: 100vh; transition: margin-left 0.3s; }
 .content.chat-expanded { margin-left: 0; padding: 0; }
+.sidebar.collapsed ~ .content { margin-left: 48px; }
 .content.chat-expanded .chat-app { height: 100vh; }
 .sidebar-header { padding: 1.5rem; border-bottom: 1px solid var(--border); }
 .sidebar-header h2 { background: var(--accent-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; font-size: 1.5rem; }

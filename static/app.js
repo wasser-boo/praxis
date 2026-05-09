@@ -256,7 +256,6 @@ async function chatSendMessage() {
     renderAttachments();
 
     const displayMsg = msg || '(attachments)';
-    addChatMessage('user', displayMsg);
     startChatTimer(60);
 
     try {
@@ -276,6 +275,7 @@ async function chatSendMessage() {
             addChatMessage('system', data.message);
             updateAgentUI(true);
         }
+        await loadChatHistory();
     } catch (err) {
         addChatMessage('feedback', 'Send failed: ' + err.message);
         stopChatTimer();
@@ -523,6 +523,7 @@ async function chatNewSession() {
 }
 
 async function switchChatSession(id) {
+    stopChatPolling();
     chatSessionId = id;
     clearChatMessages();
     // Update backend context session
@@ -532,6 +533,7 @@ async function switchChatSession(id) {
     renderChatSessionList();
     await loadChatHistory();
     await loadChatStatus();
+    startChatPolling();
 }
 
 function deleteChatSession(id) {
