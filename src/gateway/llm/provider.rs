@@ -91,6 +91,7 @@ pub struct Usage {
 pub trait LLMProvider: Send + Sync {
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse>;
     fn name(&self) -> &str;
+    fn as_any(&self) -> &dyn std::any::Any;
     async fn health_check(&self) -> bool {
         true
     }

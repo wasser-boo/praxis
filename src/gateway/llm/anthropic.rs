@@ -63,6 +63,10 @@ impl LLMProvider for AnthropicProvider {
     fn name(&self) -> &str {
         "anthropic"
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 pub fn build_anthropic_messages(messages: &[ChatMessage]) -> (String, Vec<serde_json::Value>) {

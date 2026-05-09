@@ -143,6 +143,10 @@ impl LLMProvider for OpenRouterProvider {
         "openrouter"
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn health_check(&self) -> bool {
         let url = format!("{}/models", self.base_url);
         match self

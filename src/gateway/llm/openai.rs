@@ -141,4 +141,8 @@ impl LLMProvider for OpenAIProvider {
     fn name(&self) -> &str {
         "openai"
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }

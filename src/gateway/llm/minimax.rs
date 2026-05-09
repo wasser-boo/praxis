@@ -34,6 +34,10 @@ impl LLMProvider for MiniMaxProvider {
     fn name(&self) -> &str {
         "minimax"
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl MiniMaxProvider {

@@ -34,6 +34,10 @@ impl LLMProvider for MiMoProvider {
     fn name(&self) -> &str {
         "mimo"
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl MiMoProvider {

@@ -264,6 +264,7 @@ async function chatSendMessage() {
 
     // Show user message immediately (optimistic)
     addChatMessage('user', displayMsg);
+    chatSeenIds.add('user:' + displayMsg);
     autoScrollChat();
 
     try {
@@ -683,17 +684,7 @@ function addChatMessage(type, content, extra = null) {
     }
 
     container.appendChild(div);
-    autoScrollChat();
-}
-
-function autoScrollChat() {
-    const container = document.getElementById('chat-messages');
-    if (!container) return;
-    // Only auto-scroll if user is already near the bottom (within 80px)
-    const nearBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < 80;
-    if (nearBottom) {
-        container.scrollTop = container.scrollHeight;
-    }
+    container.scrollTop = container.scrollHeight;
 }
 
 function clearChatMessages() {
