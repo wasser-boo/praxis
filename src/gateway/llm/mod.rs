@@ -145,6 +145,7 @@ impl LLMRouter {
         user_id: &str,
     ) -> anyhow::Result<ChatResponse> {
         let provider_name = provider.unwrap_or(&self.default_provider);
+        tracing::info!(user_id = %user_id, provider_name = %provider_name, default = %self.default_provider, available = ?self.provider_names(), "[STREAM] streaming_chat called");
 
         let ollama_stream = || {
             let req = request.clone();
@@ -172,6 +173,7 @@ impl LLMRouter {
             }
         };
 
+        // 1) If Ollama is explicitly configured, try Ollama streaming first.
         if provider_name == "ollama" {
             match ollama_stream().await {
                 Ok(r) => {
@@ -186,6 +188,7 @@ impl LLMRouter {
                 }
             }
         } else {
+            // 2) Non-Ollama provider configured — try non-streaming for that provider.
             for p in &self.providers {
                 if p.name() == provider_name {
                     match p.chat(request.clone()).await {
@@ -205,6 +208,7 @@ impl LLMRouter {
             }
         }
 
+        // Final fallback: non-streaming Ollama.
         let resp = self.chat(request, Some("ollama")).await?;
         let reply = resp.content.clone().unwrap_or_default();
         if !reply.is_empty() {

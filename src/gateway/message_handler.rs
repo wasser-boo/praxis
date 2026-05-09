@@ -187,7 +187,7 @@ pub async fn handle_message(
 
     let response = state
         .llm
-        .streaming_chat(request, ctx.settings.provider.as_deref(), user_id)
+        .streaming_chat(request, Some("ollama"), user_id)
         .await?;
 
     if let Some(tool_calls) = &response.tool_calls {
@@ -350,7 +350,7 @@ pub async fn handle_message(
 
         let followup_response = state
             .llm
-            .streaming_chat(followup_request, ctx.settings.provider.as_deref(), user_id)
+            .streaming_chat(followup_request, Some("ollama"), user_id)
             .await?;
         let reply = followup_response.content.unwrap_or_default();
         state.db.add_message(
