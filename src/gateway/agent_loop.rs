@@ -835,10 +835,14 @@ pub async fn run_agent_loop(
         if !raw_response.is_empty() {
             let uid = user_id.to_string();
             let resp = raw_response.clone();
+            let uid = user_id.to_string();
+            let resp = raw_response.clone();
             tokio::spawn(async move {
+                // Show typing indicator immediately
+                crate::dashboard::stream::send(&uid, "typing", "true");
                 for ch in resp.chars() {
                     crate::dashboard::stream::send(&uid, "char", &ch.to_string());
-                    tokio::time::sleep(std::time::Duration::from_millis(12)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(3)).await;
                 }
                 crate::dashboard::stream::send(&uid, "assistant", &resp);
             });

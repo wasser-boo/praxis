@@ -287,32 +287,59 @@ function chatKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSendMessage(); }
 }
 
-function showChatOptions(questionId, text, suggestions) {
-    const box = document.getElementById('chat-options-box');
-    if (!suggestions || suggestions.length === 0) { box.style.display = 'none'; return; }
-    box.style.display = 'flex';
-    box.dataset.questionId = questionId;
-    let html = '';
-    if (text) {
-        html += `<div class="question-text">${renderMarkdown(text)}</div>`;
-    }
-    html += suggestions.map((s, i) => {
+function addChatQuestionCard(questionId, text, suggestions) {
+    const container = document.getElementById('chat-messages');
+    const welcome = container.querySelector('.chat-welcome');
+    if (welcome) welcome.remove();
+
+    const card = document.createElement('div');
+    card.className = 'chat-msg question-card';
+    card.id = 'qcard-' + questionId;
+    card.dataset.questionId = questionId;
+
+    let opts = suggestions.map((s, i) => {
         const emoji = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][i] || '◾';
-        return `<div class="chat-option" onclick="selectChatOption('${questionId}', ${i})">
+        return `<button class="chat-option" data-idx="${i}" onclick="selectChatOption('${questionId}', ${i})">
             <span class="emoji">${emoji}</span> ${escapeHtml(s)}
-        </div>`;
+        </button>`;
     }).join('');
-    box.innerHTML = html;
+
+    card.innerHTML = `<div class="msg-row">
+        <div class="msg-col">
+            <img class="msg-avatar" src="/logo.svg" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.svg'">
+            <span class="msg-label">Question</span>
+        </div>
+        <div class="msg-content">
+            <div class="question-text">${renderMarkdown(text)}</div>
+            <div class="question-options" id="qopts-${questionId}">${opts}</div>
+            <div class="question-answer" id="qans-${questionId}" style="display:none"></div>
+        </div>
+    </div>`;
+
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
 }
 
 function showChatQuestion(questionId, text, suggestions) {
-    addChatMessage('system', `Question: ${text}`);
-    showChatOptions(questionId, text, suggestions);
+    addChatQuestionCard(questionId, text, suggestions);
 }
 
 async function selectChatOption(questionId, idx) {
-    document.getElementById('chat-options-box').style.display = 'none';
-    addChatMessage('user', `Selected option ${idx + 1}`);
+    // Disable all buttons in this question card
+    const opts = document.getElementById('qopts-' + questionId);
+    if (opts) {
+        opts.querySelectorAll('.chat-option').forEach(btn => {
+            btn.disabled = true;
+            btn.style.opacity = '0.5';
+            btn.style.cursor = 'not-allowed';
+        });
+    }
+    // Show the selected answer
+    const ans = document.getElementById('qans-' + questionId);
+    if (ans) {
+        ans.style.display = '';
+        ans.textContent = 'Selected: ' + (opts?.querySelector(`[data-idx="${idx}"]`)?.textContent?.trim() || ('Option ' + (idx + 1)));
+    }
     try {
         await apiFetch('/api/chat/send', {
             method: 'POST',
@@ -353,6 +380,7 @@ function startChatStream() {
     es.addEventListener('char', (e) => {
         try {
             const d = JSON.parse(e.data);
+            console.log('[SSE char]', d);
             if (d.data) {
                 if (!streamMsg) {
                     streamMsg = document.createElement('div');
@@ -377,7 +405,7 @@ function startChatStream() {
                 const container = document.getElementById('chat-messages');
                 container.scrollTop = container.scrollHeight;
             }
-        } catch {}
+        } catch (err) { console.error('[SSE char error]', err, e.data); }
     });
     es.addEventListener('assistant', (e) => {
         try {
@@ -469,8 +497,7 @@ function renderChatMessage(m) {
                 const suggLines = lines.filter(l => l.match(/^\d+\s/));
                 const suggestions = suggLines.map(l => l.replace(/^\d+\s/, ''));
                 const questionText = lines.slice(0, lines.indexOf(suggLines[0] || '')).join('\n');
-                addChatMessage('assistant', questionText);
-                if (suggestions.length > 0) showChatOptions(qid, questionText, suggestions);
+                if (suggestions.length > 0) addChatQuestionCard(qid, questionText, suggestions);
                 return;
             }
         }

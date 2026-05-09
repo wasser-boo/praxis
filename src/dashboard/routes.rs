@@ -1531,15 +1531,22 @@ async fn chat_stream_auth(
         return Err(StatusCode::UNAUTHORIZED);
     }
     let rx = crate::dashboard::stream::get_or_create(&user_id).subscribe();
-    let stream = futures_util::stream::unfold(rx, |rx| async move {
-        let mut r = rx;
-        match r.recv().await {
-            Ok(ev) => {
-                let data = serde_json::to_string(&ev).unwrap_or_default();
-                let event = Event::default().event(ev.event).data(data);
-                Some((Ok(event), r))
+    let stream = futures_util::stream::unfold(rx, |mut r| async move {
+        loop {
+            match r.recv().await {
+                Ok(ev) => {
+                    let data = serde_json::to_string(&ev).unwrap_or_default();
+                    let event = Event::default().event(ev.event).data(data);
+                    return Some((Ok(event), r));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // Receiver lagged behind, skip missed messages and keep listening
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return None;
+                }
             }
-            Err(_) => None,
         }
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
