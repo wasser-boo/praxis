@@ -220,7 +220,6 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/agent/status/:user_id", axum::routing::get(get_agent_status))
         .route("/agent/stop/:user_id", axum::routing::post(stop_agent))
         .route("/cl/:user_id", axum::routing::get(get_cl_info))
-        .route("/chat/stream/:user_id", axum::routing::get(chat_stream_auth))
         .route("/chat/send", axum::routing::post(chat_query))
         .layer(middleware::from_fn_with_state(
             state.clone(),
