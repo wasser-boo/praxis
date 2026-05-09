@@ -31,6 +31,7 @@ impl OllamaProvider {
             "messages": messages,
             "stream": true,
         });
+        add_tools(&mut body, &request);
 
         let mut req = self.client.post(&url).json(&body);
         if let Some(ref key) = self.api_key {
@@ -51,37 +52,63 @@ impl OllamaProvider {
         let mut full_content = String::new();
         let mut final_tool_calls: Option<Vec<ToolCall>> = None;
         let mut token_count = 0usize;
+        let mut line_buffer = String::new();
+        let mut in_thinking = false;
         tracing::info!("[STREAM] Ollama byte stream started");
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             let text = String::from_utf8_lossy(&chunk);
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let data: serde_json::Value = match serde_json::from_str(line) {
-                    Ok(d) => d,
-                    Err(_) => continue,
-                };
 
-                if data.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    final_tool_calls = parse_tool_calls_from_message(&data["message"]);
-                    tracing::info!(token_count = token_count, "[STREAM] Ollama stream done");
-                    break;
-                }
+            // Prepend any incomplete line from the previous chunk
+            line_buffer.push_str(&text);
+            let mut remaining = String::new();
+            let mut lines: Vec<&str> = Vec::new();
 
-                if let Some(token) = data["message"]["content"].as_str() {
-                    if !token.is_empty() {
-                        full_content.push_str(token);
-                        token_count += 1;
-                        if token_count <= 3 || token_count % 10 == 0 {
-                            tracing::info!(token_count = token_count, token = ?token, "[STREAM] Ollama token");
-                        }
-                        on_token(token.to_string());
+            for line in line_buffer.lines() {
+                // Only try to parse complete lines — but NDJSON lines may be long,
+                // so we use lines() first, then try JSON parse. A trailing fragment
+                // without a newline is buffered for the next chunk.
+                // However, lines() skips the final fragment if there's no trailing newline.
+                // We need to detect that case.
+                lines.push(line);
+            }
+
+            // Check if the buffer ends with a newline (meaning the last line is complete)
+            if line_buffer.ends_with('\n') {
+                // All lines are complete
+                for line in &lines {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() { continue; }
+                    process_stream_line(trimmed, &mut token_count, &mut full_content, &mut in_thinking, &on_token, &mut final_tool_calls);
+                }
+                line_buffer.clear();
+            } else {
+                // Last line is incomplete — process all but the last
+                if lines.len() > 1 {
+                    for line in &lines[..lines.len() - 1] {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() { continue; }
+                        process_stream_line(trimmed, &mut token_count, &mut full_content, &mut in_thinking, &on_token, &mut final_tool_calls);
                     }
                 }
+                // Keep the incomplete last line for the next chunk
+                let last = lines.last().map(|s| *s).unwrap_or("");
+                line_buffer = last.to_string();
+            }
+
+            // If we already saw done, stop reading
+            if final_tool_calls.is_some() {
+                break;
+            }
+        }
+
+        // Process any remaining line in the buffer
+        if !line_buffer.trim().is_empty() && final_tool_calls.is_none() {
+            for line in line_buffer.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() { continue; }
+                process_stream_line(trimmed, &mut token_count, &mut full_content, &mut in_thinking, &on_token, &mut final_tool_calls);
             }
         }
 
@@ -210,6 +237,58 @@ fn add_tools(body: &mut serde_json::Value, request: &ChatRequest) {
             })
         }).collect();
         body["tools"] = serde_json::json!(ollama_tools);
+    }
+}
+
+fn process_stream_line(
+    line: &str,
+    token_count: &mut usize,
+    full_content: &mut String,
+    in_thinking: &mut bool,
+    on_token: &impl Fn(String),
+    final_tool_calls: &mut Option<Vec<ToolCall>>,
+) {
+    let data: serde_json::Value = match serde_json::from_str(line) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    if data.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
+        *final_tool_calls = parse_tool_calls_from_message(&data["message"]);
+        let total_len = full_content.len();
+        let think_len = if *in_thinking { "[thinking]".len() } else { 0 };
+        tracing::info!(token_count = *token_count, total_content_len = total_len, "[STREAM] Ollama stream done");
+        return;
+    }
+
+    let msg = &data["message"];
+
+    // Handle thinking tokens (qwen3, kimi-k2.6, etc.)
+    if let Some(thinking) = msg["thinking"].as_str() {
+        if !thinking.is_empty() {
+            if !*in_thinking {
+                *in_thinking = true;
+                tracing::info!("[STREAM] Ollama thinking phase started");
+            }
+            // Don't emit thinking tokens to the UI — they're internal reasoning
+            // full_content.push_str(thinking);
+        }
+    }
+
+    // Handle regular content tokens
+    if let Some(token) = msg["content"].as_str() {
+        if !token.is_empty() {
+            if *in_thinking {
+                *in_thinking = false;
+                tracing::info!("[STREAM] Ollama thinking phase ended, content phase started");
+            }
+            full_content.push_str(token);
+            *token_count += 1;
+            if *token_count <= 3 || *token_count % 10 == 0 {
+                tracing::info!(token_count = *token_count, token = ?token, "[STREAM] Ollama token");
+            }
+            on_token(token.to_string());
+        }
     }
 }
 
