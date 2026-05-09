@@ -372,6 +372,7 @@ pub async fn handle_message(
             );
         }
 
+        stream_response(user_id, &reply);
         return Ok(reply);
     }
 
@@ -395,7 +396,38 @@ pub async fn handle_message(
         );
     }
 
+    stream_response(user_id, &reply);
     Ok(reply)
+}
+
+fn stream_response(user_id: &str, reply: &str) {
+    if reply.is_empty() {
+        return;
+    }
+    let uid = user_id.to_string();
+    let resp = reply.to_string();
+    tracing::info!(
+        user_id = %uid,
+        response_len = resp.len(),
+        "[LEGACY] starting character-by-character streaming"
+    );
+    tokio::spawn(async move {
+        let char_count = resp.chars().count();
+        let start = std::time::Instant::now();
+        crate::dashboard::stream::send(&uid, "typing", "true");
+        for ch in resp.chars() {
+            crate::dashboard::stream::send(&uid, "char", &ch.to_string());
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        }
+        crate::dashboard::stream::send(&uid, "assistant", &resp);
+        let elapsed = start.elapsed();
+        tracing::info!(
+            user_id = %uid,
+            char_count = char_count,
+            elapsed_ms = elapsed.as_millis(),
+            "[LEGACY] finished character streaming"
+        );
+    });
 }
 
 async fn handle_message_agent_loop(

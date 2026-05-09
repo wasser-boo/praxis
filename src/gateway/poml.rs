@@ -41,6 +41,7 @@ pub enum AgentSignal {
 }
 
 pub async fn render(template_path: &str, context: &serde_json::Value) -> anyhow::Result<String> {
+    tracing::info!(template = %template_path, "[POML] rendering template");
     let poml_cli = std::env::var("POML_CLI")
         .unwrap_or_else(|_| "poml".to_string());
 
@@ -59,15 +60,16 @@ pub async fn render(template_path: &str, context: &serde_json::Value) -> anyhow:
     match output {
         Ok(output) if output.status.success() => {
             let result = String::from_utf8(output.stdout)?;
+            tracing::info!(template = %template_path, result_len = result.len(), "[POML] render success");
             Ok(strip_think_tags(&result))
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("POML CLI error: {}", stderr);
+            tracing::warn!(template = %template_path, "[POML] render error, falling back to simple: {}", stderr);
             render_simple(template_path, context).await
         }
         Err(e) => {
-            tracing::warn!("POML CLI not found: {}, using simple template", e);
+            tracing::warn!(template = %template_path, "[POML] CLI not found: {}, using simple template", e);
             render_simple(template_path, context).await
         }
     }
