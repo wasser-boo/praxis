@@ -100,6 +100,14 @@ pub async fn ask_question_web(
         },
     );
 
+    // Also stream to web dashboard so the frontend can render question cards
+    let stream_payload = serde_json::json!({
+        "question_id": question_id,
+        "text": question,
+        "suggestions": suggestions,
+    }).to_string();
+    crate::dashboard::stream::send(user_id, "question", &stream_payload);
+
     let (response_tx, mut response_rx) = mpsc::channel::<String>(32);
     let (cancel_tx, cancel_rx) = oneshot::channel::<Option<String>>();
 

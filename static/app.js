@@ -1,6 +1,7 @@
 const API_BASE = '';
 let authToken = localStorage.getItem('praxis_token');
 let chatPollInterval = null;
+let chatEventSource = null;
 let chatUserId = 'default';
 let chatSessionId = 'default';
 let chatAttachments = [];
@@ -286,17 +287,27 @@ function chatKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSendMessage(); }
 }
 
-function showChatOptions(questionId, suggestions) {
+function showChatOptions(questionId, text, suggestions) {
     const box = document.getElementById('chat-options-box');
     if (!suggestions || suggestions.length === 0) { box.style.display = 'none'; return; }
     box.style.display = 'flex';
     box.dataset.questionId = questionId;
-    box.innerHTML = suggestions.map((s, i) => {
+    let html = '';
+    if (text) {
+        html += `<div class="question-text">${renderMarkdown(text)}</div>`;
+    }
+    html += suggestions.map((s, i) => {
         const emoji = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][i] || '◾';
         return `<div class="chat-option" onclick="selectChatOption('${questionId}', ${i})">
             <span class="emoji">${emoji}</span> ${escapeHtml(s)}
         </div>`;
     }).join('');
+    box.innerHTML = html;
+}
+
+function showChatQuestion(questionId, text, suggestions) {
+    addChatMessage('system', `Question: ${text}`);
+    showChatOptions(questionId, text, suggestions);
 }
 
 async function selectChatOption(questionId, idx) {
@@ -315,9 +326,6 @@ async function selectChatOption(questionId, idx) {
         });
     } catch (err) { console.error('Option send failed:', err); }
 }
-
-let chatEventSource = null;
-
 function startChatPolling() {
     stopChatPolling();
     chatPollInterval = setInterval(pollChatMessages, 3000);
@@ -349,6 +357,13 @@ function startChatStream() {
                 addChatMessage('assistant', d.data);
                 stopChatTimer();
             }
+        } catch {}
+    });
+    es.addEventListener('question', (e) => {
+        try {
+            const d = JSON.parse(e.data);
+            const inner = JSON.parse(d.data);
+            showChatQuestion(inner.question_id, inner.text, inner.suggestions);
         } catch {}
     });
     es.onerror = () => {
@@ -416,7 +431,7 @@ function renderChatMessage(m) {
                 const suggestions = suggLines.map(l => l.replace(/^\d+\s/, ''));
                 const questionText = lines.slice(0, lines.indexOf(suggLines[0] || '')).join('\n');
                 addChatMessage('assistant', questionText);
-                if (suggestions.length > 0) showChatOptions(qid, suggestions);
+                if (suggestions.length > 0) showChatOptions(qid, questionText, suggestions);
                 return;
             }
         }
@@ -480,25 +495,25 @@ function addChatMessage(type, content, extra = null) {
 
     if (type === 'user') {
         div.innerHTML = `<div class="msg-row">
-            <div class="msg-col" style="cursor:pointer" onclick="chatUploadAvatar()">
-                <img class="msg-avatar" src="${userAvatar}" alt="" onerror="this.src='/logo.svg'">
+            <div class="msg-col">
+                <img class="msg-avatar" src="${userAvatar}" alt="" onerror="this.src='/logo.svg'" onclick="showAvatarModal('user')">
                 <span class="msg-label">${escapeHtml(userName)}</span>
             </div>
             <div class="msg-content">${escapeHtml(content)}</div>
         </div>`;
     } else if (type === 'assistant') {
         div.innerHTML = `<div class="msg-row">
-            <div class="msg-col" style="cursor:pointer" onclick="chatUploadBotAvatar()">
-                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.svg'">
+            <div class="msg-col">
+                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.svg'" onclick="showAvatarModal('bot')">
                 <span class="msg-label">${escapeHtml(botName)}</span>
             </div>
-            <div class="msg-content">${escapeHtml(content)}</div>
+            <div class="msg-content markdown">${renderMarkdown(content)}</div>
         </div>`;
     } else if (type === 'tool') {
         const args = extra || '';
         div.innerHTML = `<div class="msg-row">
-            <div class="msg-col" style="cursor:pointer" onclick="chatUploadBotAvatar()">
-                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-cyan)" onerror="this.src='/logo.svg'">
+            <div class="msg-col">
+                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-cyan)" onerror="this.src='/logo.svg'" onclick="showAvatarModal('bot')">
                 <span class="msg-label">Tool</span>
             </div>
             <div class="msg-content">${content}${args ? `<div class="tool-out">${escapeHtml(args)}</div>` : ''}</div>
@@ -1523,6 +1538,40 @@ async function loadVMActivity() {
 function escapeHtml(str) { const d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
 function errorHtml(msg) { return `<div class="data-item"><span style="color:var(--error)">${escapeHtml(msg)}</span></div>`; }
 
+function renderMarkdown(text) {
+    if (!text) return '';
+    // Extract think blocks first before escaping
+    const thinks = [];
+    let h = text.replace(/\[THINK\]([\s\S]*?)\[\/THINK\]/g, (match, content) => {
+        thinks.push(content);
+        return `__THINK_${thinks.length - 1}__`;
+    });
+    // Escape remaining text
+    h = escapeHtml(h);
+    // Markdown transforms
+    h = h
+        .replace(/^#### (.*$)/gim, '<h4>$1</h4>')
+        .replace(/^### (.*$)/gim, '<h3>$1</h3>')
+        .replace(/^## (.*$)/gim, '<h2>$1</h2>')
+        .replace(/^# (.*$)/gim, '<h1>$1</h1>')
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/^\> (.*$)/gim, '<blockquote>$1</blockquote>')
+        .replace(/^\- (.*$)/gim, '<li>$1</li>')
+        .replace(/^\d+\. (.*$)/gim, '<li>$1</li>');
+    h = h.replace(/(<li>.*?\u003c\/li>\n?)+/g, (m) => '<ul>' + m.replace(/\n/g, '') + '</ul>');
+    h = h.replace(/\n/g, '<br>');
+    // Re-insert think blocks as styled HTML
+    thinks.forEach((content, i) => {
+        h = h.replace(
+            `__THINK_${i}__`,
+            `<div class="think-block"><span class="think-label"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg> Thinking</span><div class="think-content">${escapeHtml(content)}</div></div>`
+        );
+    });
+    return h;
+}
+
 // ═══ Modal ════════════════════════════════════════════════════════════════
 
 function showModal(title, content) {
@@ -1531,6 +1580,24 @@ function showModal(title, content) {
     overlay.className = 'modal-overlay';
     overlay.id = 'modal-overlay';
     overlay.innerHTML = `<div class="modal"><h3>${title}</h3>${content}<button class="btn btn-secondary" style="margin-top:1rem" onclick="closeModal()">Close</button></div>`;
+    document.body.appendChild(overlay);
+}
+
+function showAvatarModal(which) {
+    closeModal();
+    const isBot = which === 'bot';
+    const imgUrl = isBot ? `/api/avatar/bot?t=${Date.now()}` : `/api/avatar/${chatUserId}?t=${Date.now()}`;
+    const name = isBot ? (chatBotName || 'Praxis') : (chatUserId || 'User');
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal avatar-modal">
+            <h3>${escapeHtml(name)} Avatar</h3>
+            <img class="avatar-preview" src="${imgUrl}" alt="" onerror="this.src='/logo.svg'">
+            <button class="btn btn-primary" style="margin-top:1rem" onclick="${isBot ? 'chatUploadBotAvatar()' : 'chatUploadAvatar()'}">Upload New Avatar</button>
+            <button class="btn btn-secondary" style="margin-top:0.5rem" onclick="closeModal()">Close</button>
+        </div>`;
     document.body.appendChild(overlay);
 }
 

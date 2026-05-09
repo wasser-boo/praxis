@@ -837,7 +837,7 @@ pub async fn run_agent_loop(
         }
 
         // Strip think tags
-        let response_text = crate::gateway::poml::strip_think_tags(&raw_response);
+        let response_text = crate::gateway::poml::convert_think_tags(&raw_response);
 
         // Extract agent signals first
         let (agent_signals, response_text) =

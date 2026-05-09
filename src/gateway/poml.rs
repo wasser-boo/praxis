@@ -13,7 +13,7 @@ static DELETE_VAR_REGEX: Lazy<Regex> =
 static READ_VAR_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\[\[([a-zA-Z_][a-zA-Z0-9_]*)\]\]").unwrap());
 
-static THINK_TAG_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"<think>[\s\S]*?</think>").unwrap());
+static THINK_TAG_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"<think>([\s\S]*?)</think>").unwrap());
 
 #[allow(dead_code)]
 static AGENT_SIGNAL_REGEX: Lazy<Regex> =
@@ -97,6 +97,20 @@ async fn render_simple(template_path: &str, context: &serde_json::Value) -> anyh
 pub fn strip_think_tags(content: &str) -> String {
     let result = THINK_TAG_REGEX.replace_all(content, "");
     // Clean up extra whitespace left by stripped tags
+    let re = regex::Regex::new(r"\n{3,}").unwrap();
+    let result = re.replace_all(&result, "\n\n");
+    result.trim().to_string()
+}
+
+pub fn convert_think_tags(content: &str) -> String {
+    let result = THINK_TAG_REGEX.replace_all(content, |caps: &regex::Captures| {
+        let inner = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        if inner.is_empty() {
+            "".to_string()
+        } else {
+            format!("[THINK]{}[/THINK]", inner)
+        }
+    });
     let re = regex::Regex::new(r"\n{3,}").unwrap();
     let result = re.replace_all(&result, "\n\n");
     result.trim().to_string()

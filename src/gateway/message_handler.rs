@@ -450,57 +450,56 @@ async fn handle_message_agent_loop(
     let is_voice_input = channel_id.map_or(false, |ch| ch.starts_with("voice:"));
     let tts_for_feedback = use_tts || is_voice_input;
 
-    // Spawn feedback routing task
-    if !feedback_modes.is_empty() || tts_for_feedback {
-        let feedback_modes = feedback_modes.clone();
-        let uid = user_id_owned.clone();
-        let ch = feedback_channel.clone();
-        let tts_settings = settings.clone();
-        let tts_secrets = secrets.clone();
+    // Spawn feedback routing task (always for web stream)
+    let is_web = channel_id.map_or(true, |ch| ch == "web" || ch.is_empty());
+    let feedback_modes = feedback_modes.clone();
+    let uid = user_id_owned.clone();
+    let ch = feedback_channel.clone();
+    let tts_settings = settings.clone();
+    let tts_secrets = secrets.clone();
 
-        tokio::spawn(async move {
-            while let Some(msg) = feedback_rx.recv().await {
-                let mut handled = false;
-                for mode in &feedback_modes {
-                    match mode.as_str() {
-                        "tts" => {
-                            spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid);
-                            handled = true;
-                        }
-                        "dm" => {
-                            crate::event_channel::broadcast_agent_feedback(&uid, &msg);
-                            crate::dashboard::stream::send(&uid, "feedback", &msg);
-                            handled = true;
-                        }
-                        "text" => {
-                            let sent_to_channel = ch.as_ref().map_or(false, |ch_id| {
-                                if ch_id.parse::<u64>().ok().filter(|&id| id > 0).is_some() {
-                                    crate::event_channel::broadcast_channel_message(
-                                        &uid, ch_id, &msg,
-                                    );
-                                    true
-                                } else {
-                                    false
-                                }
-                            });
-                            if !sent_to_channel {
-                                crate::event_channel::broadcast_agent_feedback(&uid, &msg);
-                            }
-                            crate::dashboard::stream::send(&uid, "feedback", &msg);
-                            handled = true;
-                        }
-                        _ => {
-                            crate::dashboard::stream::send(&uid, "feedback", &msg);
-                        }
-                    }
-                }
-                if !handled && tts_for_feedback {
-                    spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid);
-                }
+    tokio::spawn(async move {
+        while let Some(msg) = feedback_rx.recv().await {
+            if is_web {
                 crate::dashboard::stream::send(&uid, "feedback", &msg);
             }
-        });
-    }
+            let mut handled = false;
+            for mode in &feedback_modes {
+                match mode.as_str() {
+                    "tts" => {
+                        spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid);
+                        handled = true;
+                    }
+                    "dm" => {
+                        crate::event_channel::broadcast_agent_feedback(&uid, &msg);
+                        crate::dashboard::stream::send(&uid, "feedback", &msg);
+                        handled = true;
+                    }
+                    "text" => {
+                        let sent_to_channel = ch.as_ref().map_or(false, |ch_id| {
+                            if ch_id.parse::<u64>().ok().filter(|&id| id > 0).is_some() {
+                                crate::event_channel::broadcast_channel_message(
+                                    &uid, ch_id, &msg,
+                                );
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                        if !sent_to_channel {
+                            crate::event_channel::broadcast_agent_feedback(&uid, &msg);
+                        }
+                        crate::dashboard::stream::send(&uid, "feedback", &msg);
+                        handled = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !handled && tts_for_feedback {
+                spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid);
+            }
+        }
+    });
 
     let result = crate::gateway::agent_loop::run_agent_loop(
         state,

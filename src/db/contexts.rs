@@ -411,6 +411,11 @@ impl Database {
             "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
             rusqlite::params![key, data],
         )?;
+        // Also update the base row so resolve_user_key sees the current session_id
+        conn.execute(
+            "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
+            rusqlite::params![ctx.user_id, data],
+        )?;
         Ok(())
     }
 
