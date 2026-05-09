@@ -469,6 +469,7 @@ async fn handle_message_agent_loop(
                         }
                         "dm" => {
                             crate::event_channel::broadcast_agent_feedback(&uid, &msg);
+                            crate::dashboard::stream::send(&uid, "feedback", &msg);
                             handled = true;
                         }
                         "text" => {
@@ -485,14 +486,18 @@ async fn handle_message_agent_loop(
                             if !sent_to_channel {
                                 crate::event_channel::broadcast_agent_feedback(&uid, &msg);
                             }
+                            crate::dashboard::stream::send(&uid, "feedback", &msg);
                             handled = true;
                         }
-                        _ => {}
+                        _ => {
+                            crate::dashboard::stream::send(&uid, "feedback", &msg);
+                        }
                     }
                 }
                 if !handled && tts_for_feedback {
                     spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid);
                 }
+                crate::dashboard::stream::send(&uid, "feedback", &msg);
             }
         });
     }
@@ -972,9 +977,6 @@ async fn execute_tool_call(
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(fallback_ch);
-            if channel_id.is_empty() {
-                return "Error: No channel_id provided and no originating channel found. Please specify a channel_id.".to_string();
-            }
             let default_timeout = ctx_data
                 .as_ref()
                 .and_then(|c| c.get("question_timeout_secs"))
@@ -987,8 +989,9 @@ async fn execute_tool_call(
                 .flatten()
                 .map(|p| p.discord_user_id)
                 .unwrap_or_default();
-            if paired_discord_user_id.is_empty() {
-                return "Error: No Discord user pairing found. The user must be paired with a Discord account first.".to_string();
+            let is_web = channel_id == "web" || channel_id.is_empty() || paired_discord_user_id.is_empty();
+            if channel_id.is_empty() && !paired_discord_user_id.is_empty() {
+                return "Error: No channel_id provided and no originating channel found. Please specify a channel_id.".to_string();
             }
             let questions_raw = args["questions"].as_array();
             let Some(arr) = questions_raw else {
@@ -1020,17 +1023,18 @@ async fn execute_tool_call(
                     .unwrap_or_default();
                 questions.push((label.to_string(), text.to_string(), suggestions));
             }
-            tracing::info!(timeout_secs = timeout, "ask_questions: waiting for responses");
-            match crate::tools::discord_interactive::ask_questions(
-                channel_id,
-                &questions,
-                timeout,
-                &paired_discord_user_id,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(e) => format!("Error: {}", e),
+            if is_web {
+                tracing::info!(timeout_secs = timeout, "ask_questions: web mode");
+                match crate::tools::web_interactive::ask_questions_web(user_id, &questions, timeout).await {
+                    Ok(result) => result,
+                    Err(e) => format!("Error: {}", e),
+                }
+            } else {
+                tracing::info!(timeout_secs = timeout, "ask_questions: waiting for responses");
+                match crate::tools::discord_interactive::ask_questions(channel_id, &questions, timeout, &paired_discord_user_id).await {
+                    Ok(result) => result,
+                    Err(e) => format!("Error: {}", e),
+                }
             }
         }
         "update_template" => {

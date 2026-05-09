@@ -1,3 +1,4 @@
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
 use axum::middleware;
@@ -219,6 +220,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/agent/status/:user_id", axum::routing::get(get_agent_status))
         .route("/agent/stop/:user_id", axum::routing::post(stop_agent))
         .route("/cl/:user_id", axum::routing::get(get_cl_info))
+        .route("/chat/stream/:user_id", axum::routing::get(chat_stream_auth))
         .route("/chat/send", axum::routing::post(chat_query))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -233,6 +235,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/logo.svg", axum::routing::get(logo_svg))
         .route("/api/status", axum::routing::get(status))
         .route("/api/auth/login", axum::routing::post(login_handler))
+        .route("/api/chat/stream/:user_id", axum::routing::get(chat_stream_auth))
         .route("/api/vm/vnc/ws", axum::routing::get(vnc_ws_proxy))
         .route("/websockify", axum::routing::get(vnc_ws_proxy_noauth))
         .route("/vnc", axum::routing::get(vnc_viewer_page))
@@ -1509,6 +1512,38 @@ async fn chat_query(
     } else {
         Ok(Json(serde_json::json!({"error": "Agent loop not available"})))
     }
+}
+
+async fn chat_stream_auth(
+    Path(user_id): Path<String>,
+    State(state): State<Arc<DashboardState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Sse<impl futures_util::stream::Stream<Item = Result<Event, std::convert::Infallible>>>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str());
+    let valid = token.map_or(false, |t| {
+        let jwt = jsonwebtoken::decode::<crate::gateway::auth::Claims>(
+            t,
+            &jsonwebtoken::DecodingKey::from_secret(state.gateway_api_key.as_bytes()),
+            &jsonwebtoken::Validation::default(),
+        );
+        jwt.is_ok() || t == state.gateway_api_key
+    });
+    if !valid {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let rx = crate::dashboard::stream::subscribe(&user_id);
+    let stream = futures_util::stream::unfold(rx, |rx| async move {
+        let mut r = rx?;
+        match r.recv().await {
+            Ok(ev) => {
+                let data = serde_json::to_string(&ev).unwrap_or_default();
+                let event = Event::default().event(ev.event).data(data);
+                Some((Ok(event), Some(r)))
+            }
+            Err(_) => None,
+        }
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn get_cl_info(

@@ -1,4 +1,5 @@
 pub mod routes;
+pub mod stream;
 
 use std::net::IpAddr;
 use std::path::PathBuf;

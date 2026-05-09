@@ -316,15 +316,53 @@ async function selectChatOption(questionId, idx) {
     } catch (err) { console.error('Option send failed:', err); }
 }
 
-// ═══ Chat Polling ════════════════════════════════════════════════════════════════
+let chatEventSource = null;
 
 function startChatPolling() {
     stopChatPolling();
-    chatPollInterval = setInterval(pollChatMessages, 1500);
+    chatPollInterval = setInterval(pollChatMessages, 3000);
+    startChatStream();
 }
 
 function stopChatPolling() {
     if (chatPollInterval) { clearInterval(chatPollInterval); chatPollInterval = null; }
+    stopChatStream();
+}
+
+function startChatStream() {
+    stopChatStream();
+    if (!chatUserId || !authToken) return;
+    const url = `/api/chat/stream/${encodeURIComponent(chatUserId)}?token=${encodeURIComponent(authToken)}`;
+    const es = new EventSource(url);
+    es.addEventListener('feedback', (e) => {
+        try {
+            const d = JSON.parse(e.data);
+            if (d.data) {
+                addChatMessage('feedback', d.data);
+            }
+        } catch {}
+    });
+    es.addEventListener('assistant', (e) => {
+        try {
+            const d = JSON.parse(e.data);
+            if (d.data) {
+                addChatMessage('assistant', d.data);
+                stopChatTimer();
+            }
+        } catch {}
+    });
+    es.onerror = () => {
+        stopChatStream();
+        setTimeout(startChatStream, 3000);
+    };
+    chatEventSource = es;
+}
+
+function stopChatStream() {
+    if (chatEventSource) {
+        chatEventSource.close();
+        chatEventSource = null;
+    }
 }
 
 async function pollChatMessages() {

@@ -831,6 +831,10 @@ pub async fn run_agent_loop(
             response_len = raw_response.len(),
             "<<< LLM FINAL RESPONSE (no tool calls) <<<"
         );
+        // Stream final response to dashboard
+        if !raw_response.is_empty() {
+            crate::dashboard::stream::send(user_id, "assistant", &raw_response);
+        }
 
         // Strip think tags
         let response_text = crate::gateway::poml::strip_think_tags(&raw_response);
