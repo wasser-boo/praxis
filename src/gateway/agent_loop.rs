@@ -523,7 +523,7 @@ pub async fn run_agent_loop(
         // Call LLM
         let response = match state
             .llm
-            .streaming_chat(request, Some("ollama"), user_id)
+            .streaming_chat(request, ctx.settings.provider.as_deref(), user_id)
             .await
         {
             Ok(r) => r,
