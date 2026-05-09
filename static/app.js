@@ -498,6 +498,7 @@ function startChatStream() {
         try {
             const d = JSON.parse(e.data);
             if (d.data) {
+                chatSeenIds.add('assistant:' + d.data.slice(0, 80));
                 if (streamMsg) {
                     console.log('[SSE] finalizing stream message, buffer length:', streamBuffer.length);
                     const contentEl = streamMsg.querySelector('.msg-content');
@@ -546,7 +547,7 @@ async function pollChatMessages() {
         const data = await res.json();
         if (data.messages && data.messages.length > 0) {
             for (const m of data.messages) {
-                const id = m.id !== undefined ? m.id : (m.role + ':' + (m.content || '').slice(0, 80));
+                const id = m.role + ':' + (m.content || '').slice(0, 80);
                 if (!chatSeenIds.has(id)) {
                     chatSeenIds.add(id);
                     renderChatMessage(m);
@@ -566,7 +567,7 @@ async function loadChatHistory() {
         console.log('[HISTORY] got', (data.messages || []).length, 'messages');
         if (data.messages && data.messages.length > 0) {
             for (const m of data.messages) {
-                const id = m.id !== undefined ? m.id : (m.role + ':' + (m.content || '').slice(0, 80));
+                const id = m.role + ':' + (m.content || '').slice(0, 80);
                 chatSeenIds.add(id);
                 renderChatMessage(m);
             }

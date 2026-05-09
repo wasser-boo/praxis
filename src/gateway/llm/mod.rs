@@ -146,13 +146,13 @@ impl LLMRouter {
     ) -> anyhow::Result<ChatResponse> {
         let provider_name = provider.unwrap_or(&self.default_provider);
 
-        // Try real streaming if it's Ollama
         if provider_name == "ollama" {
             let stream_req = request.clone();
             for p in &self.providers {
                 if p.name() == "ollama" {
                     if let Some(ollama) = p.as_any().downcast_ref::<ollama::OllamaProvider>() {
                         let uid = user_id.to_string();
+                        crate::dashboard::stream::send(&uid, "typing", "true");
                         let resp = ollama.chat_streaming(stream_req, move |token| {
                             crate::dashboard::stream::send(&uid, "char", &token);
                         }).await;
@@ -175,17 +175,12 @@ impl LLMRouter {
             }
         }
 
-        // Fallback: non-streaming with character-by-character playback
+        // Fallback for non-Ollama providers: single call, no fake playback
         let resp = self.chat(request, provider).await?;
         let reply = resp.content.clone().unwrap_or_default();
         if !reply.is_empty() {
-            let uid = user_id.to_string();
-            crate::dashboard::stream::send(&uid, "typing", "true");
-            for ch in reply.chars() {
-                crate::dashboard::stream::send(&uid, "char", &ch.to_string());
-                tokio::time::sleep(std::time::Duration::from_millis(3)).await;
-            }
-            crate::dashboard::stream::send(&uid, "assistant", &reply);
+            crate::dashboard::stream::send(user_id, "typing", "true");
+            crate::dashboard::stream::send(user_id, "assistant", &reply);
         }
         Ok(resp)
     }

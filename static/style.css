@@ -85,9 +85,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
 .chat-msg { max-width: 85%; padding: 0.75rem 1rem; border-radius: 12px; font-size: 0.9rem; line-height: 1.5; word-break: break-word; animation: msgIn 0.2s ease-out; }
 @keyframes msgIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 .chat-msg.user { align-self: flex-end; background: #4a90d9; color: white; border-bottom-right-radius: 4px; }
-.chat-msg.user .msg-avatar { border-color: #4a90d9; }
-.chat-msg.assistant { align-self: flex-start; background: var(--bg-tertiary); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
-.chat-msg.assistant .msg-avatar { border-color: var(--accent-purple); }
+.chat-msg.user .msg-avatar { border-color: #4a90d9; border-radius: 50%; }
+
+.chat-msg.assistant .msg-avatar { border-color: var(--accent-purple); border-radius: 50%; }
+
+.chat-msg .msg-col { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; }
+
+.msg-label { font-size: 0.7rem; color: var(--text-secondary); text-align: center; white-space: nowrap; }
 .chat-msg .msg-row { display: flex; align-items: flex-start; gap: 0.5rem; }
 .chat-msg .msg-content { flex: 1; }
 .chat-timer { height: 4px; background: var(--border); position: relative; }
