@@ -165,6 +165,9 @@ async function initChatTab() {
     });
     loadChatSessions();
     await loadChatUserInfo();
+    // Scroll to bottom when chat tab opens
+    const container = document.getElementById('chat-messages');
+    if (container) container.scrollTop = container.scrollHeight;
 }
 
 async function loadChatUserInfo() {
@@ -259,6 +262,10 @@ async function chatSendMessage() {
     const displayMsg = msg || '(attachments)';
     startChatTimer(60);
 
+    // Show user message immediately (optimistic)
+    addChatMessage('user', displayMsg);
+    autoScrollChat();
+
     try {
         const res = await apiFetch('/api/chat/send', {
             method: 'POST',
@@ -276,16 +283,27 @@ async function chatSendMessage() {
             addChatMessage('system', data.message);
             updateAgentUI(true);
         }
-        await loadChatHistory();
     } catch (err) {
         addChatMessage('feedback', 'Send failed: ' + err.message);
         stopChatTimer();
     }
 }
 
+function autoScrollChat() {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+    // Only auto-scroll if user is already near the bottom (within 80px)
+    const nearBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < 80;
+    if (nearBottom) {
+        container.scrollTop = container.scrollHeight;
+    }
+}
+
 function chatKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSendMessage(); }
 }
+
+const questionSelections = new Map(); // questionId -> Set of selected indices
 
 function addChatQuestionCard(questionId, text, suggestions) {
     const container = document.getElementById('chat-messages');
@@ -297,12 +315,10 @@ function addChatQuestionCard(questionId, text, suggestions) {
     card.id = 'qcard-' + questionId;
     card.dataset.questionId = questionId;
 
-    let opts = suggestions.map((s, i) => {
-        const emoji = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][i] || '◾';
-        return `<button class="chat-option" data-idx="${i}" onclick="selectChatOption('${questionId}', ${i})">
-            <span class="emoji">${emoji}</span> ${escapeHtml(s)}
-        </button>`;
-    }).join('');
+    questionSelections.set(questionId, new Set());
+
+    const optsId = 'qopts-' + questionId;
+    const ansId = 'qans-' + questionId;
 
     card.innerHTML = `<div class="msg-row">
         <div class="msg-col">
@@ -311,47 +327,99 @@ function addChatQuestionCard(questionId, text, suggestions) {
         </div>
         <div class="msg-content">
             <div class="question-text">${renderMarkdown(text)}</div>
-            <div class="question-options" id="qopts-${questionId}">${opts}</div>
-            <div class="question-answer" id="qans-${questionId}" style="display:none"></div>
+            <div class="question-options" id="${optsId}"></div>
+            <div class="question-submit" id="qsub-${questionId}" style="display:none;margin-top:0.5rem">
+                <button class="chat-option submit-btn" onclick="submitChatOptions('${questionId}')">Submit</button>
+            </div>
+            <div class="question-answer" id="${ansId}" style="display:none"></div>
         </div>
     </div>`;
 
+    const optsDiv = card.querySelector('.question-options');
+    suggestions.forEach((s, i) => {
+        const emoji = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][i] || '◾';
+        const btn = document.createElement('button');
+        btn.className = 'chat-option';
+        btn.dataset.idx = i;
+        btn.innerHTML = `<span class="emoji">${emoji}</span> ${escapeHtml(s)}`;
+        btn.onclick = () => toggleChatOption(questionId, i, btn);
+        optsDiv.appendChild(btn);
+    });
+
     container.appendChild(card);
-    container.scrollTop = container.scrollHeight;
+    autoScrollChat();
+}
+
+function toggleChatOption(questionId, idx, btn) {
+    const selected = questionSelections.get(questionId);
+    if (!selected) return;
+    if (selected.has(idx)) {
+        selected.delete(idx);
+        btn.classList.remove('selected');
+    } else {
+        selected.add(idx);
+        btn.classList.add('selected');
+    }
+    // Show/hide submit button
+    const sub = document.getElementById('qsub-' + questionId);
+    if (sub) sub.style.display = selected.size > 0 ? '' : 'none';
+}
+
+async function submitChatOptions(questionId) {
+    const selected = questionSelections.get(questionId);
+    if (!selected || selected.size === 0) return;
+
+    const card = document.getElementById('qcard-' + questionId);
+    const optsDiv = document.getElementById('qopts-' + questionId);
+    const subDiv = document.getElementById('qsub-' + questionId);
+    const ansDiv = document.getElementById('qans-' + questionId);
+
+    // Disable all option buttons
+    if (optsDiv) {
+        optsDiv.querySelectorAll('.chat-option').forEach(btn => {
+            btn.disabled = true;
+            btn.classList.remove('selected');
+            if (!btn.classList.contains('submit-btn')) {
+                btn.style.opacity = '0.5';
+                btn.style.cursor = 'not-allowed';
+            }
+        });
+    }
+    if (subDiv) subDiv.style.display = 'none';
+
+    // Collect selected texts for display
+    const labels = [];
+    const indices = Array.from(selected).sort((a, b) => a - b);
+    indices.forEach(idx => {
+        const btn = optsDiv?.querySelector(`[data-idx="${idx}"]`);
+        const text = btn?.textContent?.trim() || ('Option ' + (idx + 1));
+        labels.push(text);
+    });
+
+    if (ansDiv) {
+        ansDiv.style.display = '';
+        ansDiv.textContent = 'Selected: ' + labels.join(', ');
+    }
+
+    // Send all selected options to backend
+    for (const idx of indices) {
+        try {
+            await apiFetch('/api/chat/send', {
+                method: 'POST',
+                body: JSON.stringify({
+                    user_id: chatUserId,
+                    message: '',
+                    is_option: true,
+                    question_id: questionId,
+                    option_index: idx
+                })
+            });
+        } catch (err) { console.error('Option send failed:', err); }
+    }
 }
 
 function showChatQuestion(questionId, text, suggestions) {
     addChatQuestionCard(questionId, text, suggestions);
-}
-
-async function selectChatOption(questionId, idx) {
-    // Disable all buttons in this question card
-    const opts = document.getElementById('qopts-' + questionId);
-    if (opts) {
-        opts.querySelectorAll('.chat-option').forEach(btn => {
-            btn.disabled = true;
-            btn.style.opacity = '0.5';
-            btn.style.cursor = 'not-allowed';
-        });
-    }
-    // Show the selected answer
-    const ans = document.getElementById('qans-' + questionId);
-    if (ans) {
-        ans.style.display = '';
-        ans.textContent = 'Selected: ' + (opts?.querySelector(`[data-idx="${idx}"]`)?.textContent?.trim() || ('Option ' + (idx + 1)));
-    }
-    try {
-        await apiFetch('/api/chat/send', {
-            method: 'POST',
-            body: JSON.stringify({
-                user_id: chatUserId,
-                message: '',
-                is_option: true,
-                question_id: questionId,
-                option_index: idx
-            })
-        });
-    } catch (err) { console.error('Option send failed:', err); }
 }
 function startChatPolling() {
     stopChatPolling();
@@ -380,7 +448,6 @@ function startChatStream() {
     es.addEventListener('char', (e) => {
         try {
             const d = JSON.parse(e.data);
-            console.log('[SSE char]', d);
             if (d.data) {
                 if (!streamMsg) {
                     streamMsg = document.createElement('div');
@@ -398,32 +465,36 @@ function startChatStream() {
                     const welcome = container.querySelector('.chat-welcome');
                     if (welcome) welcome.remove();
                     container.appendChild(streamMsg);
+                    autoScrollChat();
                 }
                 streamBuffer += d.data;
                 const contentEl = streamMsg.querySelector('.msg-content');
-                if (contentEl) contentEl.innerHTML = renderMarkdown(streamBuffer);
-                const container = document.getElementById('chat-messages');
-                container.scrollTop = container.scrollHeight;
+                if (contentEl) {
+                    // Ultra-fast path: raw textContent while streaming, no markdown
+                    contentEl.textContent = streamBuffer;
+                }
+                autoScrollChat();
             }
         } catch (err) { console.error('[SSE char error]', err, e.data); }
     });
     es.addEventListener('assistant', (e) => {
         try {
             const d = JSON.parse(e.data);
-            if (d.data) {
-                if (streamMsg) {
-                    const contentEl = streamMsg.querySelector('.msg-content');
-                    if (contentEl) {
-                        contentEl.classList.remove('stream-live');
-                        contentEl.innerHTML = renderMarkdown(d.data);
+                if (d.data) {
+                    if (streamMsg) {
+                        const contentEl = streamMsg.querySelector('.msg-content');
+                        if (contentEl) {
+                            contentEl.classList.remove('stream-live');
+                            contentEl.innerHTML = renderMarkdown(d.data);
+                        }
+                        streamMsg = null;
+                        streamBuffer = '';
+                    } else {
+                        addChatMessage('assistant', d.data);
                     }
-                    streamMsg = null;
-                    streamBuffer = '';
-                } else {
-                    addChatMessage('assistant', d.data);
+                    stopChatTimer();
+                    autoScrollChat();
                 }
-                stopChatTimer();
-            }
         } catch {}
     });
     es.addEventListener('question', (e) => {
@@ -589,7 +660,17 @@ function addChatMessage(type, content, extra = null) {
     }
 
     container.appendChild(div);
-    container.scrollTop = container.scrollHeight;
+    autoScrollChat();
+}
+
+function autoScrollChat() {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+    // Only auto-scroll if user is already near the bottom (within 80px)
+    const nearBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < 80;
+    if (nearBottom) {
+        container.scrollTop = container.scrollHeight;
+    }
 }
 
 function clearChatMessages() {

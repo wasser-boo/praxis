@@ -182,6 +182,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
 /* Question text in options box */
 .question-text { font-size: 0.85rem; color: var(--text-primary); margin-bottom: 0.5rem; padding: 0.3rem 0; border-bottom: 1px solid var(--border); }
 
+/* Multi-select option styles */
+.chat-msg.question-card .chat-option.selected { background: rgba(108,99,255,0.2); border-color: var(--accent-purple); color: var(--accent-purple); }
+.chat-msg.question-card .chat-option.selected .emoji { filter: grayscale(0); }
+.chat-msg.question-card .chat-option.submit-btn { background: var(--accent-purple); color: white; border-color: var(--accent-purple); }
+.chat-msg.question-card .chat-option.submit-btn:hover { background: #5a52e0; }
+
 /* Live streaming text cursor */
 .stream-live::after { content: ''; display: inline-block; width: 2px; height: 1em; background: var(--accent-cyan); margin-left: 2px; vertical-align: text-bottom; animation: blink 1s step-end infinite; }
 @keyframes blink { 50% { opacity: 0; } }
