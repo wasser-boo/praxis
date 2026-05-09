@@ -1530,14 +1530,14 @@ async fn chat_stream_auth(
     if !valid {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    let rx = crate::dashboard::stream::subscribe(&user_id);
+    let rx = crate::dashboard::stream::get_or_create(&user_id).subscribe();
     let stream = futures_util::stream::unfold(rx, |rx| async move {
-        let mut r = rx?;
+        let mut r = rx;
         match r.recv().await {
             Ok(ev) => {
                 let data = serde_json::to_string(&ev).unwrap_or_default();
                 let event = Event::default().event(ev.event).data(data);
-                Some((Ok(event), Some(r)))
+                Some((Ok(event), r))
             }
             Err(_) => None,
         }

@@ -391,7 +391,13 @@ impl Database {
                     return Ok(session_ctx);
                 }
             }
-            // Session context doesn't exist yet; use base as template
+            // Session context doesn't exist yet; FORK from base
+            let forked = base_ctx.clone();
+            let forked_json = serde_json::to_string(&forked)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
+                rusqlite::params![key, forked_json],
+            )?;
             base_ctx.user_id = user_id.to_string();
             return Ok(base_ctx);
         }
@@ -402,20 +408,33 @@ impl Database {
     pub fn save_context(&self, ctx: &Context) -> anyhow::Result<()> {
         let conn = self.conn();
         let data = serde_json::to_string(ctx)?;
-        let key = if !ctx.session_id.is_empty() && ctx.session_id != "default" {
-            format!("{}:::{}", ctx.user_id, ctx.session_id)
+        if !ctx.session_id.is_empty() && ctx.session_id != "default" {
+            let key = format!("{}:::{}", ctx.user_id, ctx.session_id);
+            conn.execute(
+                "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
+                rusqlite::params![key, data],
+            )?;
+            // Update ONLY session_id on base row so resolve_user_key sees it
+            if let Ok(base_data) = conn.query_row(
+                "SELECT data FROM contexts WHERE user_id = ?1",
+                rusqlite::params![ctx.user_id],
+                |row| row.get::<_, String>(0),
+            ) {
+                if let Ok(mut base_json) = serde_json::from_str::<serde_json::Value>(&base_data) {
+                    base_json["session_id"] = serde_json::json!(ctx.session_id);
+                    let updated = serde_json::to_string(&base_json)?;
+                    conn.execute(
+                        "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
+                        rusqlite::params![ctx.user_id, updated],
+                    )?;
+                }
+            }
         } else {
-            ctx.user_id.clone()
-        };
-        conn.execute(
-            "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
-            rusqlite::params![key, data],
-        )?;
-        // Also update the base row so resolve_user_key sees the current session_id
-        conn.execute(
-            "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
-            rusqlite::params![ctx.user_id, data],
-        )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
+                rusqlite::params![ctx.user_id, data],
+            )?;
+        }
         Ok(())
     }
 
@@ -479,7 +498,22 @@ impl Database {
         session_id: &str,
     ) -> anyhow::Result<Context> {
         let key = Self::context_key(user_id, session_id);
-        let mut ctx = self.load_context(&key)?;
+        let mut ctx = match self.load_context(&key) {
+            Ok(c) => c,
+            Err(_) => {
+                // Fork from base context
+                let mut base = self.load_context(user_id)?;
+                base.session_id = session_id.to_string();
+                // Save forked context under session key
+                let data = serde_json::to_string(&base)?;
+                let conn = self.conn();
+                conn.execute(
+                    "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
+                    rusqlite::params![key, data],
+                )?;
+                base
+            }
+        };
         ctx.user_id = user_id.to_string();
         ctx.session_id = session_id.to_string();
         Ok(ctx)

@@ -831,9 +831,17 @@ pub async fn run_agent_loop(
             response_len = raw_response.len(),
             "<<< LLM FINAL RESPONSE (no tool calls) <<<"
         );
-        // Stream final response to dashboard
+        // Letter-by-letter streaming to dashboard
         if !raw_response.is_empty() {
-            crate::dashboard::stream::send(user_id, "assistant", &raw_response);
+            let uid = user_id.to_string();
+            let resp = raw_response.clone();
+            tokio::spawn(async move {
+                for ch in resp.chars() {
+                    crate::dashboard::stream::send(&uid, "char", &ch.to_string());
+                    tokio::time::sleep(std::time::Duration::from_millis(12)).await;
+                }
+                crate::dashboard::stream::send(&uid, "assistant", &resp);
+            });
         }
 
         // Strip think tags

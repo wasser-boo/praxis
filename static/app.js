@@ -342,11 +342,40 @@ function startChatStream() {
     if (!chatUserId || !authToken) return;
     const url = `/api/chat/stream/${encodeURIComponent(chatUserId)}?token=${encodeURIComponent(authToken)}`;
     const es = new EventSource(url);
+    let streamBuffer = '';
+    let streamMsg = null;
     es.addEventListener('feedback', (e) => {
         try {
             const d = JSON.parse(e.data);
+            if (d.data) addChatMessage('feedback', d.data);
+        } catch {}
+    });
+    es.addEventListener('char', (e) => {
+        try {
+            const d = JSON.parse(e.data);
             if (d.data) {
-                addChatMessage('feedback', d.data);
+                if (!streamMsg) {
+                    streamMsg = document.createElement('div');
+                    streamMsg.className = 'chat-msg assistant';
+                    const botAvatar = `/api/avatar/bot?t=${Date.now()}`;
+                    const botName = chatBotName || 'Praxis';
+                    streamMsg.innerHTML = `<div class="msg-row">
+                        <div class="msg-col">
+                            <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.svg'" onclick="showAvatarModal('bot')">
+                            <span class="msg-label">${escapeHtml(botName)}</span>
+                        </div>
+                        <div class="msg-content markdown stream-live"></div>
+                    </div>`;
+                    const container = document.getElementById('chat-messages');
+                    const welcome = container.querySelector('.chat-welcome');
+                    if (welcome) welcome.remove();
+                    container.appendChild(streamMsg);
+                }
+                streamBuffer += d.data;
+                const contentEl = streamMsg.querySelector('.msg-content');
+                if (contentEl) contentEl.innerHTML = renderMarkdown(streamBuffer);
+                const container = document.getElementById('chat-messages');
+                container.scrollTop = container.scrollHeight;
             }
         } catch {}
     });
@@ -354,7 +383,17 @@ function startChatStream() {
         try {
             const d = JSON.parse(e.data);
             if (d.data) {
-                addChatMessage('assistant', d.data);
+                if (streamMsg) {
+                    const contentEl = streamMsg.querySelector('.msg-content');
+                    if (contentEl) {
+                        contentEl.classList.remove('stream-live');
+                        contentEl.innerHTML = renderMarkdown(d.data);
+                    }
+                    streamMsg = null;
+                    streamBuffer = '';
+                } else {
+                    addChatMessage('assistant', d.data);
+                }
                 stopChatTimer();
             }
         } catch {}
@@ -556,10 +595,37 @@ function renderChatSessionList() {
     if (!list) return;
     list.innerHTML = chatSessions.map(s => `
         <div class="chat-session ${s.id === chatSessionId ? 'active' : ''}" onclick="switchChatSession('${escapeHtml(s.id)}')">
-            <span class="session-name">${escapeHtml(s.name)}</span>
+            <span class="session-name" ondblclick="event.stopPropagation();startRenameSession('${escapeHtml(s.id)}', this)">${escapeHtml(s.name)}</span>
             ${chatSessions.length > 1 ? `<span class="session-del" onclick="event.stopPropagation();deleteChatSession('${escapeHtml(s.id)}')">×</span>` : ''}
         </div>
     `).join('');
+}
+
+function startRenameSession(id, el) {
+    const s = chatSessions.find(s => s.id === id);
+    if (!s) return;
+    const oldName = s.name;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = oldName;
+    input.className = 'session-rename-input';
+    input.style.cssText = 'background:var(--bg-primary);border:1px solid var(--accent-purple);color:var(--text-primary);border-radius:4px;padding:0.2rem 0.4rem;font-size:0.85rem;width:100%;';
+    el.replaceWith(input);
+    input.focus();
+    input.select();
+    const save = () => {
+        const newName = input.value.trim();
+        if (newName && newName !== oldName) {
+            s.name = newName;
+            saveChatSessions();
+        }
+        renderChatSessionList();
+    };
+    input.addEventListener('blur', save);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); save(); }
+        if (e.key === 'Escape') { input.value = oldName; renderChatSessionList(); }
+    });
 }
 
 async function chatNewSession() {

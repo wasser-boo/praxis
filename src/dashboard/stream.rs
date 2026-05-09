@@ -15,7 +15,7 @@ static USER_STREAMS: once_cell::sync::Lazy<Arc<DashMap<String, broadcast::Sender
 pub fn get_or_create(user_id: &str) -> broadcast::Sender<StreamEvent> {
     USER_STREAMS
         .entry(user_id.to_string())
-        .or_insert_with(|| broadcast::channel(256).0)
+        .or_insert_with(|| broadcast::channel(8192).0)
         .clone()
 }
 
@@ -28,10 +28,9 @@ pub fn remove(user_id: &str) {
 }
 
 pub fn send(user_id: &str, event: &str, data: &str) {
-    if let Some(tx) = USER_STREAMS.get(user_id) {
-        let _ = tx.send(StreamEvent {
-            event: event.to_string(),
-            data: data.to_string(),
-        });
-    }
+    let tx = get_or_create(user_id);
+    let _ = tx.send(StreamEvent {
+        event: event.to_string(),
+        data: data.to_string(),
+    });
 }
