@@ -27,6 +27,8 @@ pub struct Config {
     pub anthropic_api_base: String,
     pub ollama_api_base: String,
     pub ollama_model: String,
+    pub llamacpp_api_base: String,
+    pub llamacpp_model: String,
     pub minimax_api_key: Option<String>,
     pub minimax_model: String,
     pub minimax_api_base: String,
@@ -73,6 +75,10 @@ impl Config {
             ollama_api_base: env::var("OLLAMA_API_BASE")
                 .unwrap_or_else(|_| "http://localhost:11434".to_string()),
             ollama_model: env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3".to_string()),
+            llamacpp_api_base: env::var("LLAMACPP_API_BASE")
+                .unwrap_or_else(|_| "http://localhost:8080".to_string()),
+            llamacpp_model: env::var("LLAMACPP_MODEL")
+                .unwrap_or_else(|_| "llama.cpp".to_string()),
             minimax_api_key: env::var("MINIMAX_API_KEY").ok(),
             minimax_model: env::var("MINIMAX_MODEL")
                 .unwrap_or_else(|_| "MiniMax-Text-01".to_string()),

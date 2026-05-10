@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod embeddings;
+pub mod llamacpp;
 pub mod mimo;
 pub mod minimax;
 pub mod ollama;
@@ -39,6 +40,12 @@ impl LLMRouter {
             config.ollama_api_base.clone(),
             config.ollama_model.clone(),
             secrets.ollama_api_key.clone(),
+        )));
+
+        providers.push(Box::new(llamacpp::LlamaCppProvider::new(
+            secrets.llamacpp_api_key.clone(),
+            config.llamacpp_model.clone(),
+            config.llamacpp_api_base.clone(),
         )));
 
         if let Some(ref key) = secrets.minimax_api_key {

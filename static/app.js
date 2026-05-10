@@ -1476,7 +1476,7 @@ async function loadSecrets() {
         const res = await apiGet('/api/secrets');
         const data = await res.json();
         const container = document.getElementById('secrets-content');
-        const knownKeys = ['discord_bot_token', 'openai_api_key', 'anthropic_api_key', 'minimax_api_key',
+        const knownKeys = ['discord_bot_token', 'openai_api_key', 'anthropic_api_key', 'llamacpp_api_key', 'minimax_api_key',
             'mimo_api_key', 'elevenlabs_api_key', 'gateway_api_key', 'dashboard_admin_password'];
         const customKeys = Object.keys(data).filter(k => !knownKeys.includes(k));
 

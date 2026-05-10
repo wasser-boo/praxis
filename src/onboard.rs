@@ -37,18 +37,20 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
         println!("  1) Keep current provider and keys (skip)");
         println!("  2) OpenAI (GPT-4)");
         println!("  3) Anthropic (Claude)");
-        println!("  4) Ollama (Local)");
-        println!("  5) MiniMax");
-        println!("  6) MiMo");
+        println!("  4) Llama.cpp (Local Server)");
+        println!("  5) Ollama (Local)");
+        println!("  6) MiniMax");
+        println!("  7) MiMo");
         println!();
 
-        let skip_choice = prompt_choice("Select provider", &["1", "2", "3", "4", "5", "6"], "1")?;
+        let skip_choice = prompt_choice("Select provider", &["1", "2", "3", "4", "5", "6", "7"], "1")?;
         if skip_choice == "1" {
             // Keep all existing provider config
             env_lines.push(format!("USE_PROVIDER={}", existing_provider));
             for (key, val) in &existing {
                 if key.starts_with("OPENAI_")
                     || key.starts_with("ANTHROPIC_")
+                    || key.starts_with("LLAMACPP_")
                     || key.starts_with("OLLAMA_")
                     || key.starts_with("MINIMAX_")
                     || key.starts_with("MIMO_")
@@ -70,6 +72,7 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
                 "4" => "3",
                 "5" => "4",
                 "6" => "5",
+                "7" => "6",
                 _ => "1",
             };
             select_provider(real_choice, &existing, &mut env_lines)?
@@ -78,12 +81,13 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
         println!("Which LLM provider do you want to use?");
         println!("  1) OpenAI (GPT-4)");
         println!("  2) Anthropic (Claude)");
-        println!("  3) Ollama (Local)");
-        println!("  4) MiniMax");
-        println!("  5) MiMo");
+        println!("  3) Llama.cpp (Local Server)");
+        println!("  4) Ollama (Local)");
+        println!("  5) MiniMax");
+        println!("  6) MiMo");
         println!();
 
-        let provider_choice = prompt_choice("Select provider", &["1", "2", "3", "4", "5"], "1")?;
+        let provider_choice = prompt_choice("Select provider", &["1", "2", "3", "4", "5", "6"], "1")?;
         select_provider(&provider_choice, &existing, &mut env_lines)?
     };
     println!();
@@ -566,6 +570,7 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
         if line.starts_with("USE_PROVIDER=")
             || line.starts_with("OPENAI_")
             || line.starts_with("ANTHROPIC_")
+            || line.starts_with("LLAMACPP_")
             || line.starts_with("OLLAMA_")
             || line.starts_with("MINIMAX_")
             || line.starts_with("MIMO_")
@@ -772,6 +777,10 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
             .iter()
             .find(|l| l.starts_with("OLLAMA_API_KEY="))
             .map(|l| l.strip_prefix("OLLAMA_API_KEY=").unwrap_or("").to_string()),
+        llamacpp_api_key: env_lines
+            .iter()
+            .find(|l| l.starts_with("LLAMACPP_API_KEY="))
+            .map(|l| l.strip_prefix("LLAMACPP_API_KEY=").unwrap_or("").to_string()),
         minimax_api_key: env_lines
             .iter()
             .find(|l| l.starts_with("MINIMAX_API_KEY="))
@@ -803,6 +812,7 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
         .filter(|line| {
             !line.starts_with("OPENAI_API_KEY=")
                 && !line.starts_with("ANTHROPIC_API_KEY=")
+                && !line.starts_with("LLAMACPP_API_KEY=")
                 && !line.starts_with("MINIMAX_API_KEY=")
                 && !line.starts_with("MIMO_API_KEY=")
                 && !line.starts_with("ELEVENLABS_API_KEY=")
@@ -1044,6 +1054,26 @@ fn select_provider(
         }
         "3" => {
             let base_url = prompt_with_default(
+                "Llama.cpp Server API Base URL",
+                &get_existing(existing, "LLAMACPP_API_BASE", "http://localhost:8080"),
+            );
+            let model = prompt_with_default(
+                "Llama.cpp Model",
+                &get_existing(existing, "LLAMACPP_MODEL", "llama.cpp"),
+            );
+            let api_key = prompt_with_default(
+                "Llama.cpp API Key (optional, for authenticated servers)",
+                &get_existing(existing, "LLAMACPP_API_KEY", ""),
+            );
+            env_lines.push(format!("LLAMACPP_API_BASE={}", base_url));
+            env_lines.push(format!("LLAMACPP_MODEL={}", model));
+            if !api_key.is_empty() {
+                env_lines.push(format!("LLAMACPP_API_KEY={}", api_key));
+            }
+            Ok("llamacpp".to_string())
+        }
+        "4" => {
+            let base_url = prompt_with_default(
                 "Ollama API Base URL",
                 &get_existing(existing, "OLLAMA_API_BASE", "http://localhost:11434"),
             );
@@ -1062,7 +1092,7 @@ fn select_provider(
             }
             Ok("ollama".to_string())
         }
-        "4" => {
+        "5" => {
             let api_key = prompt_required_with_existing(
                 "MiniMax API Key",
                 &get_existing(existing, "MINIMAX_API_KEY", ""),
@@ -1096,7 +1126,7 @@ fn select_provider(
             env_lines.push(format!("MINIMAX_API_MODE={}", mode_str));
             Ok("minimax".to_string())
         }
-        "5" => {
+        "6" => {
             let api_key = prompt_required_with_existing(
                 "MiMo API Key",
                 &get_existing(existing, "MIMO_API_KEY", ""),

@@ -35,6 +35,9 @@ pub async fn inject_secrets(vm_name: &str, data_dir: &str) -> anyhow::Result<()>
     if write_secret("OLLAMA_API_KEY", &secrets.ollama_api_key) {
         count += 1;
     }
+    if write_secret("LLAMACPP_API_KEY", &secrets.llamacpp_api_key) {
+        count += 1;
+    }
     if write_secret("MINIMAX_API_KEY", &secrets.minimax_api_key) {
         count += 1;
     }
@@ -165,6 +168,9 @@ pub fn list_injected_keys() -> Vec<String> {
     }
     if secrets.ollama_api_key.is_some() {
         keys.push("OLLAMA_API_KEY".into());
+    }
+    if secrets.llamacpp_api_key.is_some() {
+        keys.push("LLAMACPP_API_KEY".into());
     }
     if secrets.minimax_api_key.is_some() {
         keys.push("MINIMAX_API_KEY".into());

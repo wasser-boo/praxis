@@ -69,6 +69,7 @@ pub struct SecretsInfo {
     pub openai_api_key: String,
     pub anthropic_api_key: String,
     pub ollama_api_key: String,
+    pub llamacpp_api_key: String,
     pub minimax_api_key: String,
     pub mimo_api_key: String,
     pub elevenlabs_api_key: String,
@@ -84,6 +85,7 @@ pub struct SecretsUpdate {
     pub openai_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
     pub ollama_api_key: Option<String>,
+    pub llamacpp_api_key: Option<String>,
     pub minimax_api_key: Option<String>,
     pub mimo_api_key: Option<String>,
     pub elevenlabs_api_key: Option<String>,
@@ -817,6 +819,7 @@ async fn get_secrets() -> Result<Json<SecretsInfo>, StatusCode> {
         openai_api_key: crate::db::secrets::mask_secret(&secrets.openai_api_key),
         anthropic_api_key: crate::db::secrets::mask_secret(&secrets.anthropic_api_key),
         ollama_api_key: crate::db::secrets::mask_secret(&secrets.ollama_api_key),
+        llamacpp_api_key: crate::db::secrets::mask_secret(&secrets.llamacpp_api_key),
         minimax_api_key: crate::db::secrets::mask_secret(&secrets.minimax_api_key),
         mimo_api_key: crate::db::secrets::mask_secret(&secrets.mimo_api_key),
         elevenlabs_api_key: crate::db::secrets::mask_secret(&secrets.elevenlabs_api_key),
@@ -842,6 +845,9 @@ async fn update_secrets(Json(update): Json<SecretsUpdate>) -> Result<String, Sta
     }
     if let Some(v) = update.ollama_api_key {
         secrets.ollama_api_key = Some(v);
+    }
+    if let Some(v) = update.llamacpp_api_key {
+        secrets.llamacpp_api_key = Some(v);
     }
     if let Some(v) = update.minimax_api_key {
         secrets.minimax_api_key = Some(v);
