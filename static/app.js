@@ -795,7 +795,16 @@ function addChatMessage(type, content, extra = null) {
     container.scrollTop = container.scrollHeight;
 }
 
-function clearChatMessages() {
+async function clearChatMessages() {
+    // Also delete messages on the backend for the current session
+    try {
+        const res = await apiFetch(`/api/messages/${encodeURIComponent(chatUserId)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Delete failed');
+    } catch (err) {
+        console.error('[CLEAR] backend delete failed:', err);
+        addChatMessage('feedback', 'Failed to clear messages on server');
+        return;
+    }
     const container = document.getElementById('chat-messages');
     container.innerHTML = '<div class="chat-welcome">Start an agent to begin chatting. Your messages appear here with tool calls visible inline.</div>';
     chatSeenIds.clear();

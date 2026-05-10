@@ -114,7 +114,7 @@
                                     <button class="btn btn-sm btn-secondary chat-upload-btn" onclick="document.getElementById('chat-file-input').click()" title="Upload files">&#128206;</button>
                                     <input type="file" id="chat-file-input" multiple style="display:none" onchange="chatHandleFiles(this.files)">
                                     <div style="position:relative;flex:1">
-                                        <textarea id="chat-input" class="chat-input" placeholder="Type a message... (try /clear, /start, /stop, /new, /status)" rows="2" onkeydown="chatKeyDown(event)" oninput="chatInput(event)"></textarea>
+                                        <textarea id="chat-input" class="chat-input" placeholder="Type a message... (try /clear, /start, /stop, /new, /status)" rows="3" onkeydown="chatKeyDown(event)" oninput="chatInput(event)"></textarea>
                                         <div id="slash-commands" class="slash-commands" style="display:none"></div>
                                     </div>
                                     <button class="btn btn-primary chat-send-btn" id="chat-send-btn" onclick="chatSendMessage()">Send</button>

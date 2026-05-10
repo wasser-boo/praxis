@@ -175,6 +175,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/contexts/:user_id", axum::routing::put(update_context))
         .route("/contexts/:user_id", axum::routing::delete(delete_context))
         .route("/messages/:user_id", axum::routing::get(get_messages))
+        .route("/messages/:user_id", axum::routing::delete(clear_messages))
         .route("/templates", axum::routing::get(list_templates))
         .route("/templates", axum::routing::post(create_template))
         .route("/templates/:name", axum::routing::get(get_template))
@@ -458,6 +459,20 @@ async fn get_messages(
             })))
         }
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn clear_messages(
+    State(state): State<Arc<DashboardState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    tracing::debug!(user_id = %user_id, "[MESSAGES] clearing messages");
+    match state.db.clear_messages(&user_id) {
+        Ok(()) => Ok(Json(serde_json::json!({ "success": true }))),
+        Err(e) => {
+            tracing::error!(user_id = %user_id, error = %e, "[MESSAGES] clear failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 
