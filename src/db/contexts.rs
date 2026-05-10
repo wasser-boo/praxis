@@ -414,21 +414,27 @@ impl Database {
                 "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
                 rusqlite::params![key, data],
             )?;
-            // Update ONLY session_id on base row so resolve_user_key sees it
-            if let Ok(base_data) = conn.query_row(
+            // Ensure base row exists with the current session_id so resolve_user_key works
+            let base_json = match conn.query_row(
                 "SELECT data FROM contexts WHERE user_id = ?1",
                 rusqlite::params![ctx.user_id],
                 |row| row.get::<_, String>(0),
             ) {
-                if let Ok(mut base_json) = serde_json::from_str::<serde_json::Value>(&base_data) {
-                    base_json["session_id"] = serde_json::json!(ctx.session_id);
-                    let updated = serde_json::to_string(&base_json)?;
-                    conn.execute(
-                        "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
-                        rusqlite::params![ctx.user_id, updated],
-                    )?;
+                Ok(base_data) => {
+                    let mut j = serde_json::from_str::<serde_json::Value>(&base_data)?;
+                    j["session_id"] = serde_json::json!(ctx.session_id);
+                    serde_json::to_string(&j)?
                 }
-            }
+                Err(_) => {
+                    // No base row yet – create one by cloning the current context
+                    // (turn, settings, etc. become the canonical base for future forks)
+                    serde_json::to_string(ctx)?
+                }
+            };
+            conn.execute(
+                "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
+                rusqlite::params![ctx.user_id, base_json],
+            )?;
         } else {
             conn.execute(
                 "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",

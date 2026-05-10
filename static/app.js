@@ -7,7 +7,7 @@ let chatSessionId = 'default';
 let chatAttachments = [];
 let vmRefreshInterval = null;
 let chatSeenIds = new Set();
-let chatLastResponse = '';
+let chatPollGen = 0;
 let isAgentActive = false;
 let chatSessions = [];
 let chatBotName = 'Praxis';
@@ -588,8 +588,7 @@ function startChatStream() {
                 streamBuffer += d.data;
                 const contentEl = streamMsg.querySelector('.msg-content');
                 if (contentEl) {
-                    // Ultra-fast path: raw textContent while streaming, no markdown
-                    contentEl.textContent = streamBuffer;
+                    contentEl.innerHTML = renderMarkdown(streamBuffer);
                 }
                 autoScrollChat();
             }
@@ -646,8 +645,10 @@ function stopChatStream() {
 }
 
 async function pollChatMessages() {
+    const myGen = chatPollGen;
     try {
         const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}`);
+        if (myGen !== chatPollGen) return; // stale response for a different session
         const data = await res.json();
         if (data.messages && data.messages.length > 0) {
             for (const m of data.messages) {
@@ -664,9 +665,11 @@ async function pollChatMessages() {
 
 async function loadChatHistory() {
     clearChatMessages();
+    const mySessionId = chatSessionId;
     console.log('[HISTORY] loading history for session', chatSessionId);
     try {
         const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}`);
+        if (chatSessionId !== mySessionId) return; // switched away while loading
         const data = await res.json();
         console.log('[HISTORY] got', (data.messages || []).length, 'messages');
         if (data.messages && data.messages.length > 0) {
@@ -796,7 +799,6 @@ function clearChatMessages() {
     const container = document.getElementById('chat-messages');
     container.innerHTML = '<div class="chat-welcome">Start an agent to begin chatting. Your messages appear here with tool calls visible inline.</div>';
     chatSeenIds.clear();
-    chatLastResponse = '';
 }
 
 // ═══ Chat Sessions ══════════════════════════════════════════════════════════════
@@ -861,27 +863,19 @@ async function chatNewSession() {
     console.log('[SESSION] creating new session:', id, name);
     chatSessions.push({ id, name });
     saveChatSessions();
-
-    // Fork context: update backend to the new session_id, but do NOT load old messages
-    stopChatPolling();
-    chatSessionId = id;
-    clearChatMessages();
-    chatSeenIds.clear();
-    chatLastResponse = '';
-
+    await switchChatSession(id);
+    // Persist session on backend
     try {
         await apiPost('/api/contexts/' + encodeURIComponent(chatUserId), { session_id: id });
         console.log('[SESSION] backend persistence done for', id);
     } catch (err) { console.error('[SESSION] backend persistence failed:', err); }
-
     renderChatSessionList();
-    await loadChatStatus();
-    startChatPolling();
 }
 
 async function switchChatSession(id) {
     console.log('[SESSION] switching to session:', id, '(from', chatSessionId, ')');
     stopChatPolling();
+    chatPollGen++;
     chatSessionId = id;
     clearChatMessages();
     // Update backend context session
