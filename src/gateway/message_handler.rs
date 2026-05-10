@@ -512,7 +512,7 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
         .collect();
 
     let context = serde_json::json!({
-        "user_name": ctx.user_name.as_deref().unwrap_or("User"),
+        "username": ctx.username.as_deref().unwrap_or("User"),
         "mode": ctx.mode,
         "turn": ctx.turn,
         "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
@@ -554,7 +554,7 @@ async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Co
             format!(
                 "You are Praxis, an AI agent assistant. Current mode: {}. User: {}. Turn: {}. Uptime: {}. Paired users: {}.",
                 ctx.mode,
-                ctx.user_name.as_deref().unwrap_or("unknown"),
+                ctx.username.as_deref().unwrap_or("unknown"),
                 ctx.turn,
                 uptime,
                 paired_count,

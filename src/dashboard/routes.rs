@@ -374,7 +374,6 @@ async fn get_context(
         "user_id": ctx.user_id,
         "turn": ctx.turn,
         "mode": ctx.mode,
-        "user_name": ctx.user_name,
         "username": ctx.username,
         "cl_file": ctx.cl_file,
         "active_state": ctx.active_state,
@@ -398,7 +397,6 @@ async fn update_context(
         "user_id": ctx.user_id,
         "turn": ctx.turn,
         "mode": ctx.mode,
-        "user_name": ctx.user_name,
         "username": ctx.username,
         "cl_file": ctx.cl_file,
         "active_state": ctx.active_state,
@@ -645,7 +643,7 @@ async fn update_template(
 
     let context = serde_json::json!({
         "user_id": ctx.user_id,
-        "user_name": ctx.user_name.as_deref().unwrap_or("User"),
+        "username": ctx.username.as_deref().unwrap_or("User"),
         "mode": ctx.mode,
         "turn": ctx.turn,
         "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
@@ -1545,6 +1543,11 @@ async fn chat_query(
         if consumed {
             return Ok(Json(serde_json::json!({"success": true, "type": "question_reply"})));
         }
+    }
+
+    // Overwrite custom_data.user_prompt with the current message
+    if !message.is_empty() {
+        let _ = state.db.merge_context(user_id, serde_json::json!({"custom_data": {"user_prompt": message}}));
     }
 
     // Check if agent loop is active

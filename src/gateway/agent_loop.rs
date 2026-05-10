@@ -1067,7 +1067,7 @@ async fn build_system_prompt(
     
     tracing::info!(user_id = %ctx.user_id, "context_json user_prompt: {}", context_json["user_prompt"]);
 
-    context_json["user_name"] = serde_json::json!(ctx.user_name.as_deref().unwrap_or("User"));
+    context_json["username"] = serde_json::json!(ctx.username.as_deref().unwrap_or("User"));
 
     let effective_path = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
@@ -1137,7 +1137,7 @@ async fn build_system_prompt(
             format!(
                 "You are Praxis, an AI agent. Mode: {}. User: {}. Turn: {}.",
                 ctx.mode,
-                ctx.user_name.as_deref().unwrap_or("unknown"),
+                ctx.username.as_deref().unwrap_or("unknown"),
                 ctx.turn
             )
         }

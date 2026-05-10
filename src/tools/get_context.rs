@@ -7,7 +7,7 @@ pub fn get_context(
 
     let value = match key {
         "mode" => Some(ctx.mode.clone()),
-        "user_name" => ctx.user_name.clone(),
+        "username" => ctx.username.clone(),
         "cl_file" => ctx.cl_file.clone(),
         "active_state" => ctx.active_state.clone(),
         "turn" => Some(ctx.turn.to_string()),
@@ -43,7 +43,7 @@ mod tool_tests {
         let ctx = crate::db::contexts::Context {
             user_id: "user1".to_string(),
             mode: "coding".to_string(),
-            user_name: Some("Alice".to_string()),
+            username: Some("Alice".to_string()),
             ..Default::default()
         };
         db.save_context(&ctx).unwrap();
@@ -58,9 +58,9 @@ mod tool_tests {
     }
 
     #[test]
-    fn test_get_context_user_name() {
+    fn test_get_context_username() {
         let (db, _dir) = test_db();
-        let value = get_context(&db, "user1", "user_name").unwrap();
+        let value = get_context(&db, "user1", "username").unwrap();
         assert_eq!(value, Some("Alice".to_string()));
     }
 

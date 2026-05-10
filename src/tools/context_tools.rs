@@ -8,7 +8,7 @@ pub fn set_context_value(
 
     match key {
         "mode" => ctx.mode = value.to_string(),
-        "user_name" => ctx.user_name = Some(value.to_string()),
+        "username" => ctx.username = Some(value.to_string()),
         "cl_file" => ctx.cl_file = Some(value.to_string()),
         "active_state" => ctx.active_state = Some(value.to_string()),
         "voice_enabled" => ctx.settings.voice_enabled = value.parse().unwrap_or(false),
@@ -51,7 +51,7 @@ pub fn delete_context_value(
     let mut ctx = db.load_context(user_id)?;
 
     match key {
-        "user_name" => ctx.user_name = None,
+        "username" => ctx.username = None,
         "cl_file" => ctx.cl_file = None,
         "active_state" => ctx.active_state = None,
         "max_llm_turns" => ctx.settings.max_llm_turns = None,
@@ -96,11 +96,11 @@ mod tool_tests {
     }
 
     #[test]
-    fn test_set_context_user_name() {
+    fn test_set_context_username() {
         let (db, _dir) = test_db();
-        set_context_value(&db, "user1", "user_name", "Alice").unwrap();
+        set_context_value(&db, "user1", "username", "Alice").unwrap();
         let ctx = db.load_context("user1").unwrap();
-        assert_eq!(ctx.user_name, Some("Alice".to_string()));
+        assert_eq!(ctx.username, Some("Alice".to_string()));
     }
 
     #[test]
@@ -114,9 +114,9 @@ mod tool_tests {
     #[test]
     fn test_delete_context_value() {
         let (db, _dir) = test_db();
-        set_context_value(&db, "user1", "user_name", "Alice").unwrap();
-        delete_context_value(&db, "user1", "user_name").unwrap();
+        set_context_value(&db, "user1", "username", "Alice").unwrap();
+        delete_context_value(&db, "user1", "username").unwrap();
         let ctx = db.load_context("user1").unwrap();
-        assert!(ctx.user_name.is_none());
+        assert!(ctx.username.is_none());
     }
 }

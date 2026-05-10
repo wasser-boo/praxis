@@ -365,13 +365,13 @@ async function loadChatUserInfo() {
         const data = await res.json();
         if (data.context) {
             chatBotName = data.context.settings?.agent_name || 'Praxis';
-            const ctxUsername = data.context.username || data.context.user_name;
+            const ctxUsername = data.context.username;
             if (ctxUsername) {
                 chatUsername = ctxUsername;
                 localStorage.setItem('praxis_chat_username', chatUsername);
             }
-        } else if (data.username || data.user_name) {
-            chatUsername = data.username || data.user_name;
+        } else if (data.username) {
+            chatUsername = data.username;
             localStorage.setItem('praxis_chat_username', chatUsername);
         }
     } catch {}

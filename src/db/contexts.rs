@@ -8,8 +8,6 @@ pub struct Context {
     pub turn: i32,
     #[serde(default = "default_mode")]
     pub mode: String,
-    #[serde(default)]
-    pub user_name: Option<String>,
     /// Display name for the chat user. Distinct from `user_id`, which is the
     /// session identifier. Multiple sessions belonging to the same human user
     /// share a `username` while having different `user_id`s.
@@ -40,7 +38,6 @@ impl Default for Context {
             user_id: String::new(),
             turn: 0,
             mode: default_mode(),
-            user_name: None,
             username: None,
             cl_file: None,
             active_state: None,
@@ -516,7 +513,7 @@ impl Database {
                 forked.username = Some(name.to_string());
             }
         } else if forked.username.is_none() {
-            forked.username = parent.username.clone().or_else(|| parent.user_name.clone());
+            forked.username = parent.username.clone();
         }
         self.save_context(&forked)?;
         Ok(forked)
