@@ -170,6 +170,114 @@ async function initChatTab() {
     if (container) container.scrollTop = container.scrollHeight;
 }
 
+const SLASH_COMMANDS = [
+    { name: '/clear', desc: 'Clear chat messages', action: clearChatMessages },
+    { name: '/start', desc: 'Start the agent loop', action: chatStartAgent },
+    { name: '/stop', desc: 'Stop the agent loop', action: chatStopAgent },
+    { name: '/new', desc: 'Start a new chat session', action: chatNewSession },
+    { name: '/status', desc: 'Check agent status', action: async () => {
+        const active = await checkAgentActive(chatUserId);
+        addChatMessage('system', `Agent is ${active ? 'active' : 'inactive'} for ${chatUserId}`);
+    } },
+    { name: '/avatar', desc: 'Change your avatar', action: () => showAvatarModal('user') },
+    { name: '/botavatar', desc: 'Change bot avatar', action: () => showAvatarModal('bot') },
+    { name: '/help', desc: 'Show available commands', action: showSlashHelp },
+];
+
+function showSlashHelp() {
+    const list = SLASH_COMMANDS.map(c => `<b>${escapeHtml(c.name)}</b> - ${escapeHtml(c.desc)}`).join('<br>');
+    addChatMessage('system', 'Available commands:<br>' + list);
+}
+
+let slashActiveIndex = -1;
+
+function chatInput(e) {
+    const input = e.target;
+    const val = input.value;
+    const box = document.getElementById('slash-commands');
+    if (!box) return;
+    const beforeCursor = val.slice(0, input.selectionStart);
+    const slashWord = beforeCursor.match(/\/(\w*)$/);
+    if (!slashWord) {
+        box.style.display = 'none';
+        return;
+    }
+    const query = slashWord[1].toLowerCase();
+    const matches = SLASH_COMMANDS.filter(c => c.name.slice(1).toLowerCase().startsWith(query));
+    if (matches.length === 0) {
+        box.style.display = 'none';
+        return;
+    }
+    slashActiveIndex = -1;
+    box.innerHTML = matches.map((c, i) =>
+        `<div class="slash-cmd ${i === 0 ? 'active' : ''}" data-cmd="${escapeHtml(c.name)}" onclick="runSlashCommand('${escapeHtml(c.name)}')"
+         onmouseenter="slashActiveIndex=${i};renderSlashActive()">
+            <span class="slash-name">${escapeHtml(c.name)}</span>
+            <span class="slash-desc">${escapeHtml(c.desc)}</span>
+        </div>`
+    ).join('');
+    box.style.display = 'block';
+}
+
+function renderSlashActive() {
+    const box = document.getElementById('slash-commands');
+    if (!box) return;
+    box.querySelectorAll('.slash-cmd').forEach((el, i) => {
+        el.classList.toggle('active', i === slashActiveIndex);
+    });
+}
+
+function runSlashCommand(name) {
+    const cmd = SLASH_COMMANDS.find(c => c.name === name);
+    if (!cmd) return;
+    const input = document.getElementById('chat-input');
+    const val = input.value;
+    const beforeCursor = val.slice(0, input.selectionStart);
+    const afterCursor = val.slice(input.selectionStart);
+    const newBefore = beforeCursor.replace(/\/\w*$/, '');
+    input.value = newBefore + afterCursor;
+    input.focus();
+    input.setSelectionRange(newBefore.length, newBefore.length);
+    document.getElementById('slash-commands').style.display = 'none';
+    // Execute the command
+    try { cmd.action(); } catch (err) { console.error('Slash command error:', err); }
+}
+
+function chatKeyDown(e) {
+    const box = document.getElementById('slash-commands');
+    const visible = box && box.style.display !== 'none';
+    if (visible && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault();
+        const items = box.querySelectorAll('.slash-cmd');
+        if (e.key === 'ArrowDown') slashActiveIndex = Math.min(slashActiveIndex + 1, items.length - 1);
+        else slashActiveIndex = Math.max(slashActiveIndex - 1, 0);
+        renderSlashActive();
+        items[slashActiveIndex]?.scrollIntoView({ block: 'nearest' });
+        return;
+    }
+    if (visible && e.key === 'Enter') {
+        e.preventDefault();
+        const items = box.querySelectorAll('.slash-cmd');
+        const active = items[Math.max(0, slashActiveIndex)];
+        if (active) runSlashCommand(active.dataset.cmd);
+        return;
+    }
+    if (visible && e.key === 'Escape') {
+        e.preventDefault();
+        box.style.display = 'none';
+        return;
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (visible && slashActiveIndex >= 0) {
+            const items = box.querySelectorAll('.slash-cmd');
+            const active = items[slashActiveIndex];
+            if (active) { runSlashCommand(active.dataset.cmd); return; }
+        }
+        chatSendMessage();
+    }
+}
+
 async function loadChatUserInfo() {
     try {
         const res = await apiGet('/api/contexts/' + encodeURIComponent(chatUserId));
@@ -293,11 +401,7 @@ async function chatSendMessage() {
 function autoScrollChat() {
     const container = document.getElementById('chat-messages');
     if (!container) return;
-    // Only auto-scroll if user is already near the bottom (within 80px)
-    const nearBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < 80;
-    if (nearBottom) {
-        container.scrollTop = container.scrollHeight;
-    }
+    container.scrollTop = container.scrollHeight;
 }
 
 function chatKeyDown(e) {
@@ -757,13 +861,22 @@ async function chatNewSession() {
     console.log('[SESSION] creating new session:', id, name);
     chatSessions.push({ id, name });
     saveChatSessions();
-    await switchChatSession(id);
-    // Persist session on backend
+
+    // Fork context: update backend to the new session_id, but do NOT load old messages
+    stopChatPolling();
+    chatSessionId = id;
+    clearChatMessages();
+    chatSeenIds.clear();
+    chatLastResponse = '';
+
     try {
         await apiPost('/api/contexts/' + encodeURIComponent(chatUserId), { session_id: id });
         console.log('[SESSION] backend persistence done for', id);
     } catch (err) { console.error('[SESSION] backend persistence failed:', err); }
+
     renderChatSessionList();
+    await loadChatStatus();
+    startChatPolling();
 }
 
 async function switchChatSession(id) {

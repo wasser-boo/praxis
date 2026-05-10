@@ -75,25 +75,22 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
 .cl-badge { font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.6rem; border-radius: 4px; background: rgba(124,77,255,0.15); color: var(--accent-purple); }
 .cl-badge.template { background: rgba(0,217,255,0.1); color: var(--accent-cyan); }
 .cl-badge.vars { background: rgba(0,255,136,0.1); color: var(--success); }
-.avatar-sm { width: 48px; height: 48px; border-radius: 12px; object-fit: cover; border: 2px solid var(--accent-cyan); background: var(--bg-card); }
+.avatar-sm { width: 64px; height: 64px; border-radius: 16px; object-fit: cover; border: 2px solid var(--accent-cyan); background: var(--bg-card); }
 #chat-bot-avatar { border-color: var(--accent-purple); background: var(--bg-secondary); padding: 2px; }
-.avatar-label { font-size: 0.75rem; color: var(--text-secondary); text-align: center; margin-top: 4px; max-width: 48px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.avatar-label { font-size: 0.75rem; color: var(--text-secondary); text-align: center; margin-top: 4px; max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.chat-container { display: flex; flex-direction: column; flex: 1; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; min-height: 0; }
-.chat-messages { flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: 0.5rem; }
-.chat-welcome { color: var(--text-secondary); text-align: center; padding: 2rem; font-size: 0.9rem; }
-/* Chat messages */
-.chat-msg { max-width: 85%; padding: 0.75rem 1rem; border-radius: 12px; font-size: 0.9rem; line-height: 1.5; word-break: break-word; animation: msgIn 0.2s ease-out; }
-@keyframes msgIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-.chat-msg { align-self: flex-start; }
-.chat-msg.user { color: var(--text-primary); border-left: 3px solid var(--accent-cyan); background: rgba(0,217,255,0.05); }
-.chat-msg.assistant { border-left: 3px solid var(--accent-purple); background: rgba(108,99,255,0.05); }
-
-.msg-avatar { width: 36px; height: 48px; border-radius: 8px; object-fit: cover; border: 2px solid var(--accent-cyan); background: var(--bg-card); }
+.msg-avatar { width: 44px; height: 64px; border-radius: 12px; object-fit: cover; border: 2px solid var(--accent-cyan); background: var(--bg-card); }
 .chat-msg.user .msg-avatar { border-color: var(--text-secondary); }
 .chat-msg.assistant .msg-avatar { border-color: var(--accent-purple); }
 
-.chat-msg .msg-col { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; min-width: 36px; }
+.chat-msg .msg-col { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; min-width: 44px; }
+
+/* Slash commands */
+.slash-commands { position: absolute; bottom: 100%; left: 0; right: 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; max-height: 200px; overflow-y: auto; z-index: 20; margin-bottom: 0.25rem; box-shadow: var(--shadow); }
+.slash-cmd { padding: 0.5rem 0.75rem; cursor: pointer; display: flex; align-items: center; gap: 0.5rem; transition: background 0.15s; color: var(--text-primary); font-size: 0.85rem; }
+.slash-cmd:hover, .slash-cmd.active { background: var(--bg-hover); }
+.slash-cmd .slash-name { font-weight: 600; color: var(--accent-cyan); min-width: 60px; }
+.slash-cmd .slash-desc { color: var(--text-secondary); font-size: 0.8rem; }
 
 .msg-label { font-size: 0.7rem; color: var(--text-secondary); text-align: center; white-space: nowrap; }
 .chat-msg .msg-row { display: flex; align-items: flex-start; gap: 0.5rem; }
