@@ -2,8 +2,15 @@ const API_BASE = '';
 let authToken = localStorage.getItem('praxis_token');
 let chatPollInterval = null;
 let chatEventSource = null;
-let chatUserId = 'default';
-let chatSessionId = 'default';
+// Per chat-session unique identifier. Each session has its OWN user_id at
+// the storage layer (separate context + separate messages). Sessions are
+// created by forking a parent context (see chatNewSession).
+let chatUserId = localStorage.getItem('praxis_chat_active_session') || 'default';
+// Display name for the human in this chat. Distinct from chatUserId
+// (which is the session/storage key). Stored in ctx.username on the backend
+// and shared across sessions belonging to the same human.
+let chatUsername = localStorage.getItem('praxis_chat_username') || 'User';
+let chatSessionId = chatUserId; // legacy alias
 let chatAttachments = [];
 let vmRefreshInterval = null;
 let chatSeenIds = new Set();
@@ -164,7 +171,25 @@ async function initChatTab() {
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     });
     loadChatSessions();
+    // Activate the persisted session (or default) before loading info, so
+    // chatUserId is correct for context/avatar lookups.
+    const stored = localStorage.getItem('praxis_chat_active_session');
+    if (stored && chatSessions.find(s => s.id === stored)) {
+        chatUserId = stored;
+        chatSessionId = stored;
+    } else if (chatSessions.length > 0) {
+        chatUserId = chatSessions[0].id;
+        chatSessionId = chatSessions[0].id;
+    }
+    renderChatSessionList();
     await loadChatUserInfo();
+    // Load existing chat history immediately on startup so the user sees
+    // their previous conversation, not just an empty welcome banner.
+    await loadChatHistory();
+    await loadChatStatus();
+    // Always open the SSE stream so we can react to agent_start events even
+    // before any user interaction in this session.
+    startChatStream();
     // Scroll to bottom when chat tab opens
     const container = document.getElementById('chat-messages');
     if (container) container.scrollTop = container.scrollHeight;
@@ -269,6 +294,21 @@ function chatKeyDown(e) {
     }
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
+        // If the input is exactly a slash command (with optional trailing
+        // whitespace), execute it instead of sending it as a chat message.
+        const input = e.target;
+        const raw = (input.value || '').trim();
+        if (raw.startsWith('/')) {
+            const head = raw.split(/\s+/)[0];
+            const cmd = SLASH_COMMANDS.find(c => c.name === head);
+            if (cmd) {
+                input.value = '';
+                input.style.height = 'auto';
+                if (box) box.style.display = 'none';
+                try { cmd.action(); } catch (err) { console.error('Slash command error:', err); }
+                return;
+            }
+        }
         if (visible && slashActiveIndex >= 0) {
             const items = box.querySelectorAll('.slash-cmd');
             const active = items[slashActiveIndex];
@@ -284,9 +324,17 @@ async function loadChatUserInfo() {
         const data = await res.json();
         if (data.context) {
             chatBotName = data.context.settings?.agent_name || 'Praxis';
+            const ctxUsername = data.context.username || data.context.user_name;
+            if (ctxUsername) {
+                chatUsername = ctxUsername;
+                localStorage.setItem('praxis_chat_username', chatUsername);
+            }
+        } else if (data.username || data.user_name) {
+            chatUsername = data.username || data.user_name;
+            localStorage.setItem('praxis_chat_username', chatUsername);
         }
     } catch {}
-    document.getElementById('chat-user-name-label').textContent = chatUserId;
+    document.getElementById('chat-user-name-label').textContent = chatUsername || 'User';
     const botLabel = document.getElementById('chat-bot-name');
     if (botLabel) botLabel.textContent = chatBotName;
     loadAvatar();
@@ -329,7 +377,10 @@ function updateAgentUI(active) {
 
 function loadAvatar() {
     const img = document.getElementById('chat-user-avatar');
-    img.src = `/api/avatar/${chatUserId}?t=${Date.now()}`;
+    // Avatar is keyed by the human's username so it persists across sessions
+    // belonging to the same user. Fall back to user_id if no username is set.
+    const key = (chatUsername && chatUsername !== 'User') ? chatUsername : chatUserId;
+    img.src = `/api/avatar/${encodeURIComponent(key)}?t=${Date.now()}`;
     img.style.display = '';
     img.onerror = () => { img.src = '/logo.svg'; };
 }
@@ -402,10 +453,6 @@ function autoScrollChat() {
     const container = document.getElementById('chat-messages');
     if (!container) return;
     container.scrollTop = container.scrollHeight;
-}
-
-function chatKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSendMessage(); }
 }
 
 const questionSelections = new Map(); // questionId -> Set of selected indices
@@ -554,6 +601,21 @@ function startChatStream() {
         console.log('[SSE] typing event:', e.data);
     });
 
+    es.addEventListener('agent_start', (e) => {
+        console.log('[SSE] agent_start event');
+        addAgentLoopBanner('start');
+        updateAgentUI(true);
+        document.body.classList.add('agent-loop-running');
+    });
+
+    es.addEventListener('agent_stop', (e) => {
+        console.log('[SSE] agent_stop event');
+        addAgentLoopBanner('stop');
+        updateAgentUI(false);
+        document.body.classList.remove('agent-loop-running');
+        stopChatTimer();
+    });
+
     es.addEventListener('feedback', (e) => {
         console.log('[SSE] feedback event received');
         try {
@@ -569,7 +631,11 @@ function startChatStream() {
                 if (!streamMsg) {
                     console.log('[SSE] first char received, creating stream message element');
                     streamMsg = document.createElement('div');
-                    streamMsg.className = 'chat-msg assistant';
+                    // Tag streamed messages produced inside an agent loop so
+                    // they are visually distinct from plain text replies.
+                    const loopClass = document.body.classList.contains('agent-loop-running')
+                        ? ' agent-loop-msg' : '';
+                    streamMsg.className = 'chat-msg assistant' + loopClass;
                     const botAvatar = `/api/avatar/bot?t=${Date.now()}`;
                     const botName = chatBotName || 'Praxis';
                     streamMsg.innerHTML = `<div class="msg-row">
@@ -664,21 +730,38 @@ async function pollChatMessages() {
 }
 
 async function loadChatHistory() {
-    clearChatMessages();
+    // Only clear the DOM — do NOT delete messages on the backend! The previous
+    // implementation called clearChatMessages() here, which has the side effect
+    // of issuing DELETE /api/messages/:user_id, wiping the user's history every
+    // time the chat tab opened or a session was switched.
+    const container = document.getElementById('chat-messages');
+    if (container) {
+        container.innerHTML = '<div class="chat-welcome">Loading messages...</div>';
+    }
+    chatSeenIds.clear();
+
     const mySessionId = chatSessionId;
-    console.log('[HISTORY] loading history for session', chatSessionId);
+    console.log('[HISTORY] loading history for session', chatSessionId, 'user_id', chatUserId);
     try {
         const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}`);
         if (chatSessionId !== mySessionId) return; // switched away while loading
         const data = await res.json();
-        console.log('[HISTORY] got', (data.messages || []).length, 'messages');
-        if (data.messages && data.messages.length > 0) {
-            for (const m of data.messages) {
-                const id = m.role + ':' + (m.content || '').slice(0, 80);
-                chatSeenIds.add(id);
-                renderChatMessage(m);
+        const msgs = data.messages || [];
+        console.log('[HISTORY] got', msgs.length, 'messages');
+        const welcome = container && container.querySelector('.chat-welcome');
+        if (welcome) welcome.remove();
+        if (msgs.length === 0) {
+            if (container) {
+                container.innerHTML = '<div class="chat-welcome">No messages yet. Start typing or run /start to begin.</div>';
             }
+            return;
         }
+        for (const m of msgs) {
+            const id = m.role + ':' + (m.content || '').slice(0, 80);
+            chatSeenIds.add(id);
+            renderChatMessage(m);
+        }
+        if (container) container.scrollTop = container.scrollHeight;
     } catch (err) { console.error('[HISTORY] load error:', err); }
 }
 
@@ -758,9 +841,10 @@ function addChatMessage(type, content, extra = null) {
     div.className = `chat-msg ${type}`;
 
     const botAvatar = `/api/avatar/bot?t=${Date.now()}`;
-    const userAvatar = `/api/avatar/${chatUserId}?t=${Date.now()}`;
+    const avatarKey = (chatUsername && chatUsername !== 'User') ? chatUsername : chatUserId;
+    const userAvatar = `/api/avatar/${encodeURIComponent(avatarKey)}?t=${Date.now()}`;
     const botName = chatBotName || 'Praxis';
-    const userName = chatUserId || 'User';
+    const userName = chatUsername || 'User';
 
     if (type === 'user') {
         div.innerHTML = `<div class="msg-row">
@@ -795,6 +879,24 @@ function addChatMessage(type, content, extra = null) {
     container.scrollTop = container.scrollHeight;
 }
 
+/// Render a visual banner showing that the agent loop has started or stopped.
+/// This is intentionally distinct from regular chat text so the user can
+/// clearly see when the agent is doing work vs. plain conversation.
+function addAgentLoopBanner(kind) {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+    const welcome = container.querySelector('.chat-welcome');
+    if (welcome) welcome.remove();
+    const div = document.createElement('div');
+    div.className = `chat-msg agent-loop-banner ${kind}`;
+    const icon = kind === 'start' ? '▶' : '■';
+    const label = kind === 'start' ? 'Agent loop started' : 'Agent loop stopped';
+    const time = new Date().toLocaleTimeString();
+    div.innerHTML = `<span class="alb-icon">${icon}</span><span class="alb-label">${label}</span><span class="alb-time">${escapeHtml(time)}</span>`;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
 async function clearChatMessages() {
     // Also delete messages on the backend for the current session
     try {
@@ -811,6 +913,12 @@ async function clearChatMessages() {
 }
 
 // ═══ Chat Sessions ══════════════════════════════════════════════════════════════
+//
+// Each chat session has its OWN user_id at the storage layer (fully separate
+// context + messages). When a new session is created we POST to
+// /api/contexts/:user_id/fork with a new randomly-generated id; the backend
+// clones the parent context (settings, custom_data, etc.) under the new id.
+// Sessions belonging to the same human share `ctx.username` for display.
 
 function loadChatSessions() {
     const stored = localStorage.getItem('praxis_chat_sessions');
@@ -818,7 +926,7 @@ function loadChatSessions() {
         try { chatSessions = JSON.parse(stored); } catch { chatSessions = []; }
     }
     if (chatSessions.length === 0) {
-        chatSessions = [{ id: 'default', name: 'Default' }];
+        chatSessions = [{ id: 'default', name: 'Default', username: chatUsername }];
         saveChatSessions();
     }
     renderChatSessionList();
@@ -831,12 +939,15 @@ function saveChatSessions() {
 function renderChatSessionList() {
     const list = document.getElementById('chat-session-list');
     if (!list) return;
-    list.innerHTML = chatSessions.map(s => `
-        <div class="chat-session ${s.id === chatSessionId ? 'active' : ''}" onclick="switchChatSession('${escapeHtml(s.id)}')">
-            <span class="session-name" ondblclick="event.stopPropagation();startRenameSession('${escapeHtml(s.id)}', this)">${escapeHtml(s.name)}</span>
+    list.innerHTML = chatSessions.map(s => {
+        const label = s.name || s.username || s.id;
+        return `
+        <div class="chat-session ${s.id === chatUserId ? 'active' : ''}" onclick="switchChatSession('${escapeHtml(s.id)}')">
+            <span class="session-name" ondblclick="event.stopPropagation();startRenameSession('${escapeHtml(s.id)}', this)">${escapeHtml(label)}</span>
             ${chatSessions.length > 1 ? `<span class="session-del" onclick="event.stopPropagation();deleteChatSession('${escapeHtml(s.id)}')">×</span>` : ''}
         </div>
-    `).join('');
+    `;
+    }).join('');
 }
 
 function startRenameSession(id, el) {
@@ -867,42 +978,67 @@ function startRenameSession(id, el) {
 }
 
 async function chatNewSession() {
-    const id = 'session-' + Math.random().toString(36).slice(2, 8);
+    const newId = 'sess-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
     const name = `Session ${chatSessions.length + 1}`;
-    console.log('[SESSION] creating new session:', id, name);
-    chatSessions.push({ id, name });
-    saveChatSessions();
-    await switchChatSession(id);
-    // Persist session on backend
+    console.log('[SESSION] forking new session:', newId, 'from parent', chatUserId);
+
+    // Fork the parent context on the backend. The new session inherits
+    // settings/custom_data but starts with no messages and turn=0.
     try {
-        await apiPost('/api/contexts/' + encodeURIComponent(chatUserId), { session_id: id });
-        console.log('[SESSION] backend persistence done for', id);
-    } catch (err) { console.error('[SESSION] backend persistence failed:', err); }
-    renderChatSessionList();
+        const res = await apiFetch(`/api/contexts/${encodeURIComponent(chatUserId)}/fork`, {
+            method: 'POST',
+            body: JSON.stringify({ new_user_id: newId, username: chatUsername })
+        });
+        if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            console.error('[SESSION] fork failed:', res.status, text);
+            addChatMessage('feedback', 'Failed to create session: ' + res.status);
+            return;
+        }
+    } catch (err) {
+        console.error('[SESSION] fork failed:', err);
+        addChatMessage('feedback', 'Failed to create session: ' + err.message);
+        return;
+    }
+
+    chatSessions.push({ id: newId, name, username: chatUsername });
+    saveChatSessions();
+    await switchChatSession(newId);
 }
 
 async function switchChatSession(id) {
-    console.log('[SESSION] switching to session:', id, '(from', chatSessionId, ')');
+    console.log('[SESSION] switching to session:', id, '(from', chatUserId, ')');
     stopChatPolling();
     chatPollGen++;
+    chatUserId = id;
     chatSessionId = id;
-    clearChatMessages();
-    // Update backend context session
-    try {
-        await apiPost('/api/contexts/' + encodeURIComponent(chatUserId), { session_id: id });
-        console.log('[SESSION] context updated on backend for', id);
-    } catch (err) { console.error('[SESSION] context update failed:', err); }
+    localStorage.setItem('praxis_chat_active_session', id);
+    // Reset the seen-id set; it tracks dedup keys that are session-local.
+    chatSeenIds = new Set();
+    // Clear the chat view (DOM only — does NOT delete messages on the server).
+    const container = document.getElementById('chat-messages');
+    if (container) {
+        container.innerHTML = '<div class="chat-welcome">Loading messages...</div>';
+    }
     renderChatSessionList();
+    await loadChatUserInfo();
     await loadChatHistory();
     await loadChatStatus();
-    startChatPolling();
+    // Always open the SSE stream for the active session so agent_start /
+    // streaming-token events arrive even before user interaction.
+    startChatStream();
+    // If an agent loop happens to already be running for this session,
+    // startChatPolling will be triggered via updateAgentUI(true).
 }
 
 function deleteChatSession(id) {
     if (chatSessions.length <= 1) return;
+    if (!confirm('Delete this chat session and all its messages? This cannot be undone.')) return;
+    // Best-effort backend cleanup of the session context + messages.
+    apiFetch(`/api/contexts/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
     chatSessions = chatSessions.filter(s => s.id !== id);
     saveChatSessions();
-    if (chatSessionId === id) {
+    if (chatUserId === id) {
         switchChatSession(chatSessions[0].id);
     } else {
         renderChatSessionList();
@@ -979,7 +1115,10 @@ async function chatUploadAvatar() {
         const file = input.files[0];
         if (!file) return;
         const form = new FormData();
-        form.append(chatUserId, file);
+        // Use the human-readable username so the avatar is shared across all
+        // chat sessions belonging to the same user.
+        const key = (chatUsername && chatUsername !== 'User') ? chatUsername : chatUserId;
+        form.append(key, file);
         try {
             const res = await fetch('/api/upload-avatar', {
                 method: 'POST',

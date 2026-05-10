@@ -174,6 +174,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/contexts/:user_id", axum::routing::get(get_context))
         .route("/contexts/:user_id", axum::routing::put(update_context))
         .route("/contexts/:user_id", axum::routing::delete(delete_context))
+        .route("/contexts/:user_id/fork", axum::routing::post(fork_context_route))
         .route("/messages/:user_id", axum::routing::get(get_messages))
         .route("/messages/:user_id", axum::routing::delete(clear_messages))
         .route("/templates", axum::routing::get(list_templates))
@@ -373,6 +374,7 @@ async fn get_context(
         "turn": ctx.turn,
         "mode": ctx.mode,
         "user_name": ctx.user_name,
+        "username": ctx.username,
         "cl_file": ctx.cl_file,
         "active_state": ctx.active_state,
         "active_templates": ctx.active_templates,
@@ -396,6 +398,7 @@ async fn update_context(
         "turn": ctx.turn,
         "mode": ctx.mode,
         "user_name": ctx.user_name,
+        "username": ctx.username,
         "cl_file": ctx.cl_file,
         "active_state": ctx.active_state,
         "active_templates": ctx.active_templates,
@@ -414,6 +417,41 @@ async fn delete_context(
         .delete_context(&user_id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// Fork a context: create a new context under `new_user_id` by cloning the
+/// context for the user_id in the path. Each chat session gets its own
+/// fully-independent user_id; this lets the frontend create a new session
+/// that inherits settings/custom data from a parent without sharing messages.
+async fn fork_context_route(
+    State(state): State<Arc<DashboardState>>,
+    Path(parent_user_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let new_user_id = body
+        .get("new_user_id")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?
+        .to_string();
+    if new_user_id.is_empty() || new_user_id == parent_user_id {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let username = body.get("username").and_then(|v| v.as_str());
+
+    let ctx = state
+        .db
+        .fork_context(&parent_user_id, &new_user_id, username)
+        .map_err(|e| {
+            tracing::error!(error = %e, "fork_context failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "user_id": ctx.user_id,
+        "username": ctx.username,
+        "parent_user_id": parent_user_id,
+    })))
 }
 
 // ── Messages ─────────────────────────────────────────────────────────────────

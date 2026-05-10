@@ -129,6 +129,10 @@ pub async fn run_agent_loop(
     let mut user_input = UserInputChannel::new();
     register_active_loop(user_id, user_input.sender()).await;
 
+    // Notify the dashboard chat that the agent loop has started, so the
+    // frontend can render a visually distinct "loop running" banner.
+    crate::dashboard::stream::send(user_id, "agent_start", "{}");
+
     // Load context
     let mut ctx = state.db.load_context(user_id)?;
 
@@ -1049,6 +1053,9 @@ pub async fn run_agent_loop(
     // Unregister this loop and clean up stop signal
     unregister_active_loop(user_id).await;
     STOP_SIGNALS.write().await.remove(user_id);
+
+    // Notify the dashboard chat that the agent loop has stopped.
+    crate::dashboard::stream::send(user_id, "agent_stop", "{}");
 
     // Find the last assistant message with actual content
     let all_msgs = state.db.get_messages(user_id, 50)?;

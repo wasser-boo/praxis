@@ -10,6 +10,11 @@ pub struct Context {
     pub mode: String,
     #[serde(default)]
     pub user_name: Option<String>,
+    /// Display name for the chat user. Distinct from `user_id`, which is the
+    /// session identifier. Multiple sessions belonging to the same human user
+    /// share a `username` while having different `user_id`s.
+    #[serde(default)]
+    pub username: Option<String>,
     #[serde(default)]
     pub cl_file: Option<String>,
     #[serde(default)]
@@ -36,6 +41,7 @@ impl Default for Context {
             turn: 0,
             mode: default_mode(),
             user_name: None,
+            username: None,
             cl_file: None,
             active_state: None,
             active_templates: Vec::new(),
@@ -486,6 +492,34 @@ impl Database {
 
     pub fn increment_turn(&self, ctx: &mut Context) {
         ctx.turn += 1;
+    }
+
+    /// Fork a context: create a new context under `new_user_id` by cloning
+    /// the context at `parent_user_id`. Settings, custom_data, cl_data, and
+    /// other state are copied. The new context starts with `turn = 0` and
+    /// no associated messages. Returns the newly-created Context.
+    pub fn fork_context(
+        &self,
+        parent_user_id: &str,
+        new_user_id: &str,
+        username: Option<&str>,
+    ) -> anyhow::Result<Context> {
+        let parent = self.load_context(parent_user_id)?;
+        let mut forked = parent.clone();
+        forked.user_id = new_user_id.to_string();
+        forked.session_id = String::new();
+        forked.turn = 0;
+        forked.settings.llm_turn = 0;
+        forked.settings.done = false;
+        if let Some(name) = username {
+            if !name.is_empty() {
+                forked.username = Some(name.to_string());
+            }
+        } else if forked.username.is_none() {
+            forked.username = parent.username.clone().or_else(|| parent.user_name.clone());
+        }
+        self.save_context(&forked)?;
+        Ok(forked)
     }
 
     // ── Session Management ──────────────────────────────────────────────────
