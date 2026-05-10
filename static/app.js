@@ -1776,8 +1776,11 @@ function showModal(title, content) {
     document.body.appendChild(overlay);
 }
 
+let pendingAvatarFile = null;
+
 function showAvatarModal(which) {
     closeModal();
+    pendingAvatarFile = null;
     const isBot = which === 'bot';
     const imgUrl = isBot ? `/api/avatar/bot?t=${Date.now()}` : `/api/avatar/${chatUserId}?t=${Date.now()}`;
     const name = isBot ? (chatBotName || 'Praxis') : (chatUserId || 'User');
@@ -1787,11 +1790,54 @@ function showAvatarModal(which) {
     overlay.innerHTML = `
         <div class="modal avatar-modal">
             <h3>${escapeHtml(name)} Avatar</h3>
-            <img class="avatar-preview" src="${imgUrl}" alt="" onerror="this.src='/logo.svg'">
-            <button class="btn btn-primary" style="margin-top:1rem" onclick="${isBot ? 'chatUploadBotAvatar()' : 'chatUploadAvatar()'}">Upload New Avatar</button>
+            <img id="avatar-current-preview" class="avatar-preview" src="${imgUrl}" alt="" onerror="this.src='/logo.svg'">
+            <img id="avatar-new-preview" class="avatar-preview" src="" alt="New avatar" style="display:none;margin-top:0.5rem">
+            <input type="file" id="avatar-upload-input" accept="image/*" style="display:none" onchange="handleAvatarFileSelect(this, '${which}')">
+            <button class="btn btn-primary" style="margin-top:1rem" onclick="document.getElementById('avatar-upload-input').click()">Upload Photo</button>
+            <button id="avatar-confirm-btn" class="btn btn-primary" style="margin-top:0.5rem;display:none;background:var(--success)" onclick="confirmAvatarUpload('${which}')">Confirm Upload</button>
             <button class="btn btn-secondary" style="margin-top:0.5rem" onclick="closeModal()">Close</button>
         </div>`;
     document.body.appendChild(overlay);
+}
+
+function handleAvatarFileSelect(input, which) {
+    const file = input.files[0];
+    if (!file) return;
+    pendingAvatarFile = file;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const newPreview = document.getElementById('avatar-new-preview');
+        newPreview.src = e.target.result;
+        newPreview.style.display = 'block';
+        document.getElementById('avatar-confirm-btn').style.display = '';
+    };
+    reader.readAsDataURL(file);
+}
+
+async function confirmAvatarUpload(which) {
+    if (!pendingAvatarFile) return;
+    const isBot = which === 'bot';
+    const form = new FormData();
+    form.append(isBot ? 'bot' : chatUserId, pendingAvatarFile);
+    try {
+        const res = await fetch('/api/upload-avatar', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${authToken}` },
+            body: form
+        });
+        const data = await res.json();
+        if (data.success) {
+            if (isBot) {
+                const img = document.getElementById('chat-bot-avatar');
+                img.src = data.url + '?t=' + Date.now();
+            } else {
+                loadAvatar();
+            }
+            closeModal();
+        } else {
+            alert(data.error || 'Upload failed');
+        }
+    } catch (err) { alert('Upload error: ' + err.message); }
 }
 
 function closeModal() { const o = document.getElementById('modal-overlay'); if (o) o.remove(); }
