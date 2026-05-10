@@ -223,6 +223,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/agent/stop/:user_id", axum::routing::post(stop_agent))
         .route("/cl/:user_id", axum::routing::get(get_cl_info))
         .route("/chat/send", axum::routing::post(chat_query))
+        .route("/context/exec", axum::routing::post(context_exec))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             dashboard_auth_middleware,
@@ -452,6 +453,32 @@ async fn fork_context_route(
         "username": ctx.username,
         "parent_user_id": parent_user_id,
     })))
+}
+
+/// Execute a `/context …` slash command. The body is `{user_id, line}`. The
+/// shared parser at `crate::context_cmd` is the single source of truth for
+/// the syntax — same parser drives the TUI and Discord.
+async fn context_exec(
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let user_id = body
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?
+        .to_string();
+    let line = body
+        .get("line")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    match crate::context_cmd::parse(line) {
+        Ok(op) => {
+            let response = crate::context_cmd::apply(&state.db, &user_id, &op);
+            Ok(Json(serde_json::json!({ "response": response })))
+        }
+        Err(e) => Ok(Json(serde_json::json!({ "error": e.to_string() }))),
+    }
 }
 
 // ── Messages ─────────────────────────────────────────────────────────────────

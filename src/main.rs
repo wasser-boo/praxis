@@ -63,6 +63,10 @@ enum Cli {
         #[arg(long, short)]
         yes: bool,
     },
+    /// Open the terminal chat UI. Connects to a running `praxis run` instance
+    /// to send messages, but reads history directly from the local database
+    /// so previous conversations are visible immediately on launch.
+    Chat,
 }
 
 #[derive(clap::Subcommand)]
@@ -269,6 +273,30 @@ async fn run() -> anyhow::Result<()> {
         return handle_plugin_action(action).await;
     }
 
+    // The TUI takes over stdout (alternate screen) so we mustn't write
+    // tracing logs there. Initialise logging with file-only output and
+    // jump straight to the chat module.
+    if matches!(cli, Cli::Chat) {
+        let log_dir = std::env::var("LOG_DIR").unwrap_or_else(|_| "./logs".to_string());
+        let _ = std::fs::create_dir_all(&log_dir);
+        let file_appender = tracing_appender::rolling::daily(&log_dir, "praxis-tui.log");
+        let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+        use tracing_subscriber::prelude::*;
+        let _ = tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(file_writer)
+                    .with_ansi(false),
+            )
+            .try_init();
+        // Keep the guard alive for the duration of the run so logs flush.
+        let _keep = _guard;
+        return praxis::tui::run_chat().await;
+    }
+
     // Set up logging with file rotation
     let log_dir = std::env::var("LOG_DIR").unwrap_or_else(|_| "./logs".to_string());
     let _ = std::fs::create_dir_all(&log_dir);
@@ -311,6 +339,7 @@ async fn run() -> anyhow::Result<()> {
             no_isos,
         } => return handle_backup(output, no_disks, no_isos).await,
         Cli::Restore { file, yes } => return handle_restore(&file, yes).await,
+        Cli::Chat => unreachable!(),
         Cli::Service { .. } => unreachable!(),
         Cli::Plugin { .. } => unreachable!(),
     }

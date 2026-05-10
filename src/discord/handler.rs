@@ -492,7 +492,11 @@ impl EventHandler for DiscordHandler {
                             .await;
                     }
                 }
-                "mode" => {
+                "context" => {
+                    // Generic context get/set/show. Replaces the ad-hoc /mode
+                    // toggle and any other one-off context manipulation. Uses
+                    // the same parser as the TUI and web chat so syntax is
+                    // identical across all three frontends.
                     let discord_user_id = command.user.id.to_string();
                     let pairing = match self.db.get_pairing_by_discord(&discord_user_id) {
                         Ok(Some(p)) => p,
@@ -510,67 +514,36 @@ impl EventHandler for DiscordHandler {
                         }
                     };
 
-                    let mut ctx_data = match self.db.load_context(&pairing.user_id) {
-                        Ok(ctx) => ctx,
-                        Err(e) => {
-                            tracing::error!("Failed to load context for mode toggle: {}", e);
-                            let _ = command
-                                .create_response(
-                                    &ctx.http,
-                                    serenity::builder::CreateInteractionResponse::Message(
-                                        serenity::builder::CreateInteractionResponseMessage::new()
-                                            .content("Failed to load your context."),
-                                    ),
-                                )
-                                .await;
-                            return;
-                        }
-                    };
-
-                    let current_mode = ctx_data
-                        .custom_data
-                        .get("mode")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("agent")
+                    let arg = command
+                        .data
+                        .options
+                        .iter()
+                        .find(|o| o.name == "command")
+                        .and_then(|o| o.value.as_str())
+                        .unwrap_or("show")
                         .to_string();
-                    let new_mode = if current_mode == "chat" {
-                        "agent"
-                    } else {
-                        "chat"
+
+                    let response = match crate::context_cmd::parse(&format!("/context {arg}")) {
+                        Ok(op) => crate::context_cmd::apply(&self.db, &pairing.user_id, &op),
+                        Err(e) => format!("error: {e}\n\nExamples:\n  set custom_data.mode=chat\n  set settings.max_llm_turns=20\n  get settings.voice_tts_enabled\n  show settings"),
                     };
 
-                    if let Some(obj) = ctx_data.custom_data.as_object_mut() {
-                        obj.insert("mode".to_string(), serde_json::json!(new_mode));
+                    // Discord has a 2000-char limit on slash-command responses;
+                    // wrap long output in a code block and truncate if needed.
+                    let truncated = if response.chars().count() > 1900 {
+                        let head: String = response.chars().take(1900).collect();
+                        format!("{head}\n…(truncated)")
                     } else {
-                        ctx_data.custom_data = serde_json::json!({
-                            "mode": new_mode
-                        });
-                    }
+                        response
+                    };
+                    let body = format!("```\n{truncated}\n```");
 
-                    if let Err(e) = self.db.save_context(&ctx_data) {
-                        tracing::error!("Failed to save context after mode toggle: {}", e);
-                        let _ = command
-                            .create_response(
-                                &ctx.http,
-                                serenity::builder::CreateInteractionResponse::Message(
-                                    serenity::builder::CreateInteractionResponseMessage::new()
-                                        .content("Failed to toggle mode."),
-                                ),
-                            )
-                            .await;
-                        return;
-                    }
-
-                    let response_text = format!(
-                        "Switched from **{}** mode to **{}** mode.",
-                        current_mode, new_mode
-                    );
                     let _ = command
                         .create_response(
                             &ctx.http,
                             serenity::builder::CreateInteractionResponse::Message(
                                 serenity::builder::CreateInteractionResponseMessage::new()
-                                    .content(response_text),
+                                    .content(body),
                             ),
                         )
                         .await;

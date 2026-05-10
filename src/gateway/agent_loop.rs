@@ -149,127 +149,37 @@ pub async fn run_agent_loop(
         }
     }
 
-    // Inject computed variables into custom_data
+    // Inject the only two runtime values that downstream code actually reads
+    // from `ctx.custom_data`:
+    //   - `user_template`: name of the POML user-message template
+    //   - `channel_id`: default Discord channel for tools like `ask_questions`
+    //
+    // Everything else (user_prompt, path, time, memory, tools, tokens_*, vm_*,
+    // installation_disks, running_vms, message_count, ...) used to be injected
+    // here too, but those values are either:
+    //   1. re-built fresh by `build_system_prompt` at the top level of the
+    //      template context, OR
+    //   2. read directly from settings / disk / DB by the consumer, OR
+    //   3. dead — never read by any template or code path.
+    // Injecting them here was pure noise that cluttered the persisted context.
     {
         if ctx.custom_data.is_null() {
             ctx.custom_data = serde_json::json!({});
         }
         if let Some(obj) = ctx.custom_data.as_object_mut() {
-            obj.insert("user_prompt".to_string(), serde_json::json!(user_message));
-
-            let effective_path = std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "/".to_string());
-            obj.insert("path".to_string(), serde_json::json!(effective_path));
-            obj.insert(
-                "time".to_string(),
-                serde_json::json!(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
-            );
-
-            // VM context: expose VM state and available ISOs to the LLM
-            let vm_enabled = std::env::var("VM_ENABLED")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false);
-            if vm_enabled {
-                let vm_mode = std::env::var("VM_MODE").unwrap_or_else(|_| "shared".to_string());
-                let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
-                obj.insert("vm_enabled".to_string(), serde_json::json!(true));
-                obj.insert("vm_mode".to_string(), serde_json::json!(vm_mode));
-                obj.insert(
-                    "vm_storage_dir".to_string(),
-                    serde_json::json!(format!("{}/vm", data_dir)),
-                );
-                obj.insert(
-                    "vm_iso_dir".to_string(),
-                    serde_json::json!(format!("{}/vm/isos", data_dir)),
-                );
-                obj.insert(
-                    "vm_shared_dir".to_string(),
-                    serde_json::json!(format!("{}/shared", data_dir)),
-                );
-
-                if let Some(manager) = crate::tools::vm_tools::get_vm_manager().await {
-                    obj.insert(
-                        "installation_disks".to_string(),
-                        serde_json::json!(manager.list_isos()),
-                    );
-                    obj.insert(
-                        "running_vms".to_string(),
-                        serde_json::json!(manager.list_vms().await),
-                    );
-                }
-            }
-
             let user_template = obj
                 .get("user_template")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!("user"));
             obj.insert("user_template".to_string(), user_template);
 
-            // Default channel_id for Discord tools (can be overwritten via CL)
+            // Default channel_id for Discord tools (can be overwritten via CL).
             if !obj.contains_key("channel_id") {
                 let fallback_ch = ctx.settings.feedback_channel_id.clone().unwrap_or_default();
                 if !fallback_ch.is_empty() {
                     obj.insert("channel_id".to_string(), serde_json::json!(fallback_ch));
                 }
             }
-
-            let memory = crate::db::memory::load_memory(&state.db, user_id);
-            obj.insert(
-                "memory".to_string(),
-                serde_json::json!({
-                    "facts": memory.learned_facts,
-                    "topics": memory.last_topics,
-                    "preferences": memory.user_preferences,
-                    "variables": memory.custom_variables,
-                }),
-            );
-
-            let tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
-            let tools_context: Vec<serde_json::Value> = tools.iter().map(|t| {
-                serde_json::json!({
-                    "name": t.function.name,
-                    "description": t.function.description,
-                    "parameters": t.function.parameters
-                })
-            }).collect();
-            obj.insert("tools".to_string(), serde_json::json!(tools_context));
-
-            let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
-            let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
-            let (_all_msgs, tokens_used) = state
-                .db
-                .get_messages_with_token_budget(user_id, usize::MAX)
-                .unwrap_or((vec![], 0));
-            let message_count = state.db.count_messages(user_id).unwrap_or(0);
-            let tokens_pct = if token_budget > 0 {
-                (tokens_used as f64 / token_budget as f64 * 100.0).min(100.0)
-            } else {
-                0.0
-            };
-            let compaction_pct = if compaction_limit > 0 {
-                (tokens_used as f64 / compaction_limit as f64 * 100.0).min(100.0)
-            } else {
-                0.0
-            };
-            obj.insert("tokens_used".to_string(), serde_json::json!(tokens_used));
-            obj.insert("tokens_limit".to_string(), serde_json::json!(token_budget));
-            obj.insert(
-                "tokens_percentage".to_string(),
-                serde_json::json!(format!("{:.1}", tokens_pct)),
-            );
-            obj.insert(
-                "compaction_token_limit".to_string(),
-                serde_json::json!(compaction_limit),
-            );
-            obj.insert(
-                "compaction_percentage".to_string(),
-                serde_json::json!(format!("{:.1}", compaction_pct)),
-            );
-            obj.insert(
-                "message_count".to_string(),
-                serde_json::json!(message_count),
-            );
         }
     }
 
@@ -552,7 +462,7 @@ pub async fn run_agent_loop(
         let has_tool_calls = response.tool_calls.is_some();
         let tool_calls_count = response.tool_calls.as_ref().map(|tc| tc.len()).unwrap_or(0);
         let response_preview = response.content.as_deref()
-            .map(|c| if c.len() > 300 { format!("{}...", &c[..300]) } else { c.to_string() })
+            .map(|c| crate::util::truncate_chars_ascii(c, 300))
             .unwrap_or_else(|| "(no content)".to_string());
         tracing::info!(
             user_id = %user_id,
@@ -686,11 +596,7 @@ pub async fn run_agent_loop(
                             obj.insert("tool_history".to_string(), serde_json::json!([]));
                         }
                         let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
-                        let result_preview = if final_result.len() > 500 {
-                            format!("{}...", &final_result[..500])
-                        } else {
-                            final_result.clone()
-                        };
+                        let result_preview = crate::util::truncate_chars_ascii(&final_result, 500);
 
                         if let Some(history) = obj.get_mut("tool_history").and_then(|v| v.as_array_mut()) {
                             history.push(serde_json::json!({
@@ -713,7 +619,7 @@ pub async fn run_agent_loop(
                         let history_arr = obj.get("tool_history").and_then(|v| v.as_array()).cloned().unwrap_or_default();
                         obj.insert("used_tools".to_string(), serde_json::json!({
                             "last_call": tc.function.name,
-                            "last_result": if final_result.len() > 1000 { &final_result[..1000] } else { &final_result },
+                            "last_result": crate::util::truncate_chars(&final_result, 1000),
                             "last_args": args,
                             "count": turn,
                             "history": history_arr
@@ -722,8 +628,8 @@ pub async fn run_agent_loop(
                 }
 
                 // Log tool call result
-                let result_preview = if result.len() > 500 {
-                    format!("{}... ({} chars total)", &result[..500], result.len())
+                let result_preview = if result.chars().count() > 500 {
+                    format!("{} ({} chars total)", crate::util::truncate_chars_ascii(&result, 500), result.chars().count())
                 } else {
                     result.clone()
                 };
@@ -774,7 +680,7 @@ pub async fn run_agent_loop(
                             vm_name,
                             &tc.function.name,
                             &tc.function.arguments,
-                            if result.len() > 2000 { &result[..2000] } else { &result }
+                            crate::util::truncate_chars(&result, 2000)
                         ],
                     );
                 }
@@ -1223,7 +1129,7 @@ async fn build_system_prompt(
         tracing::info!(user_id = %ctx.user_id, template_name = %template_name, template_path = %template_path, "Building system prompt");
         match crate::gateway::poml::render(&template_path, &context_json).await {
             Ok(rendered) => {
-                tracing::info!(user_id = %ctx.user_id, "Rendered system prompt (first 500 chars): {}", &rendered[..rendered.len().min(500)]);
+                tracing::info!(user_id = %ctx.user_id, "Rendered system prompt (first 500 chars): {}", crate::util::truncate_chars(&rendered, 500));
                 rendered
             },
         Err(e) => {
@@ -1398,7 +1304,7 @@ async fn execute_tool_call(
                         if content.len() > 10000 {
                             format!(
                                 "{}...\n\n[File truncated - {} bytes total]",
-                                &content[..10000],
+                                crate::util::truncate_chars(&content, 10000),
                                 content.len()
                             )
                         } else {
@@ -1695,30 +1601,6 @@ async fn execute_tool_call(
                 }
             }
         }
-        "screenshot_with_feedback" => {
-            let channel_id = args["channel_id"].as_str().unwrap_or("");
-            let feedback = args["feedback"].as_str().unwrap_or("");
-            let vm_name = args["vm_name"].as_str().unwrap_or("praxis-vm");
-            if channel_id == "web" {
-                match crate::tools::web_interactive::screenshot_with_feedback_web(
-                    user_id, feedback, vm_name,
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(e) => format!("Error: {}", e),
-                }
-            } else {
-                match crate::tools::discord_interactive::screenshot_with_feedback(
-                    channel_id, feedback, vm_name,
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(e) => format!("Error: {}", e),
-                }
-            }
-        }
         "ask_questions" => {
             // Get timeout from args, then context, then default to 120
             let default_timeout = ctx_data
@@ -1946,11 +1828,7 @@ async fn execute_tool_call(
                 Ok(rendered) if !rendered.trim().is_empty() => {
                     // POML compiled successfully - persist to DB
                     let _ = db.save_template(name, content, None, false);
-                    let preview = if rendered.len() > 500 {
-                        format!("{}...", &rendered[..500])
-                    } else {
-                        rendered
-                    };
+                    let preview = crate::util::truncate_chars_ascii(&rendered, 500);
                     format!("Template '{}' updated and validated. POML renders successfully. Preview: {}", name, preview)
                 }
                 Ok(_) => {

@@ -99,10 +99,8 @@ pub async fn setup_commands(http: &serenity::http::Http) -> anyhow::Result<()> {
         .dm_permission(false);
     http.create_global_command(&disconnect_cmd).await?;
 
-    let mode_cmd = serenity::builder::CreateCommand::new("mode")
-        .description("Toggle between chat and agent mode")
-        .dm_permission(false);
-    http.create_global_command(&mode_cmd).await?;
+    // (deprecated) `/mode` toggled `custom_data.mode` between agent and chat.
+    // Use `/context set custom_data.mode=chat` instead.
 
     let compact_cmd = serenity::builder::CreateCommand::new("compact")
         .description("Compact conversation history into a summary")
@@ -145,6 +143,23 @@ pub async fn setup_commands(http: &serenity::http::Http) -> anyhow::Result<()> {
         )
         .dm_permission(true);
     http.create_global_command(&session_cmd).await?;
+
+    // /context — generic getter/setter for any context variable, including
+    // dot-notation paths like `settings.voice_tts_enabled`. Replaces the
+    // ad-hoc `/mode` toggle and miscellaneous ctx mutations that used to
+    // live inline in the message handler.
+    let context_cmd = serenity::builder::CreateCommand::new("context")
+        .description("Get/set context variables (supports dot-notation, e.g. settings.max_llm_turns)")
+        .add_option(
+            serenity::builder::CreateCommandOption::new(
+                serenity::model::application::CommandOptionType::String,
+                "command",
+                "Full command, e.g. `set settings.max_llm_turns=20 custom_data.device=main`"
+            )
+            .required(true)
+        )
+        .dm_permission(true);
+    http.create_global_command(&context_cmd).await?;
 
     tracing::info!("All discord commands registered");
     Ok(())
@@ -303,10 +318,6 @@ pub fn register_commands() -> Vec<serde_json::Value> {
             "description": "Disconnect the bot from the voice channel"
         }),
         serde_json::json!({
-            "name": "mode",
-            "description": "Toggle between chat and agent mode"
-        }),
-        serde_json::json!({
             "name": "compact",
             "description": "Compact conversation history into a summary"
         }),
@@ -317,6 +328,10 @@ pub fn register_commands() -> Vec<serde_json::Value> {
         serde_json::json!({
             "name": "clear",
             "description": "Delete all messages from history and context"
+        }),
+        serde_json::json!({
+            "name": "context",
+            "description": "Get/set context variables (supports dot-notation)"
         }),
     ]
 }

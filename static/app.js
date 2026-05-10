@@ -204,6 +204,12 @@ const SLASH_COMMANDS = [
         const active = await checkAgentActive(chatUserId);
         addChatMessage('system', `Agent is ${active ? 'active' : 'inactive'} for ${chatUserId}`);
     } },
+    {
+        name: '/context',
+        desc: 'Get/set context vars (e.g. set foo=bar) — supports dot keys',
+        takesArgs: true,
+        action: chatContextCommand,
+    },
     { name: '/avatar', desc: 'Change your avatar', action: () => showAvatarModal('user') },
     { name: '/botavatar', desc: 'Change bot avatar', action: () => showAvatarModal('bot') },
     { name: '/help', desc: 'Show available commands', action: showSlashHelp },
@@ -211,7 +217,33 @@ const SLASH_COMMANDS = [
 
 function showSlashHelp() {
     const list = SLASH_COMMANDS.map(c => `<b>${escapeHtml(c.name)}</b> - ${escapeHtml(c.desc)}`).join('<br>');
-    addChatMessage('system', 'Available commands:<br>' + list);
+    addChatMessage('system', 'Available commands:<br>' + list +
+        '<br><br><i>/context examples:</i><br>' +
+        '<code>/context set custom_data.device=main settings.max_llm_turns=20</code><br>' +
+        '<code>/context set settings.voice_tts_enabled=true</code><br>' +
+        '<code>/context get settings.max_llm_turns</code><br>' +
+        '<code>/context show settings</code>');
+}
+
+/// Send a `/context …` line to the backend for parsing + applying. The
+/// backend uses the same shared parser as the TUI and Discord, so syntax
+/// is identical across all three frontends.
+async function chatContextCommand(rawLine) {
+    const line = (typeof rawLine === 'string' && rawLine.trim()) || '/context';
+    try {
+        const res = await apiFetch('/api/context/exec', {
+            method: 'POST',
+            body: JSON.stringify({ user_id: chatUserId, line })
+        });
+        const data = await res.json();
+        if (data.error) {
+            addChatMessage('feedback', '/context: ' + data.error);
+        } else if (data.response) {
+            addChatMessage('system', '<pre style="margin:0;white-space:pre-wrap;font-size:0.8rem">' + escapeHtml(data.response) + '</pre>');
+        }
+    } catch (err) {
+        addChatMessage('feedback', '/context failed: ' + err.message);
+    }
 }
 
 let slashActiveIndex = -1;
@@ -305,7 +337,16 @@ function chatKeyDown(e) {
                 input.value = '';
                 input.style.height = 'auto';
                 if (box) box.style.display = 'none';
-                try { cmd.action(); } catch (err) { console.error('Slash command error:', err); }
+                try {
+                    // Commands flagged with `takesArgs` receive the entire
+                    // raw line (e.g. `/context set foo=bar`) so they can
+                    // do their own parsing. All other commands ignore args.
+                    if (cmd.takesArgs) {
+                        cmd.action(raw);
+                    } else {
+                        cmd.action();
+                    }
+                } catch (err) { console.error('Slash command error:', err); }
                 return;
             }
         }
@@ -1986,38 +2027,164 @@ async function loadVMActivity() {
 function escapeHtml(str) { const d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
 function errorHtml(msg) { return `<div class="data-item"><span style="color:var(--error)">${escapeHtml(msg)}</span></div>`; }
 
+// ═══ Markdown Rendering ═══════════════════════════════════════════════════════
+//
+// Streaming-aware markdown renderer. Key design points:
+//
+//   1. SAFE: every piece of user/LLM content is HTML-escaped before any
+//      transformation runs. Inline HTML in the input is rendered as text.
+//   2. STREAMING-FRIENDLY: open delimiters (unclosed ```, **, *, `) do not
+//      leave dangling regex artifacts. We pre-process the buffer so an open
+//      delimiter renders sensibly while waiting for its close, instead of
+//      flickering "raw stars" until the close arrives.
+//   3. RICH: handles fenced code blocks (with optional language), inline
+//      code, **bold**, *italic*, ~~strikethrough~~, headings, links
+//      [text](url), block quotes, ordered + unordered lists (including
+//      nested), horizontal rules, [THINK]…[/THINK] reasoning blocks.
+//   4. FAST ENOUGH: the per-token cost is dominated by `escapeHtml` (one
+//      DOM round-trip) and a handful of linear regex passes. The streaming
+//      handler still re-renders the whole buffer per char event; if that
+//      ever becomes a bottleneck we can switch to an incremental approach.
+
 function renderMarkdown(text) {
     if (!text) return '';
-    // Extract think blocks first before escaping
+
+    // ── 1. Extract reasoning blocks BEFORE escaping so we can render the
+    //      content as a styled think-block while still safely escaping it. ──
     const thinks = [];
-    let h = text.replace(/\[THINK\]([\s\S]*?)\[\/THINK\]/g, (match, content) => {
-        thinks.push(content);
-        return `__THINK_${thinks.length - 1}__`;
+    let src = text.replace(/\[THINK\]([\s\S]*?)(?:\[\/THINK\]|$)/g, (m, content, offset, str) => {
+        // Match closed [...]/[/THINK] as well as open-and-still-streaming
+        // ([THINK]... at the end). For an open think we emit the partial.
+        const closed = m.endsWith('[/THINK]');
+        thinks.push({ content, closed });
+        return `\u0000T${thinks.length - 1}\u0000`;
     });
-    // Escape remaining text
-    h = escapeHtml(h);
-    // Markdown transforms
+
+    // ── 2. Extract fenced code blocks BEFORE escaping. We allow open
+    //      (still-streaming) fences: a ``` with no closing ``` yet. ──
+    const codeBlocks = [];
+    src = src.replace(/```([a-zA-Z0-9_+\-.#]*)\n?([\s\S]*?)(?:```|$)/g, (m, lang, body) => {
+        const closed = m.endsWith('```') && m.length > 3;
+        codeBlocks.push({ lang: (lang || '').trim().toLowerCase(), body, closed });
+        return `\u0000C${codeBlocks.length - 1}\u0000`;
+    });
+
+    // ── 3. Extract inline code spans BEFORE escaping. Open backticks
+    //      stay as plain text until they close. ──
+    const inlineCodes = [];
+    src = src.replace(/`([^`\n]+)`/g, (m, body) => {
+        inlineCodes.push(body);
+        return `\u0000I${inlineCodes.length - 1}\u0000`;
+    });
+
+    // ── 4. Now safe to escape everything else. ──
+    let h = escapeHtml(src);
+
+    // ── 5. Block-level transforms (operate on whole lines). ──
     h = h
-        .replace(/^#### (.*$)/gim, '<h4>$1</h4>')
-        .replace(/^### (.*$)/gim, '<h3>$1</h3>')
-        .replace(/^## (.*$)/gim, '<h2>$1</h2>')
-        .replace(/^# (.*$)/gim, '<h1>$1</h1>')
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.*?)\*/g, '<em>$1</em>')
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/^\> (.*$)/gim, '<blockquote>$1</blockquote>')
-        .replace(/^\- (.*$)/gim, '<li>$1</li>')
-        .replace(/^\d+\. (.*$)/gim, '<li>$1</li>');
-    h = h.replace(/(<li>.*?\u003c\/li>\n?)+/g, (m) => '<ul>' + m.replace(/\n/g, '') + '</ul>');
-    h = h.replace(/\n/g, '<br>');
-    // Re-insert think blocks as styled HTML
-    thinks.forEach((content, i) => {
-        h = h.replace(
-            `__THINK_${i}__`,
-            `<div class="think-block"><span class="think-label"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg> Thinking</span><div class="think-content">${escapeHtml(content)}</div></div>`
-        );
+        .replace(/^######\s+(.*)$/gm, '<h6>$1</h6>')
+        .replace(/^#####\s+(.*)$/gm, '<h5>$1</h5>')
+        .replace(/^####\s+(.*)$/gm, '<h4>$1</h4>')
+        .replace(/^###\s+(.*)$/gm, '<h3>$1</h3>')
+        .replace(/^##\s+(.*)$/gm, '<h2>$1</h2>')
+        .replace(/^#\s+(.*)$/gm, '<h1>$1</h1>')
+        .replace(/^\s*[-*_]{3,}\s*$/gm, '<hr>')
+        .replace(/^&gt;\s?(.*)$/gm, '<blockquote>$1</blockquote>')
+        // Lists: capture optional indentation so we can reconstruct nesting.
+        .replace(/^([ \t]*)([-*+])\s+(.*)$/gm,
+            (_m, indent, _b, body) => `\u0000UL${indent.length}\u0000${body}`)
+        .replace(/^([ \t]*)(\d+)\.\s+(.*)$/gm,
+            (_m, indent, _n, body) => `\u0000OL${indent.length}\u0000${body}`);
+
+    h = wrapLists(h);
+
+    // ── 6. Inline transforms. We use protectors around emphasis to avoid
+    //      the "open star never closes" flicker during streaming.        ──
+    // Bold: **...** (require a closing pair; partial open stays as text).
+    h = h.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    // Italic: *...* but not at start of bold (** already consumed). Also _..._
+    h = h.replace(/(^|[\s\W])\*([^*\n]+)\*(?=[\s\W]|$)/g, '$1<em>$2</em>');
+    h = h.replace(/(^|[\s\W])_([^_\n]+)_(?=[\s\W]|$)/g, '$1<em>$2</em>');
+    // Strikethrough
+    h = h.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+    // Links [text](url) — only http/https/mailto/anchor URLs to be safe.
+    h = h.replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:|#)[^\s)]+)\)/g, (_m, label, url) => {
+        const safeUrl = url.replace(/"/g, '&quot;');
+        return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${label}</a>`;
     });
+    // Bare URLs (auto-link).
+    h = h.replace(/(^|[\s])(https?:\/\/[^\s<]+)/g, (_m, pre, url) => {
+        const cleanUrl = url.replace(/[.,;:!?)]+$/, '');
+        const trail = url.slice(cleanUrl.length);
+        const safeUrl = cleanUrl.replace(/"/g, '&quot;');
+        return `${pre}<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${cleanUrl}</a>${trail}`;
+    });
+
+    // ── 7. Paragraph breaks. Convert remaining \n to <br> but collapse
+    //      consecutive newlines into paragraph gaps for breathing room. ──
+    h = h.replace(/\n{2,}/g, '<br><br>').replace(/\n/g, '<br>');
+
+    // ── 8. Re-insert protected blocks. ──
+    h = h.replace(/\u0000C(\d+)\u0000/g, (_m, idx) => {
+        const cb = codeBlocks[parseInt(idx, 10)];
+        const lang = cb.lang ? ` data-lang="${escapeHtml(cb.lang)}"` : '';
+        const cls = cb.closed ? 'code-block' : 'code-block code-block-open';
+        const langLabel = cb.lang ? `<span class="code-lang">${escapeHtml(cb.lang)}</span>` : '';
+        return `<pre class="${cls}"${lang}>${langLabel}<code>${escapeHtml(cb.body)}</code></pre>`;
+    });
+    h = h.replace(/\u0000I(\d+)\u0000/g, (_m, idx) => {
+        return `<code>${escapeHtml(inlineCodes[parseInt(idx, 10)])}</code>`;
+    });
+    h = h.replace(/\u0000T(\d+)\u0000/g, (_m, idx) => {
+        const t = thinks[parseInt(idx, 10)];
+        const cls = t.closed ? 'think-block' : 'think-block think-block-open';
+        return `<div class="${cls}"><span class="think-label">`
+            + `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>`
+            + ` Thinking${t.closed ? '' : '…'}</span>`
+            + `<div class="think-content">${escapeHtml(t.content)}</div></div>`;
+    });
+
     return h;
+}
+
+// Helper for renderMarkdown: turn the marker-encoded list lines from step 5
+// back into a properly-nested <ul>/<ol> tree. We use a simple stack keyed by
+// indentation depth (in spaces) and tag (UL/OL).
+function wrapLists(text) {
+    const lines = text.split('\n');
+    const out = [];
+    const stack = []; // entries: { tag, depth }
+
+    const closeUntil = (predicate) => {
+        while (stack.length && !predicate(stack[stack.length - 1])) {
+            const top = stack.pop();
+            out.push(`</${top.tag.toLowerCase()}>`);
+        }
+    };
+
+    for (const line of lines) {
+        const m = line.match(/^\u0000(UL|OL)(\d+)\u0000(.*)$/);
+        if (m) {
+            const tag = m[1];
+            const depth = parseInt(m[2], 10);
+            const body = m[3];
+
+            // Close any deeper or differently-tagged lists at this level.
+            closeUntil(top => top.depth < depth || (top.depth === depth && top.tag === tag));
+            // Open a new list if needed.
+            if (!stack.length || stack[stack.length - 1].depth < depth || stack[stack.length - 1].tag !== tag) {
+                out.push(`<${tag.toLowerCase()}>`);
+                stack.push({ tag, depth });
+            }
+            out.push(`<li>${body}</li>`);
+        } else {
+            // Non-list line: close all open lists.
+            closeUntil(() => false);
+            out.push(line);
+        }
+    }
+    closeUntil(() => false);
+    return out.join('\n');
 }
 
 // ═══ Modal ════════════════════════════════════════════════════════════════

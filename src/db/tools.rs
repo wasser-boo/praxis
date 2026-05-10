@@ -94,14 +94,36 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Existing install: add missing tools and update parameters for known tools
+    // Existing install: add missing tools, update parameters for known tools,
+    // and remove tools that have been deprecated/dropped from the registry.
     let mut tools = existing;
     let defaults = get_default_tools();
+    let default_names: std::collections::HashSet<String> =
+        defaults.iter().map(|t| t.name.clone()).collect();
+
     let mut changed = false;
+
+    // Drop any persisted tool that is no longer in the defaults. This keeps
+    // the on-disk registry in sync after we remove tools (e.g. duplicate or
+    // deprecated VM input/cron variants).
+    let before = tools.len();
+    tools.retain(|t| {
+        let keep = default_names.contains(&t.name);
+        if !keep {
+            tracing::info!("Removing stale/deprecated tool from registry: {}", t.name);
+        }
+        keep
+    });
+    if tools.len() != before {
+        changed = true;
+    }
+
     for default in &defaults {
         if let Some(existing) = tools.iter_mut().find(|t| t.name == default.name) {
             // Update parameters and description from defaults (preserves is_enabled)
-            if existing.parameters != default.parameters || existing.description != default.description {
+            if existing.parameters != default.parameters
+                || existing.description != default.description
+            {
                 existing.parameters = default.parameters.clone();
                 existing.description = default.description.clone();
                 changed = true;
@@ -300,8 +322,49 @@ fn get_default_tools() -> Vec<Tool> {
         },
         Tool {
             name: "vm_shell".into(),
-            description: Some("Execute a shell command inside the VM. Returns stdout, stderr, and exit code. The VM has bash and you have full root access.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"name":{"type":"string","default":"praxis-vm"},"timeout_secs":{"type":"integer","default":30}},"required":["command"]}),
+            description: Some(
+                "Run a command inside the VM via the QEMU serial console.\n\
+                Returns combined stdout/stderr and the exit code as a single string.\n\
+                The shell runs as root in `/root` by default. For long-running tasks, raise `timeout_secs`.\n\n\
+                Tips for the LLM:\n\
+                - Prefer this over `vm_keys`/`vm_input` for anything you can do non-interactively\n\
+                  (it's much faster and gives you the output directly).\n\
+                - Use `cwd` to keep your reasoning self-contained (no `cd …; …` chains).\n\
+                - Use `stdin` to feed input to commands like `tee`, `sort`, `python -`.\n\
+                - Use `env` to inject environment variables for one invocation.\n\
+                - Combine commands with `&&`, `;`, or pipelines as you would in bash.".into(),
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to execute. Bash syntax. Examples: 'ls -la /etc', 'cat /etc/os-release', 'systemctl status sshd', 'python3 -c \"print(1+1)\"'."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory. Defaults to /root. Example: '/var/log'."
+                    },
+                    "stdin": {
+                        "type": "string",
+                        "description": "Optional text piped to the command's stdin. Useful for `tee`, `sort`, `python -`, etc."
+                    },
+                    "env": {
+                        "type": "object",
+                        "description": "Extra environment variables for this command, e.g. {\"DEBIAN_FRONTEND\":\"noninteractive\"}.",
+                        "additionalProperties": {"type": "string"}
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "default": 30,
+                        "minimum": 1,
+                        "maximum": 1800,
+                        "description": "Hard timeout in seconds. Raise for slow commands like `xbps-install` or `make`."
+                    },
+                    "name": {"type": "string", "default": "praxis-vm", "description": "VM name."}
+                },
+                "required": ["command"]
+            }),
             is_enabled: false,
         },
         Tool {
@@ -379,20 +442,119 @@ fn get_default_tools() -> Vec<Tool> {
         },
         Tool {
             name: "vm_process_list".into(),
-            description: Some("List running processes in the VM. Returns PID, user, CPU%, MEM%, and command. Use to see what's running.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm"}}}),
+            description: Some(
+                "List running processes in the VM as a `ps aux` table.\n\
+                Use to check what's running, find PIDs to kill, or audit resource hogs.".into(),
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "filter": {
+                        "type": "string",
+                        "description": "Optional substring to grep for (matches against the full command line). Example: 'nginx', 'python'."
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "enum": ["cpu", "mem", "pid"],
+                        "default": "cpu",
+                        "description": "Sort key. 'cpu' (default) shows hot processes first, 'mem' shows memory hogs, 'pid' is creation order."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 30,
+                        "minimum": 1,
+                        "maximum": 200,
+                        "description": "Maximum number of rows to return."
+                    },
+                    "name": {"type": "string", "default": "praxis-vm"}
+                }
+            }),
             is_enabled: false,
         },
         Tool {
             name: "vm_file_read".into(),
-            description: Some("Read a file from the VM and return its content. Use for config files, logs, etc.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File path to read"},"name":{"type":"string","default":"praxis-vm"}},"required":["path"]}),
+            description: Some(
+                "Read a file from the VM. Returns its content as a string.\n\
+                Supports line-range reads for big files (logs, configs).\n\
+                Use this instead of `vm_shell` with `cat` so you don't truncate by accident.".into(),
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute file path inside the VM, e.g. '/var/log/messages'."
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional: 1-based first line to return. If omitted, starts at 1."
+                    },
+                    "line_count": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional: max number of lines to return from start_line. Combine with start_line to page through large files."
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "default": 65536,
+                        "minimum": 256,
+                        "maximum": 1048576,
+                        "description": "Hard cap on returned size in bytes. Defaults to 64 KiB; the file is truncated and a `[truncated]` marker is appended."
+                    },
+                    "name": {"type": "string", "default": "praxis-vm"}
+                },
+                "required": ["path"]
+            }),
             is_enabled: false,
         },
         Tool {
             name: "vm_network_test".into(),
-            description: Some("Test network connectivity in the VM. Actions: ping (host), curl (url), dns (domain), interfaces, routes.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["ping","curl","dns","interfaces","routes"],"default":"ping"},"target":{"type":"string","description":"Host/URL/domain to test"},"name":{"type":"string","default":"praxis-vm"}}}),
+            description: Some(
+                "Diagnose network from inside the VM.\n\n\
+                Actions:\n\
+                - `ping`: ICMP echo (provide host in `target`).\n\
+                - `tcp`: open a TCP connection (provide host in `target` and `port`).\n\
+                - `curl`: HTTP(S) GET (provide URL in `target`).\n\
+                - `dns`: resolve a hostname (provide name in `target`).\n\
+                - `interfaces`: list NICs and their IPs.\n\
+                - `routes`: show the routing table.".into(),
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["ping", "tcp", "curl", "dns", "interfaces", "routes"],
+                        "default": "interfaces"
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Host (for ping/tcp/dns) or URL (for curl). Required for ping/tcp/curl/dns."
+                    },
+                    "port": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65535,
+                        "description": "TCP port for action='tcp'. E.g. 22, 80, 443."
+                    },
+                    "count": {
+                        "type": "integer",
+                        "default": 4,
+                        "minimum": 1,
+                        "maximum": 30,
+                        "description": "Probe count for action='ping'."
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "default": 10,
+                        "minimum": 1,
+                        "maximum": 120,
+                        "description": "Per-action timeout."
+                    },
+                    "name": {"type": "string", "default": "praxis-vm"}
+                }
+            }),
             is_enabled: false,
         },
         Tool {
@@ -403,8 +565,31 @@ fn get_default_tools() -> Vec<Tool> {
         },
         Tool {
             name: "vm_package_install".into(),
-            description: Some("Install packages in the VM using xbps-install (Void Linux). Updates package list and installs specified packages.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"packages":{"type":"string","description":"Space-separated package names to install"},"name":{"type":"string","default":"praxis-vm"}},"required":["packages"]}),
+            description: Some(
+                "Install one or more packages in the VM via xbps-install (Void Linux).\n\
+                The repo index is synced first by default so you don't get a stale-cache failure.".into(),
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "packages": {
+                        "type": "string",
+                        "description": "Space-separated package names. Example: 'git curl htop'."
+                    },
+                    "update_first": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Run `xbps-install -Suy` before the install. Set false if the index was just synced."
+                    },
+                    "assume_yes": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Pass -y so xbps doesn't prompt for confirmation."
+                    },
+                    "name": {"type": "string", "default": "praxis-vm"}
+                },
+                "required": ["packages"]
+            }),
             is_enabled: false,
         },
         Tool {
@@ -426,55 +611,47 @@ fn get_default_tools() -> Vec<Tool> {
             is_enabled: false,
         },
         Tool {
-            name: "vm_cron_add".into(),
-            description: Some("Add a cron job in the VM. Schedule examples: '@reboot', '0 2 * * *' (daily at 2am), '*/5 * * * *' (every 5 minutes).".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"schedule":{"type":"string","description":"Cron schedule expression"},"command":{"type":"string","description":"Command to execute"},"name":{"type":"string","default":"praxis-vm"}},"required":["schedule","command"]}),
-            is_enabled: false,
-        },
-        Tool {
-            name: "vm_cron_list".into(),
-            description: Some("List all cron jobs in the VM.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","default":"praxis-vm"}}}),
-            is_enabled: false,
-        },
-        Tool {
-            name: "vm_cron_remove".into(),
-            description: Some("Remove a cron job from the VM by its command or schedule.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"pattern":{"type":"string","description":"Pattern to match cron job (command or schedule)"},"name":{"type":"string","default":"praxis-vm"}},"required":["pattern"]}),
-            is_enabled: false,
-        },
-        Tool {
-            name: "vm_shortcut".into(),
-            description: Some("Send common keyboard shortcuts to the VM. Predefined shortcuts:\n\
-                - copy, paste, cut, select_all, undo, redo\n\
-                - save, open, new, close, quit\n\
-                - find, replace, print\n\
-                - alt_tab, alt_f4, ctrl_alt_delete\n\
-                - minimize, maximize, fullscreen\n\
-                - volume_up, volume_down, mute\n\
-                - brightness_up, brightness_down".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"shortcut":{"type":"string","description":"Shortcut name (e.g. 'copy', 'paste', 'alt_tab')"},"name":{"type":"string","default":"praxis-vm"}},"required":["shortcut"]}),
-            is_enabled: false,
-        },
-        Tool {
-            name: "vm_key_combo".into(),
-            description: Some("Send arbitrary key combinations to the VM. Use QEMU key names.\n\
-                Examples: 'ctrl+shift+t', 'alt+F2', 'super+l', 'ctrl+alt+delete'\n\
-                Supports modifiers: ctrl, alt, shift, super/meta/win\n\
-                Supports keys: a-z, 0-9, f1-f12, enter, esc, tab, space, backspace, delete, arrows, etc.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"combo":{"type":"string","description":"Key combination (e.g. 'ctrl+shift+t')"},"repeat":{"type":"integer","default":1,"description":"Number of times to repeat"},"name":{"type":"string","default":"praxis-vm"}},"required":["combo"]}),
-            is_enabled: false,
-        },
-        Tool {
-            name: "vm_type_fast".into(),
-            description: Some("Type text quickly into the VM. Uses faster key delays for installers and text fields. Optionally press Enter after.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"Text to type"},"enter":{"type":"boolean","default":false,"description":"Press Enter after typing"},"name":{"type":"string","default":"praxis-vm"},"keyboard_layout":{"type":"string","enum":["us","de","fr","es","it","gb"],"default":"us"}},"required":["text"]}),
-            is_enabled: false,
-        },
-        Tool {
             name: "vm_wait_for_text".into(),
-            description: Some("Wait for specific text to appear on the VM screen. Takes a screenshot and checks if the text is present. Useful for waiting for boot/installation completion.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"Text to wait for"},"timeout_secs":{"type":"integer","default":60,"description":"Maximum wait time in seconds"},"interval_secs":{"type":"integer","default":5,"description":"Check interval in seconds"},"name":{"type":"string","default":"praxis-vm"}},"required":["text"]}),
+            description: Some(
+                "Poll the VM screen until the given `text` appears (or timeout).\n\
+                Useful for waiting on installer prompts, login banners, GUI dialogs.\n\
+                Returns the matching screenshot path on success, or an error after timeout.".into(),
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Text or regex to look for on screen."
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "If false (default), case is ignored."
+                    },
+                    "regex": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "If true, treat `text` as a regular expression instead of a literal substring."
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "default": 60,
+                        "minimum": 1,
+                        "maximum": 1800,
+                        "description": "Total wait time before giving up."
+                    },
+                    "interval_secs": {
+                        "type": "integer",
+                        "default": 5,
+                        "minimum": 1,
+                        "maximum": 120,
+                        "description": "How often to take a fresh screenshot and check."
+                    },
+                    "name": {"type": "string", "default": "praxis-vm"}
+                },
+                "required": ["text"]
+            }),
             is_enabled: false,
         },
         Tool {
@@ -502,36 +679,6 @@ fn get_default_tools() -> Vec<Tool> {
             is_enabled: false,
         },
         Tool {
-            name: "vm_mouse_move".into(),
-            description: Some("Move mouse to absolute position in the VM. Coordinates are in pixels.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"x":{"type":"integer","description":"X coordinate"},"y":{"type":"integer","description":"Y coordinate"},"name":{"type":"string","default":"praxis-vm"}},"required":["x","y"]}),
-            is_enabled: false,
-        },
-        Tool {
-            name: "vm_mouse_click_at".into(),
-            description: Some("Click at specific position in the VM. Button: 0=left, 1=middle, 2=right.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"x":{"type":"integer","description":"X coordinate"},"y":{"type":"integer","description":"Y coordinate"},"button":{"type":"integer","default":0,"description":"0=left, 1=middle, 2=right"},"name":{"type":"string","default":"praxis-vm"}},"required":["x","y"]}),
-            is_enabled: false,
-        },
-        Tool {
-            name: "vm_mouse_double_click_at".into(),
-            description: Some("Double-click at specific position in the VM.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"x":{"type":"integer","description":"X coordinate"},"y":{"type":"integer","description":"Y coordinate"},"name":{"type":"string","default":"praxis-vm"}},"required":["x","y"]}),
-            is_enabled: false,
-        },
-        Tool {
-            name: "vm_mouse_drag_to".into(),
-            description: Some("Drag from current position to target position in the VM.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"from_x":{"type":"integer","description":"Start X coordinate"},"from_y":{"type":"integer","description":"Start Y coordinate"},"to_x":{"type":"integer","description":"End X coordinate"},"to_y":{"type":"integer","description":"End Y coordinate"},"name":{"type":"string","default":"praxis-vm"}},"required":["from_x","from_y","to_x","to_y"]}),
-            is_enabled: false,
-        },
-        Tool {
-            name: "vm_mouse_scroll_at".into(),
-            description: Some("Scroll at specific position in the VM. Direction: up, down, left, right.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"x":{"type":"integer","description":"X coordinate"},"y":{"type":"integer","description":"Y coordinate"},"direction":{"type":"string","enum":["up","down","left","right"],"default":"down"},"amount":{"type":"integer","default":3,"description":"Scroll amount (lines)"},"name":{"type":"string","default":"praxis-vm"}},"required":["x","y"]}),
-            is_enabled: false,
-        },
-        Tool {
             name: "vm_install".into(),
             description: Some("Start a VM with an installation ISO to install an OS. Provide either iso_name (searches in installation_disks context) or iso_path (direct path). The VM boots from the ISO. Use vm_keys and vm_screenshot to complete the installation.".into()),
             parameters: serde_json::json!({"type":"object","properties":{"iso_name":{"type":"string","description":"Name to search for in installation_disks (e.g. 'alpine', 'ubuntu', 'arch')"},"iso_path":{"type":"string","description":"Direct path to ISO file (alternative to iso_name)"},"vm_name":{"type":"string","default":"praxis-vm"},"cpu_cores":{"type":"integer","default":2},"ram_mb":{"type":"integer","default":4096},"disk_size":{"type":"string","default":"40G"},"firmware":{"type":"string","enum":["bios","uefi"],"default":"bios","description":"Boot firmware: 'bios' (legacy) or 'uefi' (OVMF). Use 'uefi' for modern OSes that require EFI boot."}}}),
@@ -539,14 +686,8 @@ fn get_default_tools() -> Vec<Tool> {
         },
         Tool {
             name: "send_screenshot_to_discord".into(),
-            description: Some("Take a VM screenshot and send it to a Discord channel. If channel_id is omitted, sends to the originating channel.".into()),
+            description: Some("Take a VM screenshot and send it to a Discord channel. If channel_id is omitted, sends to the originating channel. Caption is optional.".into()),
             parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID. If omitted, uses the originating channel."},"caption":{"type":"string","description":"Optional caption for the screenshot"},"vm_name":{"type":"string","default":"praxis-vm"}},"required":[]}),
-            is_enabled: false,
-        },
-        Tool {
-            name: "screenshot_with_feedback".into(),
-            description: Some("Take a VM screenshot and send it to Discord with a message/feedback. If channel_id is omitted, sends to the originating channel.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID. If omitted, uses the originating channel."},"feedback":{"type":"string","description":"Message to send with the screenshot"},"vm_name":{"type":"string","default":"praxis-vm"}},"required":["feedback"]}),
             is_enabled: false,
         },
         Tool {
@@ -598,7 +739,7 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 67);
+        assert_eq!(tools.len(), 55);
     }
 
     #[test]
@@ -607,7 +748,7 @@ mod tool_tests {
         init_default_tools(&db).unwrap();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 67);
+        assert_eq!(tools.len(), 55);
     }
 
     #[test]
@@ -723,5 +864,35 @@ mod tool_tests {
         let defs = to_tool_definitions(&db).unwrap();
         assert_eq!(defs.len(), 27);
         assert!(defs.iter().all(|d| d.function.name != "execute_terminal"));
+    }
+
+    /// Tools removed from `get_default_tools()` between releases must be
+    /// purged from the persisted on-disk registry on next startup so they
+    /// don't continue to be advertised to the LLM.
+    #[test]
+    fn test_init_default_tools_removes_stale_tools() {
+        let (db, _dir) = test_db();
+        // Pretend a previous version installed a now-deprecated tool.
+        let stale = Tool {
+            name: "vm_cron_add".to_string(),
+            description: Some("legacy".to_string()),
+            parameters: serde_json::json!({}),
+            is_enabled: true,
+        };
+        save(&db, &stale).unwrap();
+
+        // First init: registry has only the stale tool, so it's treated as a
+        // fresh install. Save the defaults explicitly to simulate an upgrade
+        // from a state where stale tools coexist with defaults.
+        let mut defaults = get_default_tools();
+        defaults.push(stale.clone());
+        save_tools(&db, &defaults).unwrap();
+        let pre = list(&db).unwrap();
+        assert!(pre.iter().any(|t| t.name == "vm_cron_add"));
+
+        // Run init again — should drop vm_cron_add (no longer in defaults).
+        init_default_tools(&db).unwrap();
+        let post = list(&db).unwrap();
+        assert!(!post.iter().any(|t| t.name == "vm_cron_add"));
     }
 }

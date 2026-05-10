@@ -1,5 +1,6 @@
 pub mod cl;
 pub mod config;
+pub mod context_cmd;
 pub mod dashboard;
 pub mod db;
 pub mod discord;
@@ -10,5 +11,7 @@ pub mod plugins;
 pub mod skills;
 pub mod tags;
 pub mod tools;
+pub mod tui;
+pub mod util;
 pub mod vm;
 pub mod voice;

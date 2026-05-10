@@ -120,22 +120,11 @@ pub async fn dispatch_vm_tool(tool_name: &str, args: &serde_json::Value) -> Opti
         "vm_snapshot_list" => handle_vm_snapshot_list(&manager, args).await,
         "vm_snapshot_restore" => handle_vm_snapshot_restore(&manager, args).await,
         "vm_snapshot_delete" => handle_vm_snapshot_delete(&manager, args).await,
-        "vm_cron_add" => handle_vm_cron_add(&manager, args).await,
-        "vm_cron_list" => handle_vm_cron_list(&manager, args).await,
-        "vm_cron_remove" => handle_vm_cron_remove(&manager, args).await,
-        "vm_shortcut" => handle_vm_shortcut(&manager, args).await,
-        "vm_key_combo" => handle_vm_key_combo(&manager, args).await,
-        "vm_type_fast" => handle_vm_type_fast(&manager, args).await,
         "vm_wait_for_text" => handle_vm_wait_for_text(&manager, args).await,
         "vm_window_list" => handle_vm_window_list(&manager, args).await,
         "vm_window_focus" => handle_vm_window_focus(&manager, args).await,
         "vm_clipboard_set" => handle_vm_clipboard_set(&manager, args).await,
         "vm_clipboard_get" => handle_vm_clipboard_get(&manager, args).await,
-        "vm_mouse_move" => handle_vm_mouse_move(&manager, args).await,
-        "vm_mouse_click_at" => handle_vm_mouse_click_at(&manager, args).await,
-        "vm_mouse_double_click_at" => handle_vm_mouse_double_click_at(&manager, args).await,
-        "vm_mouse_drag_to" => handle_vm_mouse_drag_to(&manager, args).await,
-        "vm_mouse_scroll_at" => handle_vm_mouse_scroll_at(&manager, args).await,
         "vm_install" => handle_vm_install(&manager, args).await,
         _ => return None,
     };
@@ -218,16 +207,86 @@ async fn handle_vm_stop(manager: &VmManager, args: &serde_json::Value) -> String
 async fn handle_vm_shell(manager: &VmManager, args: &serde_json::Value) -> String {
     let command = args["command"].as_str().unwrap_or("");
     let name = args["name"].as_str().unwrap_or("praxis-vm");
-    let timeout = args["timeout_secs"].as_u64().unwrap_or(30);
+    let timeout = args["timeout_secs"].as_u64().unwrap_or(30).clamp(1, 1800);
+    let cwd = args["cwd"].as_str().unwrap_or("");
+    let stdin = args["stdin"].as_str().unwrap_or("");
+    let env = args["env"].as_object();
 
     if command.is_empty() {
         return "Error: command is required".to_string();
     }
 
-    match manager.shell_exec(name, command, timeout).await {
+    // Compose a robust one-liner: optional env exports, optional cd, optional
+    // here-doc on stdin. We always wrap in `bash -c '...'` so quoting is
+    // predictable (callers don't need to escape their `command`).
+    let mut prefix = String::new();
+    if let Some(env_map) = env {
+        for (k, v) in env_map {
+            // Skip non-string env values; reject suspicious keys.
+            let Some(val) = v.as_str() else { continue };
+            if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            prefix.push_str(&format!("export {k}={}; ", shell_quote(val)));
+        }
+    }
+    if !cwd.is_empty() {
+        prefix.push_str(&format!("cd {} && ", shell_quote(cwd)));
+    }
+
+    let composed = if stdin.is_empty() {
+        format!("{prefix}{command}")
+    } else {
+        // Use a here-doc with a unique sentinel based on the command hash so
+        // it can't accidentally collide with literal user content.
+        let sentinel = format!("PRAXIS_EOF_{:08X}", crc32(stdin));
+        format!(
+            "{prefix}{command} <<'{sentinel}'\n{stdin}\n{sentinel}\n"
+        )
+    };
+
+    match manager.shell_exec(name, &composed, timeout).await {
         Ok(output) => output,
         Err(e) => format!("Error: {}", e),
     }
+}
+
+/// Quote a string for safe inclusion in a single-quoted shell context.
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | '.' | '@' | ':' | '+' | ',')) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Tiny CRC32 (IEEE polynomial) — used only to derive a unique here-doc
+/// sentinel; not security-relevant.
+fn crc32(s: &str) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for byte in s.as_bytes() {
+        crc ^= *byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
 }
 
 async fn handle_vm_keys(manager: &VmManager, args: &serde_json::Value) -> String {
@@ -929,8 +988,27 @@ async fn handle_vm_install(manager: &VmManager, args: &serde_json::Value) -> Str
 
 async fn handle_vm_process_list(manager: &VmManager, args: &serde_json::Value) -> String {
     let name = args["name"].as_str().unwrap_or("praxis-vm");
-    match manager.shell_exec(name, "ps aux --sort=-%cpu | head -30", 10).await {
-        Ok(output) => format!("Running processes:\n{}", output),
+    let filter = args["filter"].as_str().unwrap_or("").trim();
+    let sort_by = args["sort_by"].as_str().unwrap_or("cpu");
+    let limit = args["limit"].as_u64().unwrap_or(30).clamp(1, 200);
+
+    let sort_flag = match sort_by {
+        "mem" => "--sort=-%mem",
+        "pid" => "--sort=pid",
+        _ => "--sort=-%cpu",
+    };
+    // Always include the header (first line) when grepping.
+    let mut cmd = format!("ps aux {sort_flag}");
+    if !filter.is_empty() {
+        // shell_quote ensures the filter substring can't break out.
+        cmd.push_str(&format!(
+            " | awk 'NR==1 || /{}/'",
+            filter.replace('/', "\\/").replace('\'', "")
+        ));
+    }
+    cmd.push_str(&format!(" | head -{}", limit + 1)); // +1 for header
+    match manager.shell_exec(name, &cmd, 10).await {
+        Ok(output) => format!("Running processes (sort={sort_by}, filter={filter:?}):\n{output}"),
         Err(e) => format!("Error: {}", e),
     }
 }
@@ -938,49 +1016,96 @@ async fn handle_vm_process_list(manager: &VmManager, args: &serde_json::Value) -
 async fn handle_vm_file_read(manager: &VmManager, args: &serde_json::Value) -> String {
     let path = args["path"].as_str().unwrap_or("");
     let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
+    let start_line = args["start_line"].as_u64();
+    let line_count = args["line_count"].as_u64();
+    let max_bytes = args["max_bytes"].as_u64().unwrap_or(65536).clamp(256, 1_048_576) as usize;
+
     if path.is_empty() {
         return "Error: path is required".to_string();
     }
-    
-    match manager.read_file(name, path).await {
-        Ok(output) => format!("Content of {}:\n{}", path, output),
-        Err(e) => format!("Error reading file '{}': {}", path, e),
-    }
+
+    // If a line range is requested, use sed to read only the requested slice
+    // — much friendlier on huge files than read_file.
+    let raw = if start_line.is_some() || line_count.is_some() {
+        let start = start_line.unwrap_or(1).max(1);
+        let count = line_count.unwrap_or(500).max(1);
+        let end = start.saturating_add(count.saturating_sub(1));
+        let cmd = format!("sed -n '{start},{end}p' {}", shell_quote(path));
+        match manager.shell_exec(name, &cmd, 30).await {
+            Ok(s) => s,
+            Err(e) => return format!("Error reading file '{}': {}", path, e),
+        }
+    } else {
+        match manager.read_file(name, path).await {
+            Ok(s) => s,
+            Err(e) => return format!("Error reading file '{}': {}", path, e),
+        }
+    };
+
+    let truncated = if raw.len() > max_bytes {
+        let mut t = crate::util::truncate_chars(&raw, max_bytes);
+        t.push_str("\n[truncated]");
+        t
+    } else {
+        raw
+    };
+    format!("Content of {}:\n{}", path, truncated)
 }
 
 async fn handle_vm_network_test(manager: &VmManager, args: &serde_json::Value) -> String {
     let action = args["action"].as_str().unwrap_or("interfaces");
-    let target = args["target"].as_str().unwrap_or("");
+    let target = args["target"].as_str().unwrap_or("").trim();
+    let port = args["port"].as_u64();
+    let count = args["count"].as_u64().unwrap_or(4).clamp(1, 30);
+    let timeout = args["timeout_secs"].as_u64().unwrap_or(10).clamp(1, 120);
     let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
+
     let cmd = match action {
         "ping" => {
             if target.is_empty() {
                 return "Error: target host is required for ping".to_string();
             }
-            format!("ping -c 3 {}", target)
+            format!("ping -c {count} -W {timeout} {}", shell_quote(target))
+        }
+        "tcp" => {
+            let Some(p) = port else {
+                return "Error: port is required for tcp test".to_string();
+            };
+            if target.is_empty() {
+                return "Error: target host is required for tcp test".to_string();
+            }
+            // Use bash's /dev/tcp pseudo-device — works on Void without extra tooling.
+            format!(
+                "timeout {timeout} bash -c 'cat < /dev/tcp/{}/{p}' >/dev/null 2>&1 && echo 'OPEN: {} {p}' || echo 'CLOSED or unreachable: {} {p}'",
+                shell_quote(target),
+                shell_quote(target),
+                shell_quote(target),
+            )
         }
         "curl" => {
             if target.is_empty() {
                 return "Error: URL is required for curl".to_string();
             }
-            format!("curl -sI {} | head -10", target)
+            format!(
+                "curl -sIL --max-time {timeout} {} | head -20",
+                shell_quote(target)
+            )
         }
         "dns" => {
             if target.is_empty() {
                 return "Error: domain is required for dns".to_string();
             }
-            format!("nslookup {} 2>&1 || host {} 2>&1 || dig {} 2>&1", target, target, target)
+            let q = shell_quote(target);
+            format!("nslookup {q} 2>&1 || host {q} 2>&1 || dig {q} 2>&1")
         }
         "interfaces" => "ip addr show 2>/dev/null || ifconfig".to_string(),
         "routes" => "ip route show 2>/dev/null || route -n".to_string(),
-        _ => return format!("Unknown action: {}. Use: ping, curl, dns, interfaces, routes", action),
+        _ => return format!("Unknown action: {action}. Use: ping, tcp, curl, dns, interfaces, routes"),
     };
-    
-    match manager.shell_exec(name, &cmd, 15).await {
-        Ok(output) => format!("Network {}:\n{}", action, output),
-        Err(e) => format!("Error: {}", e),
+
+    match manager.shell_exec(name, &cmd, timeout + 5).await {
+        Ok(output) => format!("Network {action}:\n{output}"),
+        Err(e) => format!("Error: {e}"),
     }
 }
 
@@ -997,19 +1122,37 @@ async fn handle_vm_service_list(manager: &VmManager, args: &serde_json::Value) -
 }
 
 async fn handle_vm_package_install(manager: &VmManager, args: &serde_json::Value) -> String {
-    let packages = args["packages"].as_str().unwrap_or("");
+    let packages = args["packages"].as_str().unwrap_or("").trim();
     let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
+    let update_first = args["update_first"].as_bool().unwrap_or(true);
+    let assume_yes = args["assume_yes"].as_bool().unwrap_or(true);
+
     if packages.is_empty() {
         return "Error: packages is required".to_string();
     }
-    
-    // Update package list and install
-    let cmd = format!("xbps-install -Sy {}", packages);
-    
-    match manager.shell_exec(name, &cmd, 120).await {
-        Ok(output) => format!("Package install result:\n{}", output),
-        Err(e) => format!("Error installing packages: {}", e),
+
+    // Whitelist package names — alphanum, dash, dot, plus, underscore.
+    // This blocks shell-meta-character injection through the `packages` arg.
+    for pkg in packages.split_whitespace() {
+        if !pkg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '.'))
+        {
+            return format!("Error: invalid package name `{pkg}`");
+        }
+    }
+
+    let mut flags = String::from("-S");
+    if update_first {
+        flags.push('u');
+    }
+    if assume_yes {
+        flags.push('y');
+    }
+    let cmd = format!("xbps-install {flags} {}", packages);
+    match manager.shell_exec(name, &cmd, 300).await {
+        Ok(output) => format!("Package install result:\n{output}"),
+        Err(e) => format!("Error installing packages: {e}"),
     }
 }
 
@@ -1068,189 +1211,54 @@ async fn handle_vm_snapshot_delete(manager: &VmManager, args: &serde_json::Value
 
 // ── Cron Job Tools ──────────────────────────────────────────────────────────
 
-async fn handle_vm_cron_add(manager: &VmManager, args: &serde_json::Value) -> String {
-    let schedule = args["schedule"].as_str().unwrap_or("");
-    let command = args["command"].as_str().unwrap_or("");
-    let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
-    if schedule.is_empty() || command.is_empty() {
-        return "Error: schedule and command are required".to_string();
-    }
-    
-    // Add to crontab
-    let cron_line = format!("{} {}", schedule, command);
-    let cmd = format!("(crontab -l 2>/dev/null; echo '{}') | crontab -", cron_line);
-    
-    match manager.shell_exec(name, &cmd, 10).await {
-        Ok(_) => format!("Cron job added: {}", cron_line),
-        Err(e) => format!("Error adding cron job: {}", e),
-    }
-}
-
-async fn handle_vm_cron_list(manager: &VmManager, args: &serde_json::Value) -> String {
-    let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
-    match manager.shell_exec(name, "crontab -l 2>/dev/null || echo 'No cron jobs'", 10).await {
-        Ok(output) => format!("Cron jobs:\n{}", output),
-        Err(e) => format!("Error listing cron jobs: {}", e),
-    }
-}
-
-async fn handle_vm_cron_remove(manager: &VmManager, args: &serde_json::Value) -> String {
-    let pattern = args["pattern"].as_str().unwrap_or("");
-    let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
-    if pattern.is_empty() {
-        return "Error: pattern is required".to_string();
-    }
-    
-    // Remove cron jobs matching pattern
-    let cmd = format!("crontab -l 2>/dev/null | grep -v '{}' | crontab -", pattern);
-    
-    match manager.shell_exec(name, &cmd, 10).await {
-        Ok(_) => format!("Cron jobs matching '{}' removed", pattern),
-        Err(e) => format!("Error removing cron jobs: {}", e),
-    }
-}
-
-// ── Keyboard Shortcut Tools ─────────────────────────────────────────────────
-
-async fn handle_vm_shortcut(manager: &VmManager, args: &serde_json::Value) -> String {
-    let shortcut = args["shortcut"].as_str().unwrap_or("");
-    let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
-    if shortcut.is_empty() {
-        return "Error: shortcut is required".to_string();
-    }
-    
-    let keys = match shortcut.to_lowercase().as_str() {
-        "copy" => "ctrl+c",
-        "paste" => "ctrl+v",
-        "cut" => "ctrl+x",
-        "select_all" => "ctrl+a",
-        "undo" => "ctrl+z",
-        "redo" => "ctrl+y",
-        "save" => "ctrl+s",
-        "open" => "ctrl+o",
-        "new" => "ctrl+n",
-        "close" => "ctrl+w",
-        "quit" => "ctrl+q",
-        "find" => "ctrl+f",
-        "replace" => "ctrl+h",
-        "print" => "ctrl+p",
-        "alt_tab" => "alt+tab",
-        "alt_f4" => "alt+f4",
-        "ctrl_alt_delete" => "ctrl+alt+delete",
-        "minimize" => "super+down",
-        "maximize" => "super+up",
-        "fullscreen" => "f11",
-        "volume_up" => "XF86AudioRaiseVolume",
-        "volume_down" => "XF86AudioLowerVolume",
-        "mute" => "XF86AudioMute",
-        "brightness_up" => "XF86MonBrightnessUp",
-        "brightness_down" => "XF86MonBrightnessDown",
-        _ => return format!("Unknown shortcut: {}. Available: copy, paste, cut, select_all, undo, redo, save, open, new, close, quit, find, replace, print, alt_tab, alt_f4, ctrl_alt_delete, minimize, maximize, fullscreen, volume_up, volume_down, mute, brightness_up, brightness_down", shortcut),
-    };
-    
-    match manager.send_keys_with_layout(name, keys, None).await {
-        Ok(_) => format!("Sent shortcut: {} ({})", shortcut, keys),
-        Err(e) => format!("Error sending shortcut: {}", e),
-    }
-}
-
-async fn handle_vm_key_combo(manager: &VmManager, args: &serde_json::Value) -> String {
-    let combo = args["combo"].as_str().unwrap_or("");
-    let repeat = args["repeat"].as_u64().unwrap_or(1) as usize;
-    let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
-    if combo.is_empty() {
-        return "Error: combo is required".to_string();
-    }
-    
-    let mut result = String::new();
-    for i in 0..repeat {
-        match manager.send_keys_with_layout(name, combo, None).await {
-            Ok(_) => {
-                if repeat > 1 {
-                    result.push_str(&format!("Sent combo {}/{}: {}\n", i + 1, repeat, combo));
-                } else {
-                    result.push_str(&format!("Sent combo: {}", combo));
-                }
-            }
-            Err(e) => return format!("Error sending combo: {}", e),
-        }
-    }
-    result
-}
-
-async fn handle_vm_type_fast(manager: &VmManager, args: &serde_json::Value) -> String {
-    let text = args["text"].as_str().unwrap_or("");
-    let enter = args["enter"].as_bool().unwrap_or(false);
-    let name = args["name"].as_str().unwrap_or("praxis-vm");
-    let layout = args["keyboard_layout"].as_str().map(|s| s.to_string());
-    
-    if text.is_empty() {
-        return "Error: text is required".to_string();
-    }
-    
-    let keys = if enter {
-        format!("{}\n", text)
-    } else {
-        text.to_string()
-    };
-    
-    // Use faster delays for type_fast
-    match manager.send_keys_with_layout(name, &keys, layout.as_deref()).await {
-        Ok(_) => {
-            if enter {
-                format!("Typed fast: {} + Enter", text)
-            } else {
-                format!("Typed fast: {}", text)
-            }
-        }
-        Err(e) => format!("Error typing: {}", e),
-    }
-}
-
 async fn handle_vm_wait_for_text(manager: &VmManager, args: &serde_json::Value) -> String {
     let text = args["text"].as_str().unwrap_or("");
-    let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(60);
-    let interval_secs = args["interval_secs"].as_u64().unwrap_or(5);
+    let case_sensitive = args["case_sensitive"].as_bool().unwrap_or(false);
+    let regex_mode = args["regex"].as_bool().unwrap_or(false);
+    let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(60).clamp(1, 1800);
+    let interval_secs = args["interval_secs"].as_u64().unwrap_or(5).clamp(1, 120);
     let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
+
     if text.is_empty() {
         return "Error: text is required".to_string();
     }
-    
+
+    let pattern = if regex_mode {
+        let raw = match regex::Regex::new(text) {
+            Ok(_) => text.to_string(),
+            Err(e) => return format!("Error: invalid regex: {e}"),
+        };
+        if case_sensitive { raw } else { format!("(?i){raw}") }
+    } else if case_sensitive {
+        regex::escape(text)
+    } else {
+        format!("(?i){}", regex::escape(text))
+    };
+    let re = match regex::Regex::new(&pattern) {
+        Ok(r) => r,
+        Err(e) => return format!("Error: failed to compile pattern: {e}"),
+    };
+
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_secs);
-    
+
     loop {
         if start.elapsed() > timeout {
-            return format!("Timeout waiting for '{}' after {}s", text, timeout_secs);
+            return format!("Timeout: '{text}' not seen after {timeout_secs}s");
         }
-        
-        // Take screenshot and check for text
-        match manager.screenshot(name).await {
-            Ok(_) => {
-                // For now, just wait and check periodically
-                // In a real implementation, we'd use OCR or check the serial output
-                tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
-                
-                // Check if text appears in serial output
-                match manager.shell_exec(name, &format!("grep -q '{}' /tmp/screen_buffer 2>/dev/null && echo 'FOUND' || echo 'NOT_FOUND'", text), 5).await {
-                    Ok(output) => {
-                        if output.contains("FOUND") {
-                            return format!("Text '{}' found on screen", text);
-                        }
-                    }
-                    Err(_) => continue,
-                }
+        // Snapshot screen + screen buffer; we match on the buffer only
+        // (true OCR would require a heavier dependency).
+        let _ = manager.screenshot(name).await;
+        match manager
+            .shell_exec(name, "cat /tmp/screen_buffer 2>/dev/null || true", 5)
+            .await
+        {
+            Ok(buf) if re.is_match(&buf) => {
+                return format!("Found '{text}' on screen after {:.1}s", start.elapsed().as_secs_f32());
             }
-            Err(_) => {
-                tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
-            }
+            _ => {}
         }
+        tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
     }
 }
 
@@ -1328,87 +1336,7 @@ async fn handle_vm_clipboard_get(manager: &VmManager, args: &serde_json::Value) 
 }
 
 // ── Mouse Tools ─────────────────────────────────────────────────────────────
+// (low-level per-action mouse handlers were removed; use `vm_mouse` which
+// dispatches `move_absolute`/`click`/`double_click`/`drag`/`scroll` via a
+// single `action` parameter.)
 
-async fn handle_vm_mouse_move(manager: &VmManager, args: &serde_json::Value) -> String {
-    let x = args["x"].as_i64().unwrap_or(0) as i32;
-    let y = args["y"].as_i64().unwrap_or(0) as i32;
-    let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
-    match manager.send_mouse(name, "move_absolute", Some(x), Some(y), None, None, None, None, None).await {
-        Ok(_) => format!("Mouse moved to ({}, {})", x, y),
-        Err(e) => format!("Error moving mouse: {}", e),
-    }
-}
-
-async fn handle_vm_mouse_click_at(manager: &VmManager, args: &serde_json::Value) -> String {
-    let x = args["x"].as_i64().unwrap_or(0) as i32;
-    let y = args["y"].as_i64().unwrap_or(0) as i32;
-    let button = args["button"].as_i64().unwrap_or(0) as i32;
-    let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
-    // Move to position first, then click
-    match manager.send_mouse(name, "move_absolute", Some(x), Some(y), None, None, None, None, None).await {
-        Ok(_) => {
-            match manager.send_mouse(name, "click", Some(x), Some(y), None, None, Some(button), None, None).await {
-                Ok(_) => format!("Clicked at ({}, {}) button={}", x, y, button),
-                Err(e) => format!("Error clicking: {}", e),
-            }
-        }
-        Err(e) => format!("Error moving mouse: {}", e),
-    }
-}
-
-async fn handle_vm_mouse_double_click_at(manager: &VmManager, args: &serde_json::Value) -> String {
-    let x = args["x"].as_i64().unwrap_or(0) as i32;
-    let y = args["y"].as_i64().unwrap_or(0) as i32;
-    let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
-    // Move to position first, then double click
-    match manager.send_mouse(name, "move_absolute", Some(x), Some(y), None, None, None, None, None).await {
-        Ok(_) => {
-            match manager.send_mouse(name, "double_click", Some(x), Some(y), None, None, None, None, None).await {
-                Ok(_) => format!("Double-clicked at ({}, {})", x, y),
-                Err(e) => format!("Error double-clicking: {}", e),
-            }
-        }
-        Err(e) => format!("Error moving mouse: {}", e),
-    }
-}
-
-async fn handle_vm_mouse_drag_to(manager: &VmManager, args: &serde_json::Value) -> String {
-    let from_x = args["from_x"].as_i64().unwrap_or(0) as i32;
-    let from_y = args["from_y"].as_i64().unwrap_or(0) as i32;
-    let to_x = args["to_x"].as_i64().unwrap_or(0) as i32;
-    let to_y = args["to_y"].as_i64().unwrap_or(0) as i32;
-    let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
-    match manager.send_mouse(name, "drag", Some(from_x), Some(from_y), Some(to_x), Some(to_y), None, None, None).await {
-        Ok(_) => format!("Dragged from ({},{}) to ({},{})", from_x, from_y, to_x, to_y),
-        Err(e) => format!("Error dragging: {}", e),
-    }
-}
-
-async fn handle_vm_mouse_scroll_at(manager: &VmManager, args: &serde_json::Value) -> String {
-    let x = args["x"].as_i64().unwrap_or(0) as i32;
-    let y = args["y"].as_i64().unwrap_or(0) as i32;
-    let direction = args["direction"].as_str().unwrap_or("down");
-    let amount = args["amount"].as_i64().unwrap_or(3) as i32;
-    let name = args["name"].as_str().unwrap_or("praxis-vm");
-    
-    // Move to position first
-    let _ = manager.send_mouse(name, "move_absolute", Some(x), Some(y), None, None, None, None, None).await;
-    
-    // Calculate scroll values based on direction
-    let (vertical, horizontal) = match direction {
-        "up" => (amount, 0),
-        "down" => (-amount, 0),
-        "left" => (0, -amount),
-        "right" => (0, amount),
-        _ => return format!("Unknown direction: {}. Use: up, down, left, right", direction),
-    };
-    
-    match manager.send_mouse(name, "scroll", Some(x), Some(y), None, None, None, Some(vertical), Some(horizontal)).await {
-        Ok(_) => format!("Scrolled {} at ({}, {})", direction, x, y),
-        Err(e) => format!("Error scrolling: {}", e),
-    }
-}

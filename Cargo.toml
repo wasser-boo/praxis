@@ -60,6 +60,8 @@ governor = "0.8"
 cron = "0.15"
 rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
 backon = "1"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
 
 vosk = { version = "0.3", optional = true }
 whisper-rs = { version = "0.1", optional = true }

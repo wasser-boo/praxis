@@ -77,8 +77,12 @@ pub fn remove(user_id: &str) {
 }
 
 pub fn send(user_id: &str, event: &str, data: &str) {
-    let data_preview = if data.len() > 80 {
-        format!("{}...", &data[..80])
+    // Build a UTF-8-safe preview without slicing on byte boundaries
+    // (slicing a &str at a non-char-boundary panics).
+    let data_preview: String = if data.chars().count() > 80 {
+        let mut s: String = data.chars().take(80).collect();
+        s.push_str("...");
+        s
     } else {
         data.to_string()
     };
@@ -88,13 +92,26 @@ pub fn send(user_id: &str, event: &str, data: &str) {
         data: data.to_string(),
     }) {
         Ok(num_receivers) => {
-            tracing::info!(
-                user_id = %user_id,
-                event = %event,
-                data_preview = %data_preview,
-                num_receivers = num_receivers,
-                "[STREAM] event sent"
-            );
+            // High-frequency events (per-character streaming) are logged at
+            // debug level to avoid drowning the log; everything else stays
+            // at info.
+            if event == "char" {
+                tracing::debug!(
+                    user_id = %user_id,
+                    event = %event,
+                    data_preview = %data_preview,
+                    num_receivers = num_receivers,
+                    "[STREAM] event sent"
+                );
+            } else {
+                tracing::info!(
+                    user_id = %user_id,
+                    event = %event,
+                    data_preview = %data_preview,
+                    num_receivers = num_receivers,
+                    "[STREAM] event sent"
+                );
+            }
         }
         Err(_) => {
             tracing::warn!(

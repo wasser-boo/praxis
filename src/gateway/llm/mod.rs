@@ -161,9 +161,30 @@ impl LLMRouter {
                             tracing::info!(user_id = %uid, after = after, "[STREAM] finished waiting for SSE subscriber");
                             crate::dashboard::stream::send(&uid, "typing", "true");
                             tracing::info!(user_id = %uid, "[STREAM] starting Ollama real streaming");
+                            // Real per-token streaming from Ollama, but split each
+                            // incoming chunk into individual characters before
+                            // forwarding to the SSE stream. Some models (especially
+                            // thinking models like qwen3 / kimi) emit the full
+                            // answer in a single final chunk; splitting here gives
+                            // the UI a smooth typewriter-style render in all cases
+                            // without changing the underlying streaming semantics.
+                            //
+                            // We use `.chars()` (Unicode scalar values). It is safe
+                            // for arbitrary UTF-8 input — multi-byte codepoints are
+                            // never sliced mid-byte. Grapheme clusters (e.g. ZWJ
+                            // emoji sequences) may visually split for one frame
+                            // until the next char arrives; this is acceptable.
                             let result = ollama.chat_streaming(req, move |token| {
-                                tracing::info!(token = ?token, "[STREAM] on_token callback invoked");
-                                crate::dashboard::stream::send(&uid, "char", &token);
+                                if token.is_empty() { return; }
+                                if token.chars().count() == 1 {
+                                    crate::dashboard::stream::send(&uid, "char", &token);
+                                } else {
+                                    let mut buf = [0u8; 4];
+                                    for ch in token.chars() {
+                                        let s = ch.encode_utf8(&mut buf);
+                                        crate::dashboard::stream::send(&uid, "char", s);
+                                    }
+                                }
                             }).await;
                             return Ok(result?);
                         }
@@ -403,7 +424,7 @@ impl LLMRouter {
                                 if content.len() > 10000 {
                                     format!(
                                         "{}...\n[Truncated - {} bytes]",
-                                        &content[..10000],
+                                        crate::util::truncate_chars(&content, 10000),
                                         content.len()
                                     )
                                 } else {
