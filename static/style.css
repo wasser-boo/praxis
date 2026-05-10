@@ -177,7 +177,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
     box-shadow: 0 4px 24px rgba(0,0,0,0.15);
 }
 .chat-messages {
-    flex: 1; overflow-y: auto; padding: 1.5rem 1.25rem;
+    flex: 1; overflow-y: auto; overflow-x: hidden; padding: 1.5rem 1.25rem;
     display: flex; flex-direction: column; gap: 1.1rem;
     scroll-behavior: smooth;
 }
@@ -214,7 +214,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
     display: flex; flex-direction: column; align-items: center;
     gap: 0.35rem; min-width: 56px;
 }
-.chat-msg .msg-row { display: flex; align-items: flex-start; gap: 0.85rem; }
+.chat-msg .msg-row { display: flex; align-items: flex-start; gap: 0.85rem;
+ min-width: 0;
+ max-width: 100%;
+}
 .chat-msg .msg-content {
     flex: 1; min-width: 0;
     padding: 0.75rem 1rem;
@@ -326,6 +329,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
     display: flex; gap: 0.6rem; padding: 0.85rem 1rem;
     border-top: 1px solid var(--border);
     align-items: flex-end; background: var(--bg-secondary);
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
 }
 .chat-upload-btn {
     width: auto; padding: 0.55rem 0.8rem; font-size: 1.05rem;
@@ -338,6 +344,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
     font-size: 0.95rem; font-family: inherit; resize: none;
     max-height: 240px; line-height: 1.5;
     transition: border-color 0.15s, box-shadow 0.15s;
+    min-width: 0;
+    width: 0;
+    box-sizing: border-box;
 }
 .chat-input:focus {
     outline: none; border-color: var(--accent-purple);
@@ -450,6 +459,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
     padding: 0.85rem 1rem 0.85rem 1rem;
     margin: 0.6rem 0;
     overflow-x: auto;
+    max-width: 100%;
+    box-sizing: border-box;
 }
 .msg-content.markdown .code-block code {
     background: transparent; border: none; padding: 0; color: var(--text-primary);
