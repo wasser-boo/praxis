@@ -1569,19 +1569,19 @@ async fn execute_tool_call(
             })
             .to_string();
         }
-        "send_screenshot_to_discord" => {
+        "send_screenshot" => {
             let fallback_ch = ctx_data
                 .as_ref()
                 .and_then(|c| c.get("channel_id"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
+                .unwrap_or("web");
             let channel_id = args["channel_id"]
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(fallback_ch);
             let caption = args["caption"].as_str();
             let vm_name = args["vm_name"].as_str().unwrap_or("praxis-vm");
-            if channel_id == "web" {
+            if channel_id == "web" || channel_id.is_empty() {
                 match crate::tools::web_interactive::send_screenshot_to_web(
                     user_id, caption, vm_name,
                 )

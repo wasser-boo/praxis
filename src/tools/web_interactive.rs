@@ -37,6 +37,17 @@ pub async fn send_screenshot_to_web(
         channel_id: "web".to_string(),
     });
 
+    // Also stream to web dashboard so the chat UI can display it inline
+    let url_path = screenshot_path
+        .strip_prefix(&data_dir)
+        .unwrap_or(&screenshot_path)
+        .trim_start_matches('/');
+    let stream_payload = serde_json::json!({
+        "path": format!("/api/screenshots/{}", url_path),
+        "caption": caption.unwrap_or("VM Screenshot"),
+    }).to_string();
+    crate::dashboard::stream::send(user_id, "image", &stream_payload);
+
     Ok(format!(
         "Screenshot sent to web chat: {} ({})",
         screenshot_path,

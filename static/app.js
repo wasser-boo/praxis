@@ -735,6 +735,14 @@ function startChatStream() {
             showChatQuestion(inner.question_id, inner.text, inner.suggestions);
         } catch (err) { console.error('[SSE question error]', err); }
     });
+    es.addEventListener('image', (e) => {
+        console.log('[SSE] image event received');
+        try {
+            const d = JSON.parse(e.data);
+            const inner = JSON.parse(d.data);
+            addChatImage(inner.path, inner.caption);
+        } catch (err) { console.error('[SSE image error]', err); }
+    });
     es.onerror = (err) => {
         console.error('[SSE] connection error (EventSource readyState=' + es.readyState + '), reconnecting in 3s');
         stopChatStream();
@@ -923,6 +931,29 @@ function addChatMessage(type, content, extra = null) {
 /// Render a visual banner showing that the agent loop has started or stopped.
 /// This is intentionally distinct from regular chat text so the user can
 /// clearly see when the agent is doing work vs. plain conversation.
+function addChatImage(path, caption) {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+    const welcome = container.querySelector('.chat-welcome');
+    if (welcome) welcome.remove();
+    const div = document.createElement('div');
+    div.className = 'chat-msg image';
+    const botAvatar = `/api/avatar/bot?t=${Date.now()}`;
+    const botName = chatBotName || 'Praxis';
+    div.innerHTML = `<div class="msg-row">
+        <div class="msg-col">
+            <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.svg'" onclick="showAvatarModal('bot')">
+            <span class="msg-label">${escapeHtml(botName)}</span>
+        </div>
+        <div class="msg-content">
+            ${caption ? `<div style="margin-bottom:0.5rem;font-size:0.85rem;color:var(--text-secondary)">${escapeHtml(caption)}</div>` : ''}
+            <img src="${escapeHtml(path)}" style="max-width:100%;border-radius:8px;border:1px solid var(--border);cursor:pointer;" onclick="window.open('${escapeHtml(path)}','_blank')" alt="Screenshot">
+        </div>
+    </div>`;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
 function addAgentLoopBanner(kind) {
     const container = document.getElementById('chat-messages');
     if (!container) return;

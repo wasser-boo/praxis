@@ -685,10 +685,10 @@ fn get_default_tools() -> Vec<Tool> {
             is_enabled: false,
         },
         Tool {
-            name: "send_screenshot_to_discord".into(),
-            description: Some("Take a VM screenshot and send it to a Discord channel. If channel_id is omitted, sends to the originating channel. Caption is optional.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Discord channel ID. If omitted, uses the originating channel."},"caption":{"type":"string","description":"Optional caption for the screenshot"},"vm_name":{"type":"string","default":"praxis-vm"}},"required":[]}),
-            is_enabled: false,
+            name: "send_screenshot".into(),
+            description: Some("Take a VM screenshot and send it to the chat UI. If channel_id is 'web' or omitted, sends to the web dashboard chat. Otherwise sends to the specified Discord channel. Caption is optional.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"channel_id":{"type":"string","description":"Channel ID. Use 'web' or omit for web chat, otherwise a Discord channel ID."},"caption":{"type":"string","description":"Optional caption for the screenshot"},"vm_name":{"type":"string","default":"praxis-vm"}},"required":[]}),
+            is_enabled: true,
         },
         Tool {
             name: "ask_questions".into(),

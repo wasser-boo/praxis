@@ -243,6 +243,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/vnc", axum::routing::get(vnc_viewer_page))
         .route("/api/avatar/:name", axum::routing::get(get_avatar))
         .route("/api/files/:name", axum::routing::get(get_chat_file))
+        .route("/api/screenshots/*path", axum::routing::get(get_screenshot))
         .route("/api/upload-avatar", axum::routing::post(upload_avatar))
         .route("/api/upload-file", axum::routing::post(upload_chat_file))
         .nest_service("/static", static_service)
@@ -1518,6 +1519,32 @@ async fn get_chat_file(
         )),
         Err(_) => Err(StatusCode::NOT_FOUND),
     }
+}
+
+async fn get_screenshot(
+    Path(path): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+    let full_path = format!("{}/{}", data_dir, path);
+    // Security: ensure path stays under data_dir
+    let canonical = std::fs::canonicalize(&full_path).unwrap_or_default();
+    let base = std::fs::canonicalize(&data_dir).unwrap_or_default();
+    if !canonical.starts_with(&base) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let data = std::fs::read(&canonical).map_err(|_| StatusCode::NOT_FOUND)?;
+    let ct = if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if path.ends_with(".gif") {
+        "image/gif"
+    } else if path.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "application/octet-stream"
+    };
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], data))
 }
 
 async fn chat_query(
