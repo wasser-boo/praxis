@@ -89,6 +89,7 @@ const BUNDLED_ASSETS: &[Asset] = &[
     asset!("docs/SKILLS.md"),
     asset!("docs/POML_WORKFLOWS.md"),
     asset!("docs/CONTEXT_VARIABLES.md"),
+    asset!("docs/LLM_RESILIENCE.md"),
 ];
 
 #[derive(Debug, Default)]

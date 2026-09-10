@@ -14,7 +14,7 @@ impl OpenRouterProvider {
             api_key,
             model,
             base_url,
-            client: reqwest::Client::new(),
+            client: super::http::client(),
         }
     }
 }
@@ -95,15 +95,9 @@ impl LLMProvider for OpenRouterProvider {
             .header("X-Title", "Praxis")
             .json(&body)
             .send()
-            .await?;
+            .await.map_err(super::error::ProviderError::from_reqwest)?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("OpenRouter API error {}: {}", status, text);
-        }
-
-        let data: serde_json::Value = resp.json().await?;
+        let data = super::http::json(resp).await?;
         let choice = &data["choices"][0];
         let message = &choice["message"];
 

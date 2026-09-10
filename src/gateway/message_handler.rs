@@ -8,6 +8,16 @@ pub async fn handle_message(
     content: &str,
     channel_id: Option<&str>,
 ) -> anyhow::Result<String> {
+    let _task = crate::gateway::task_control::begin(user_id)?;
+    handle_message_inner(state, user_id, content, channel_id).await
+}
+
+pub(crate) async fn handle_message_inner(
+    state: &GatewayState,
+    user_id: &str,
+    content: &str,
+    channel_id: Option<&str>,
+) -> anyhow::Result<String> {
     // Route before deciding the path and before either prompt is rendered.
     let ctx = crate::gateway::prompt::prepare_runtime(state, user_id, content, None, channel_id)?;
     let max_turns = ctx.settings.max_llm_turns.unwrap_or(1);
@@ -112,6 +122,12 @@ pub async fn handle_message(
 
         let mut results = Vec::new();
         for tc in tool_calls {
+            if crate::gateway::task_control::cancellation(user_id).is_some_and(|token| token.is_cancelled()) {
+                let mut msg = crate::db::messages::Message::tool("Error: Task cancelled; tool not executed".into(), tc.id.clone());
+                msg.tool_name = Some(tc.function.name.clone());
+                state.db.add_message(user_id, &msg)?;
+                continue;
+            }
             // Validate tool exists before executing
             if !tool_names.contains(&tc.function.name) {
                 let result = format!("Error: Unknown tool '{}'. Check the tool name and try again.", tc.function.name);
@@ -410,7 +426,7 @@ async fn handle_message_agent_loop(
         }
     });
 
-    let result = crate::gateway::agent_loop::run_agent_loop(
+    let result = crate::gateway::agent_loop::run_agent_loop_in_task(
         state,
         user_id,
         content,

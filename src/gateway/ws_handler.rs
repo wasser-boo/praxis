@@ -5,6 +5,12 @@ use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 
+#[path = "ws_task.rs"]
+mod task;
+#[cfg(test)]
+#[path = "ws_task_tests.rs"]
+mod task_tests;
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum WsIncoming {
@@ -22,6 +28,8 @@ enum WsIncoming {
     },
     #[serde(rename = "compact")]
     Compact { user_id: String },
+    #[serde(rename = "stop")]
+    Stop { user_id: String },
     #[serde(rename = "ping")]
     Ping,
 }
@@ -90,11 +98,13 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                             .send(Message::Text(serde_json::to_string(&feedback).unwrap()))
                             .await;
 
-                        match crate::gateway::message_handler::handle_message(
+                        match task::handle(
                             &state,
                             &user_id,
                             &content,
                             channel_id.as_deref(),
+                            &mut sender,
+                            &mut receiver,
                         )
                         .await
                         {
@@ -176,6 +186,9 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                                     .await;
                             }
                         }
+                    }
+                    WsIncoming::Stop { user_id } => {
+                        crate::gateway::agent_loop::stop_agent_loop(&user_id).await;
                     }
                     WsIncoming::Ping => {
                         let pong = WsOutgoing::Pong;

@@ -428,6 +428,7 @@ async fn run_services(
             discord_bot_token: std::env::var("DISCORD_BOT_TOKEN").ok(),
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            openrouter_api_key: std::env::var("OPENROUTER_API_KEY").ok(),
             ollama_api_key: std::env::var("OLLAMA_API_KEY").ok(),
             llamacpp_api_key: std::env::var("LLAMACPP_API_KEY").ok(),
             minimax_api_key: std::env::var("MINIMAX_API_KEY").ok(),
@@ -457,6 +458,8 @@ async fn run_services(
     config.apply_secrets(&secrets);
     config.ensure_generated();
     config.validate()?;
+    // Fail before starting VMs/Discord when the selected provider is missing.
+    praxis::gateway::llm::LLMRouter::new(&config, &secrets).validate_configuration()?;
 
     // Enable VM tools if VM=true in config
     if config.vm_enabled {

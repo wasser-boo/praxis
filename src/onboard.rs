@@ -54,6 +54,7 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
                     || key.starts_with("OLLAMA_")
                     || key.starts_with("MINIMAX_")
                     || key.starts_with("MIMO_")
+                    || key.starts_with("OPENROUTER_")
                 {
                     if !env_lines
                         .iter()
@@ -90,6 +91,10 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
         let provider_choice = prompt_choice("Select provider", &["1", "2", "3", "4", "5", "6"], "1")?;
         select_provider(&provider_choice, &existing, &mut env_lines)?
     };
+    persist_provider_selection(&mut env_lines, &provider_name);
+    for (key, value) in &existing {
+        if key.starts_with("LLM_") { env_lines.push(format!("{key}={value}")); }
+    }
     println!();
 
     // Embedding Model (for RAG)
@@ -574,6 +579,8 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
             || line.starts_with("OLLAMA_")
             || line.starts_with("MINIMAX_")
             || line.starts_with("MIMO_")
+            || line.starts_with("OPENROUTER_")
+            || line.starts_with("LLM_")
             || line.starts_with("POML_CLI=")
         {
             content.push_str(line);
@@ -951,6 +958,11 @@ fn get_existing(
         .unwrap_or_else(|| fallback.to_string())
 }
 
+fn persist_provider_selection(lines: &mut Vec<String>, provider: &str) {
+    lines.retain(|line| !line.starts_with("USE_PROVIDER="));
+    lines.push(format!("USE_PROVIDER={provider}"));
+}
+
 fn select_provider(
     choice: &str,
     existing: &std::collections::HashMap<String, String>,
@@ -1121,6 +1133,16 @@ fn generate_random_key(length: usize) -> String {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[test]
+    fn resilience_onboarding_persists_provider_exactly_once() {
+        for initial in [vec![], vec!["USE_PROVIDER=openai".into()]] {
+            let mut lines = initial;
+            persist_provider_selection(&mut lines, "ollama");
+            persist_provider_selection(&mut lines, "ollama");
+            assert_eq!(lines, vec!["USE_PROVIDER=ollama"]);
+        }
+    }
 
     #[test]
     fn test_generate_random_key() {

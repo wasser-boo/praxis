@@ -19,6 +19,9 @@ impl ApiMode {
 pub struct Config {
     pub poml_cli: String,
     pub use_provider: String,
+    /// Explicit opt-in only: no automatic cross-provider data/cost fallback.
+    pub llm_fallback_providers: Vec<String>,
+    pub llm_resilience: crate::gateway::llm::resilience::ResilienceConfig,
     pub openai_api_key: Option<String>,
     pub openai_model: String,
     pub openai_api_base: String,
@@ -63,6 +66,9 @@ impl Config {
         Self {
             poml_cli: env::var("POML_CLI").unwrap_or_else(|_| "./poml/js/cli.cjs".to_string()),
             use_provider: env::var("USE_PROVIDER").unwrap_or_else(|_| "openai".to_string()),
+            llm_fallback_providers: env::var("LLM_FALLBACK_PROVIDERS").unwrap_or_default()
+                .split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect(),
+            llm_resilience: crate::gateway::llm::resilience::ResilienceConfig::from_env(),
             openai_api_key: env::var("OPENAI_API_KEY").ok(),
             openai_model: env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string()),
             openai_api_base: env::var("OPENAI_API_BASE")
@@ -167,6 +173,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.llm_resilience.validate()?;
         if self.gateway_api_key.len() < 16 {
             anyhow::bail!("GATEWAY_API_KEY must be at least 16 characters");
         }

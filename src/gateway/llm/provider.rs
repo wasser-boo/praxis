@@ -90,6 +90,15 @@ pub struct Usage {
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse>;
+    /// Adapters without native streaming return one complete response. Retry,
+    /// cancellation and rate-limit policy are identical for both paths.
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        _on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> anyhow::Result<ChatResponse> {
+        self.chat(request).await
+    }
     fn name(&self) -> &str;
     fn as_any(&self) -> &dyn std::any::Any;
     async fn health_check(&self) -> bool {

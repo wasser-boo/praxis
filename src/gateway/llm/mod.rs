@@ -1,5 +1,9 @@
 pub mod anthropic;
 pub mod embeddings;
+pub mod error;
+mod http;
+pub mod resilience;
+mod routing;
 pub mod llamacpp;
 pub mod mimo;
 pub mod minimax;
@@ -8,19 +12,28 @@ pub mod openai;
 pub mod openrouter;
 pub mod provider;
 mod tests;
+#[cfg(test)]
+mod resilience_tests;
+#[cfg(test)]
+mod http_tests;
+#[cfg(test)]
+mod task_tests;
 
 use provider::{ChatRequest, ChatResponse, LLMProvider};
 
 pub struct LLMRouter {
     providers: Vec<Box<dyn LLMProvider>>,
     default_provider: String,
+    fallback_providers: Vec<String>,
+    policy: resilience::ResilienceConfig,
+    gates: std::collections::HashMap<String, std::sync::Arc<resilience::ProviderGate>>,
 }
 
 impl LLMRouter {
     pub fn new(config: &crate::config::Config, secrets: &crate::db::secrets::Secrets) -> Self {
         let mut providers: Vec<Box<dyn LLMProvider>> = Vec::new();
 
-        if let Some(ref key) = secrets.openai_api_key {
+        if let Some(key) = secrets.openai_api_key.as_ref().filter(|key| !key.trim().is_empty()) {
             providers.push(Box::new(openai::OpenAIProvider::new(
                 key.clone(),
                 config.openai_model.clone(),
@@ -28,7 +41,7 @@ impl LLMRouter {
             )));
         }
 
-        if let Some(ref key) = secrets.anthropic_api_key {
+        if let Some(key) = secrets.anthropic_api_key.as_ref().filter(|key| !key.trim().is_empty()) {
             providers.push(Box::new(anthropic::AnthropicProvider::new(
                 key.clone(),
                 config.anthropic_model.clone(),
@@ -48,7 +61,7 @@ impl LLMRouter {
             config.llamacpp_api_base.clone(),
         )));
 
-        if let Some(ref key) = secrets.minimax_api_key {
+        if let Some(key) = secrets.minimax_api_key.as_ref().filter(|key| !key.trim().is_empty()) {
             providers.push(Box::new(minimax::MiniMaxProvider::new(
                 key.clone(),
                 config.minimax_model.clone(),
@@ -57,7 +70,7 @@ impl LLMRouter {
             )));
         }
 
-        if let Some(ref key) = secrets.mimo_api_key {
+        if let Some(key) = secrets.mimo_api_key.as_ref().filter(|key| !key.trim().is_empty()) {
             providers.push(Box::new(mimo::MiMoProvider::new(
                 key.clone(),
                 config.mimo_model.clone(),
@@ -66,7 +79,7 @@ impl LLMRouter {
             )));
         }
 
-        if let Some(ref key) = secrets.openrouter_api_key {
+        if let Some(key) = secrets.openrouter_api_key.as_ref().filter(|key| !key.trim().is_empty()) {
             providers.push(Box::new(openrouter::OpenRouterProvider::new(
                 key.clone(),
                 config.openrouter_model.clone(),
@@ -74,184 +87,27 @@ impl LLMRouter {
             )));
         }
 
-        Self {
-            providers,
-            default_provider: config.use_provider.clone(),
-        }
-    }
-
-    pub async fn chat(
-        &self,
-        request: ChatRequest,
-        provider: Option<&str>,
-    ) -> anyhow::Result<ChatResponse> {
-        // If vision provider/model is set, check if messages contain images
-        // and route to the vision provider instead
-        let has_images = request.messages.iter().any(|m| {
-            m.content_parts
-                .as_ref()
-                .map_or(false, |parts| parts.iter().any(|p| matches!(p, provider::ContentPart::ImageUrl { .. })))
-        });
-
-        let (effective_provider, effective_model) = if has_images {
-            let vp = request.vision_provider.as_deref().or(provider);
-            let vm = request.vision_model.as_deref();
-            if vm.is_some() || request.vision_provider.is_some() {
-                tracing::info!(
-                    "Vision content detected, routing to provider={:?}, model={:?}",
-                    vp, vm
-                );
-            }
-            (vp, vm)
-        } else {
-            (provider, None)
-        };
-
-        let provider_name = effective_provider.unwrap_or(&self.default_provider);
-
-        for p in &self.providers {
-            if p.name() == provider_name {
-                let mut req = request.clone();
-                if let Some(ref vm) = effective_model {
-                    req.model = Some(vm.to_string());
-                }
-                match p.chat(req).await {
-                    Ok(response) => return Ok(response),
-                    Err(e) => {
-                        tracing::warn!("Provider {} failed: {}", provider_name, e);
-                        break;
-                    }
-                }
+        let mut router = Self::with_providers(
+            providers, config.use_provider.clone(), config.llm_fallback_providers.clone(), config.llm_resilience.clone(),
+        );
+        // Aliases pointing at the same endpoint/account must not multiply the
+        // quota. Keys stay in this local map only and are never logged.
+        let mut accounts = std::collections::HashMap::new();
+        for (name, base, key) in [
+            ("openai", &config.openai_api_base, secrets.openai_api_key.as_deref()),
+            ("anthropic", &config.anthropic_api_base, secrets.anthropic_api_key.as_deref()),
+            ("ollama", &config.ollama_api_base, secrets.ollama_api_key.as_deref()),
+            ("llamacpp", &config.llamacpp_api_base, secrets.llamacpp_api_key.as_deref()),
+            ("minimax", &config.minimax_api_base, secrets.minimax_api_key.as_deref()),
+            ("mimo", &config.mimo_api_base, secrets.mimo_api_key.as_deref()),
+            ("openrouter", &config.openrouter_api_base, secrets.openrouter_api_key.as_deref()),
+        ] {
+            if let Some(gate) = router.gates.get_mut(name) {
+                let endpoint = reqwest::Url::parse(base).map(|url| url.origin().ascii_serialization()).unwrap_or_else(|_| base.clone());
+                *gate = accounts.entry((endpoint, key.unwrap_or("").to_string())).or_insert_with(|| gate.clone()).clone();
             }
         }
-
-        for p in &self.providers {
-            if p.name() != provider_name {
-                tracing::info!("Trying fallback provider: {}", p.name());
-                let req = request.clone();
-                // Don't override model for fallback providers
-                match p.chat(req).await {
-                    Ok(response) => {
-                        tracing::info!("Fallback to {} successful", p.name());
-                        return Ok(response);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Fallback {} failed: {}", p.name(), e);
-                    }
-                }
-            }
-        }
-
-        Err(anyhow::anyhow!("All LLM providers failed"))
-    }
-
-    pub async fn streaming_chat(
-        &self,
-        request: ChatRequest,
-        provider: Option<&str>,
-        user_id: &str,
-    ) -> anyhow::Result<ChatResponse> {
-        let provider_name = provider.unwrap_or(&self.default_provider);
-        tracing::info!(user_id = %user_id, provider_name = %provider_name, default = %self.default_provider, available = ?self.provider_names(), "[STREAM] streaming_chat called");
-
-        let ollama_stream = || {
-            let req = request.clone();
-            async move {
-                for p in &self.providers {
-                    if p.name() == "ollama" {
-                        if let Some(ollama) = p.as_any().downcast_ref::<ollama::OllamaProvider>() {
-                            let uid = user_id.to_string();
-                            let before = crate::dashboard::stream::subscriber_count(&uid);
-                            tracing::info!(user_id = %uid, before = before, "[STREAM] waiting for SSE subscriber");
-                            crate::dashboard::stream::wait_for_subscriber(&uid, 2000).await;
-                            let after = crate::dashboard::stream::subscriber_count(&uid);
-                            tracing::info!(user_id = %uid, after = after, "[STREAM] finished waiting for SSE subscriber");
-                            crate::dashboard::stream::send(&uid, "typing", "true");
-                            tracing::info!(user_id = %uid, "[STREAM] starting Ollama real streaming");
-                            // Real per-token streaming from Ollama, but split each
-                            // incoming chunk into individual characters before
-                            // forwarding to the SSE stream. Some models (especially
-                            // thinking models like qwen3 / kimi) emit the full
-                            // answer in a single final chunk; splitting here gives
-                            // the UI a smooth typewriter-style render in all cases
-                            // without changing the underlying streaming semantics.
-                            //
-                            // We use `.chars()` (Unicode scalar values). It is safe
-                            // for arbitrary UTF-8 input — multi-byte codepoints are
-                            // never sliced mid-byte. Grapheme clusters (e.g. ZWJ
-                            // emoji sequences) may visually split for one frame
-                            // until the next char arrives; this is acceptable.
-                            let result = ollama.chat_streaming(req, move |token| {
-                                if token.is_empty() { return; }
-                                if token.chars().count() == 1 {
-                                    crate::dashboard::stream::send(&uid, "char", &token);
-                                } else {
-                                    let mut buf = [0u8; 4];
-                                    for ch in token.chars() {
-                                        let s = ch.encode_utf8(&mut buf);
-                                        crate::dashboard::stream::send(&uid, "char", s);
-                                    }
-                                }
-                            }).await;
-                            return Ok(result?);
-                        }
-                    }
-                }
-                Err(anyhow::anyhow!("Ollama not available"))
-            }
-        };
-
-        // 1) If Ollama is explicitly configured, try Ollama streaming first.
-        if provider_name == "ollama" {
-            match ollama_stream().await {
-                Ok(r) => {
-                    let reply = r.content.clone().unwrap_or_default();
-                    if !reply.is_empty() {
-                        crate::dashboard::stream::send(user_id, "assistant", &reply);
-                    }
-                    return Ok(r);
-                }
-                Err(e) => {
-                    tracing::warn!(user_id = %user_id, "[STREAM] Ollama streaming failed: {}", e);
-                }
-            }
-        } else {
-            // 2) Non-Ollama provider configured — try non-streaming for that provider.
-            for p in &self.providers {
-                if p.name() == provider_name {
-                    match p.chat(request.clone()).await {
-                        Ok(r) => {
-                            let reply = r.content.clone().unwrap_or_default();
-                            if !reply.is_empty() {
-                                crate::dashboard::stream::send(user_id, "assistant", &reply);
-                            }
-                            return Ok(r);
-                        }
-                        Err(e) => {
-                            tracing::warn!("Provider {} failed: {}", provider_name, e);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Final fallback: non-streaming Ollama.
-        let resp = self.chat(request, Some("ollama")).await?;
-        let reply = resp.content.clone().unwrap_or_default();
-        if !reply.is_empty() {
-            crate::dashboard::stream::send(user_id, "assistant", &reply);
-        }
-        Ok(resp)
-    }
-
-    pub async fn health_check(&self) -> bool {
-        for p in &self.providers {
-            if p.health_check().await {
-                return true;
-            }
-        }
-        false
+        router
     }
 
     pub fn provider_names(&self) -> Vec<String> {
@@ -278,6 +134,8 @@ impl LLMRouter {
         provider: Option<&str>,
         model: Option<&str>,
     ) -> anyhow::Result<ChatWithToolsResult> {
+        let _task = crate::gateway::task_control::begin(user_id)?;
+        let cancel = crate::gateway::task_control::cancellation(user_id).unwrap_or_default();
         let max_iterations = max_iterations.unwrap_or(200);
         let mut iteration = 0;
         let mut tool_call_records: Vec<ToolCallRecord> = Vec::new();
@@ -305,7 +163,7 @@ impl LLMRouter {
                 vision_model: None,
             };
 
-            let response = self.chat(request, provider).await?;
+            let response = self.chat_controlled(request, provider, None, &cancel).await?;
 
             // Add assistant message to history
             let assistant_content = response.content.clone().unwrap_or_default();
@@ -330,6 +188,9 @@ impl LLMRouter {
 
             // Execute each tool call
             for tool_call in &tool_calls {
+                if cancel.is_cancelled() {
+                    return Err(error::ProviderError::new(error::ErrorKind::Cancelled).into());
+                }
                 let args: serde_json::Value =
                     serde_json::from_str(&tool_call.function.arguments).unwrap_or_default();
 

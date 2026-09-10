@@ -682,6 +682,14 @@ function startChatStream() {
             if (d.data) addChatMessage('feedback', d.data);
         } catch (err) { console.error('[SSE feedback error]', err); }
     });
+    es.addEventListener('stream_abort', () => {
+        // A failed/cancelled generation is never a completed reply. Remove its
+        // provisional bubble so a subsequent call cannot append duplicate text.
+        if (streamMsg) streamMsg.remove();
+        streamMsg = null;
+        streamBuffer = '';
+        stopChatTimer();
+    });
     es.addEventListener('char', (e) => {
         const t0 = performance.now();
         try {

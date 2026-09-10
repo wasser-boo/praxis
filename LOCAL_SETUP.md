@@ -11,6 +11,7 @@ cd /workspace/release
 
 Den vorhandenen Master-Key nur im Terminal eingeben. Kein erneutes Onboarding und kein `--no-discord` für den Voice-Test.
 
+- LLM-Laufzeitkorrekturen auf `testing` und noch nötige Deployment-Schritte: [docs/LLM_RESILIENCE.md](docs/LLM_RESILIENCE.md). Die laufende Release-Installation wird durch einen Git-Push nicht aktualisiert; `USE_PROVIDER` muss zum tatsächlich verwendeten Provider passen.
 - Vollständige Discord-Anleitung: [docs/DISCORD_VOICE_SETUP.md](docs/DISCORD_VOICE_SETUP.md).
 - Alle **92 Kontextfelder** mit Typ, erlaubten Werten, Default und tatsächlicher Wirkung: [docs/CONTEXT_VARIABLES.md](docs/CONTEXT_VARIABLES.md).
 - Tutor-Template: `templates/language_learning.poml` — Französisch/Japanisch, deutsche Erklärungen bei Bedarf. Auswahl: `settings.system_template=language_learning`. Dein angepasstes `system.poml` bleibt unverändert.
@@ -101,7 +102,7 @@ Für die vorbereitete OpenAI-Konfiguration:
 
 `OPENAI_MODEL=gpt-4o` ist lediglich der Projektstandard, kein geprüfter Zugriff auf dieses Modell. Ein funktionierender KI-Chat ist erst mit einem gültigen Key und zugänglichen Modell testbar.
 
-Andere unterstützte Provider können über `USE_PROVIDER` und die passenden Modell-/Endpunktfelder gewählt werden, zum Beispiel `anthropic`, `ollama`, `llamacpp`, `minimax` oder `mimo`. Achtung: Der vorhandene Wizard schreibt `USE_PROVIDER` bei einer neu ausgewählten Provider-Konfiguration nicht zuverlässig; dieses Feld danach in `.env` prüfen und gegebenenfalls selbst setzen. Die vorbereitete Auswahl „Keep current provider“ erhält es. Für Ollama/Llama.cpp muss zusätzlich ein erreichbarer lokaler Modellserver laufen; allein die Providerauswahl installiert oder startet keinen Modellserver.
+Andere unterstützte Provider können über `USE_PROVIDER` und die passenden Modell-/Endpunktfelder gewählt werden, zum Beispiel `anthropic`, `ollama`, `llamacpp`, `minimax`, `mimo` oder `openrouter`. Der aktualisierte Wizard speichert `USE_PROVIDER` auch bei neuer Auswahl zuverlässig. Ältere Installationen auf eine fehlende/falsche Zeile prüfen: Der aktualisierte Service startet nicht mit einem unregistrierten ausgewählten Provider. Für Ollama/Llama.cpp muss zusätzlich ein erreichbarer lokaler Modellserver laufen; allein die Providerauswahl installiert oder startet keinen Modellserver.
 
 ## Ollama: ursprüngliche lokale Installation
 

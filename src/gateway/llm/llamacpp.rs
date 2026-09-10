@@ -20,7 +20,7 @@ impl LlamaCppProvider {
             api_key,
             model,
             base_url,
-            client: reqwest::Client::new(),
+            client: super::http::client(),
         }
     }
 }
@@ -104,15 +104,8 @@ impl LLMProvider for LlamaCppProvider {
             }
         }
 
-        let resp = req.send().await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("llama.cpp API error {}: {}", status, text);
-        }
-
-        let data: serde_json::Value = resp.json().await?;
+        let resp = req.send().await.map_err(super::error::ProviderError::from_reqwest)?;
+        let data = super::http::json(resp).await?;
         let choice = &data["choices"][0];
         let message = &choice["message"];
 

@@ -53,7 +53,7 @@ This restores missing workflows, templates/includes, skills and icons. Existing 
 
 ```env
 # LLM Provider
-USE_PROVIDER=openai          # openai | anthropic | ollama | minimax | mimo
+USE_PROVIDER=openai          # openai | anthropic | ollama | llamacpp | minimax | mimo | openrouter
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o
 # OPENAI_API_BASE=https://api.openai.com/v1
@@ -86,6 +86,12 @@ DISCORD_APPLICATION_ID=...
 VOICE_STT_TYPE=vosk          # vosk | whisper | elevenlabs
 VOICE_TTS_TYPE=windows_sapi  # windows_sapi | elevenlabs | qwen_tts
 ```
+
+### Long-running LLM tasks
+
+LLM calls share bounded retries, provider/account concurrency limits, optional RPM/TPM pacing, and a total time budget. Set `USE_PROVIDER` to a configured provider: missing providers now fail clearly at startup. **No implicit fallbacks**; opt in with `LLM_FALLBACK_PROVIDERS`. Defaults are five attempts, one concurrent request, a 180-second attempt timeout and a 300-second total budget per LLM call. Tool effects are not replayed by retries; stop remains responsive during LLM waits.
+
+See [LLM resilience and safe rollout](docs/LLM_RESILIENCE.md) for configuration, streaming safety, tests, and the Ollama working-directory repair.
 
 ## VM Mode
 

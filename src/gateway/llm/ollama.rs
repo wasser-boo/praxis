@@ -1,4 +1,5 @@
 use super::provider::*;
+use super::error::{ErrorKind, ProviderError};
 use async_trait::async_trait;
 
 #[cfg(test)]
@@ -18,7 +19,7 @@ impl OllamaProvider {
             base_url,
             model,
             api_key,
-            client: reqwest::Client::new(),
+            client: super::http::client(),
         }
     }
 
@@ -37,7 +38,7 @@ impl OllamaProvider {
         });
         add_tools(&mut body, &request);
 
-        tracing::info!("[OLLAMA-STREAM] HTTP body: {}", serde_json::to_string(&body).unwrap_or_default());
+        tracing::debug!(message_count = messages.len(), "Ollama streaming request prepared");
 
         let mut req = self.client.post(&url).json(&body);
         if let Some(ref key) = self.api_key {
@@ -45,14 +46,8 @@ impl OllamaProvider {
                 req = req.header("Authorization", format!("Bearer {}", key));
             }
         }
-        tracing::info!("[OLLAMA-STREAM] sending HTTP POST to {}", url);
-        let resp = req.send().await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Ollama API error {}: {}", status, text);
-        }
+        let resp = req.send().await.map_err(ProviderError::from_reqwest)?;
+        let resp = super::http::checked(resp).await?;
 
         use futures_util::StreamExt;
         let mut stream = resp.bytes_stream();
@@ -60,7 +55,7 @@ impl OllamaProvider {
         tracing::info!("[STREAM] Ollama byte stream started");
 
         while let Some(chunk) = stream.next().await {
-            state.push(&chunk?, &on_token)?;
+            state.push(&chunk.map_err(ProviderError::from_reqwest)?, &on_token)?;
             if state.done {
                 break;
             }
@@ -73,13 +68,17 @@ impl OllamaProvider {
             content: if state.content.is_empty() { None } else { Some(state.content) },
             tool_calls: if has_tools { Some(state.tool_calls) } else { None },
             finish_reason: Some(if has_tools { "tool_calls" } else { "stop" }.to_string()),
-            usage: None,
+            usage: state.usage,
         })
     }
 }
 
 #[async_trait]
 impl LLMProvider for OllamaProvider {
+    async fn chat_stream(&self, request: ChatRequest, on_token: &(dyn Fn(String) + Send + Sync)) -> anyhow::Result<ChatResponse> {
+        self.chat_streaming(request, on_token).await
+    }
+
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let url = format!("{}/api/chat", self.base_url);
 
@@ -92,7 +91,7 @@ impl LLMProvider for OllamaProvider {
         });
         add_tools(&mut body, &request);
 
-        tracing::debug!(target: "ollama", "Request body: {}", serde_json::to_string_pretty(&body).unwrap_or_default());
+        tracing::debug!(message_count = messages.len(), "Ollama request prepared");
 
         let mut req = self.client.post(&url).json(&body);
         if let Some(ref key) = self.api_key {
@@ -100,16 +99,8 @@ impl LLMProvider for OllamaProvider {
                 req = req.header("Authorization", format!("Bearer {}", key));
             }
         }
-        let resp = req.send().await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Ollama API error {}: {}", status, text);
-        }
-
-        let data: serde_json::Value = resp.json().await?;
-        tracing::debug!(target: "ollama", "Response: {}", serde_json::to_string_pretty(&data).unwrap_or_default());
+        let resp = req.send().await.map_err(ProviderError::from_reqwest)?;
+        let data = super::http::json(resp).await?;
         Ok(parse_ollama_response(&data))
     }
 
@@ -185,6 +176,15 @@ fn build_ollama_messages(request: &ChatRequest) -> Vec<serde_json::Value> {
 }
 
 fn add_tools(body: &mut serde_json::Value, request: &ChatRequest) {
+    // Honor the output bound used by token reservations on both Ollama paths.
+    let mut options = serde_json::Map::new();
+    if let Some(max_tokens) = request.max_tokens {
+        options.insert("num_predict".into(), serde_json::json!(max_tokens));
+    }
+    if let Some(temperature) = request.temperature {
+        options.insert("temperature".into(), serde_json::json!(temperature));
+    }
+    if !options.is_empty() { body["options"] = serde_json::Value::Object(options); }
     if let Some(ref tools) = request.tools {
         let ollama_tools: Vec<serde_json::Value> = tools.iter().map(|t| {
             serde_json::json!({
@@ -206,6 +206,7 @@ struct OllamaStreamState {
     content: String,
     tool_calls: Vec<ToolCall>,
     done: bool,
+    usage: Option<Usage>,
 }
 
 impl OllamaStreamState {
@@ -218,7 +219,7 @@ impl OllamaStreamState {
         self.buffer.extend_from_slice(bytes);
         while let Some(end) = self.buffer.iter().position(|&byte| byte == b'\n') {
             let line: Vec<u8> = self.buffer.drain(..=end).collect();
-            self.process_line(std::str::from_utf8(&line)?, on_token)?;
+            self.process_line(std::str::from_utf8(&line).map_err(|_| ProviderError::new(ErrorKind::InvalidResponse))?, on_token)?;
             if self.done {
                 self.buffer.clear();
                 break;
@@ -230,10 +231,10 @@ impl OllamaStreamState {
     fn finish(&mut self, on_token: &impl Fn(String)) -> anyhow::Result<()> {
         if !self.done && !self.buffer.is_empty() {
             let line = std::mem::take(&mut self.buffer);
-            self.process_line(std::str::from_utf8(&line)?, on_token)?;
+            self.process_line(std::str::from_utf8(&line).map_err(|_| ProviderError::new(ErrorKind::InvalidResponse))?, on_token)?;
         }
         if !self.done {
-            anyhow::bail!("Ollama stream ended before its final done record");
+            return Err(ProviderError { cause: Some("missing final done record"), ..ProviderError::new(ErrorKind::Interrupted) }.into());
         }
         Ok(())
     }
@@ -242,11 +243,12 @@ impl OllamaStreamState {
         if line.trim().is_empty() {
             return Ok(());
         }
-        let data: serde_json::Value = serde_json::from_str(line)?;
-        if let Some(error) = data.get("error").filter(|error| !error.is_null()) {
-            anyhow::bail!("Ollama stream error: {error}");
+        let data: serde_json::Value = serde_json::from_str(line).map_err(|_| ProviderError::new(ErrorKind::InvalidResponse))?;
+        if data.get("error").is_some_and(|error| !error.is_null()) {
+            return Err(super::http::payload_error(200, &data).into());
         }
         let done = data.get("done").and_then(|value| value.as_bool()).unwrap_or(false);
+        if done { self.usage = parse_usage(&data); }
         let message = &data["message"];
         if let Some(calls) = parse_tool_calls_from_message(message) {
             self.tool_calls.extend(calls);
@@ -277,16 +279,18 @@ fn parse_ollama_response(data: &serde_json::Value) -> ChatResponse {
     let content = message["content"].as_str().map(|s| s.to_string());
     let tool_calls = parse_tool_calls_from_message(message);
 
-    if tool_calls.is_none() {
-        tracing::debug!(target: "ollama", "No tool calls found in response. Content: {:?}", content);
-    }
-
     ChatResponse {
         content,
         tool_calls,
         finish_reason: Some("stop".to_string()),
-        usage: None,
+        usage: parse_usage(data),
     }
+}
+
+fn parse_usage(data: &serde_json::Value) -> Option<Usage> {
+    let prompt = data.get("prompt_eval_count")?.as_u64()?.min(u64::from(u32::MAX)) as u32;
+    let completion = data.get("eval_count")?.as_u64()?.min(u64::from(u32::MAX)) as u32;
+    Some(Usage { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt.saturating_add(completion) })
 }
 
 fn parse_tool_calls_from_message(message: &serde_json::Value) -> Option<Vec<ToolCall>> {

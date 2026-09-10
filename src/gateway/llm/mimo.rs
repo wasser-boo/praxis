@@ -17,7 +17,7 @@ impl MiMoProvider {
             model,
             base_url,
             api_mode,
-            client: reqwest::Client::new(),
+            client: super::http::client(),
         }
     }
 }
@@ -123,21 +123,7 @@ impl MiMoProvider {
             "messages": messages,
         });
 
-        // Log the last few messages for debugging (truncated)
-        for (i, msg) in messages
-            .iter()
-            .enumerate()
-            .skip(messages.len().saturating_sub(5))
-        {
-            let s = serde_json::to_string(msg).unwrap_or_default();
-            let preview = if s.len() > 500 {
-                let end = s.floor_char_boundary(500);
-                format!("{}...", &s[..end])
-            } else {
-                s
-            };
-            tracing::info!("MiMo req msg[{}]: {}", i, preview);
-        }
+        tracing::debug!(message_count = messages.len(), "MiMo request prepared");
 
         if let Some(ref tools) = request.tools {
             body["tools"] = serde_json::json!(tools);
@@ -153,15 +139,9 @@ impl MiMoProvider {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
             .send()
-            .await?;
+            .await.map_err(super::error::ProviderError::from_reqwest)?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("MiMo API error {}: {}", status, text);
-        }
-
-        let data: serde_json::Value = resp.json().await?;
+        let data = super::http::json(resp).await?;
         let choice = &data["choices"][0];
         let message = &choice["message"];
 
@@ -208,15 +188,9 @@ impl MiMoProvider {
             .header("anthropic-version", "2023-06-01")
             .json(&body)
             .send()
-            .await?;
+            .await.map_err(super::error::ProviderError::from_reqwest)?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("MiMo Anthropic API error {}: {}", status, text);
-        }
-
-        let data: serde_json::Value = resp.json().await?;
+        let data = super::http::json(resp).await?;
         super::anthropic::parse_anthropic_response(&data)
     }
 }

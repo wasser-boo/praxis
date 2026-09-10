@@ -10,10 +10,6 @@ use tokio::sync::RwLock;
 static ACTIVE_LOOPS: once_cell::sync::Lazy<Arc<RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
-/// Global registry of stop signals for agent loops
-static STOP_SIGNALS: once_cell::sync::Lazy<Arc<RwLock<HashMap<String, bool>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
-
 /// Get a sender for injecting user input into an active agent loop
 pub async fn get_user_input_sender(user_id: &str) -> Option<tokio::sync::mpsc::UnboundedSender<String>> {
     let loops = ACTIVE_LOOPS.read().await;
@@ -22,17 +18,14 @@ pub async fn get_user_input_sender(user_id: &str) -> Option<tokio::sync::mpsc::U
 
 /// Stop an active agent loop
 pub async fn stop_agent_loop(user_id: &str) {
-    let mut signals = STOP_SIGNALS.write().await;
-    signals.insert(user_id.to_string(), true);
-    
+    crate::gateway::task_control::cancel(user_id);
     let mut loops = ACTIVE_LOOPS.write().await;
     loops.remove(user_id);
 }
 
 /// Check if a stop signal has been sent
 async fn should_stop(user_id: &str) -> bool {
-    let signals = STOP_SIGNALS.read().await;
-    signals.get(user_id).copied().unwrap_or(false)
+    crate::gateway::task_control::cancellation(user_id).is_some_and(|token| token.is_cancelled())
 }
 
 /// Register an active agent loop sender
@@ -119,10 +112,21 @@ pub async fn run_agent_loop(
     config: AgentLoopConfig,
     feedback_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> anyhow::Result<AgentLoopResult> {
+    let _task = crate::gateway::task_control::begin(user_id)?;
+    run_agent_loop_in_task(state, user_id, user_message_input, config, feedback_tx).await
+}
+
+/// The message handler already owns the per-user task guard.
+pub(crate) async fn run_agent_loop_in_task(
+    state: &GatewayState,
+    user_id: &str,
+    user_message_input: &str,
+    config: AgentLoopConfig,
+    feedback_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> anyhow::Result<AgentLoopResult> {
     let result = run_agent_loop_inner(state, user_id, user_message_input, config, feedback_tx).await;
     // Strict rendering/DB errors must not leave a ghost active loop behind.
     unregister_active_loop(user_id).await;
-    STOP_SIGNALS.write().await.remove(user_id);
     crate::dashboard::stream::send(user_id, "agent_stop", "{}");
     result
 }
@@ -450,42 +454,22 @@ async fn run_agent_loop_inner(
 
             let mut tool_call_count = 0;
             for tc in tool_calls {
-                if tool_call_count >= ctx.settings.max_tool_calls.unwrap_or(config.max_tool_calls) {
-                    tracing::warn!(user_id = %user_id, "Max tool calls reached");
-                    break;
-                }
-
-                // Validate tool exists before executing
-                if !tool_names.contains(&tc.function.name) {
-                    let result = format!("Error: Unknown tool '{}'. Check the tool name and try again.", tc.function.name);
-                    tracing::warn!(user_id = %user_id, tool = %tc.function.name, "Unknown tool called");
-                    
-                    // Add error as tool result so LLM can recover
-                    messages.push(ChatMessage {
-                        role: "tool".to_string(),
-                        content: Some(result.clone()),
-                        content_parts: None,
-                        tool_calls: None,
-                        tool_call_id: Some(tc.id.clone()),
-                        tool_name: Some(tc.function.name.clone()),
-                    });
-                    continue;
-                }
-
-                // Validate required parameters
                 let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
-                if let Err(e) = validate_tool_params(&tc.function.name, &args, &tools_for_validation) {
-                    let result = format!("Error: {}", e);
-                    tracing::warn!(user_id = %user_id, tool = %tc.function.name, error = %e, "Invalid tool parameters");
-                    
-                    messages.push(ChatMessage {
-                        role: "tool".to_string(),
-                        content: Some(result.clone()),
-                        content_parts: None,
-                        tool_calls: None,
-                        tool_call_id: Some(tc.id.clone()),
-                        tool_name: Some(tc.function.name.clone()),
-                    });
+                let skipped = if should_stop(user_id).await {
+                    Some("Task cancelled; tool not executed".to_string())
+                } else if tool_call_count >= ctx.settings.max_tool_calls.unwrap_or(config.max_tool_calls) {
+                    Some("Maximum tool calls reached; tool not executed".to_string())
+                } else if !tool_names.contains(&tc.function.name) {
+                    Some(format!("Unknown tool '{}'; tool not executed", tc.function.name))
+                } else {
+                    validate_tool_params(&tc.function.name, &args, &tools_for_validation).err().map(|e| e.to_string())
+                };
+                if let Some(reason) = skipped {
+                    // Persist every tool result, including skipped calls. The
+                    // next turn rebuilds history from DB, not this local Vec.
+                    let mut message = crate::db::messages::Message::tool(format!("Error: {reason}"), tc.id.clone());
+                    message.tool_name = Some(tc.function.name.clone());
+                    state.db.add_message(user_id, &message)?;
                     continue;
                 }
 
@@ -954,7 +938,8 @@ pub async fn generate_compaction_summary(
         vision_model: None,
     };
 
-    let response = state.llm.chat(request, None).await?;
+    let cancel = crate::gateway::task_control::cancellation(user_id).unwrap_or_default();
+    let response = state.llm.chat_controlled(request, None, None, &cancel).await?;
     let summary = response
         .content
         .unwrap_or_else(|| "Summary not available.".to_string());

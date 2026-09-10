@@ -37,13 +37,13 @@ async fn run_calls(calls: Vec<ToolCall>) -> super::ChatWithToolsResult {
     let db = crate::db::Database::new(dir.path()).unwrap();
     crate::db::tools::init_default_tools(&db).unwrap();
     let tools = crate::db::tools::to_tool_definitions(&db).unwrap();
-    let router = LLMRouter {
-        providers: vec![Box::new(ToolLoopProvider {
+    let router = LLMRouter::with_providers(
+        vec![Box::new(ToolLoopProvider {
             turn: AtomicUsize::new(0),
             calls,
         })],
-        default_provider: "offline-skill-test".into(),
-    };
+        "offline-skill-test".into(), vec![], super::resilience::ResilienceConfig::default(),
+    );
     router
         .chat_with_tools(&db, "test", vec![], tools, Some(2), None, None, None)
         .await

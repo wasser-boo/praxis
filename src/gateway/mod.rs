@@ -7,6 +7,7 @@ pub mod message_handler;
 pub mod poml;
 pub mod prompt;
 pub mod rate_limiter;
+pub mod task_control;
 pub mod templates;
 pub mod ws_handler;
 
@@ -33,6 +34,7 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
     )));
 
     let llm = Arc::new(llm::LLMRouter::new(&config, &secrets));
+    llm.validate_configuration()?;
 
     let state = GatewayState {
         db: db.clone(),
