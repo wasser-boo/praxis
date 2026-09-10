@@ -478,6 +478,8 @@ async fn execute_tool_call(
     let plugin_secrets = plugins.secrets_for_tool(&tc.function.name, &all_secrets);
 
     match tc.function.name.as_str() {
+        "search_skills" => crate::tools::search_skills::run(db, &args).await
+            .unwrap_or_else(|e| format!("Error: {e}")),
         "use_skill" => crate::tools::use_skill::run(db, &args).await
             .unwrap_or_else(|e| format!("Error: {}", e)),
         "execute_terminal" => {
@@ -551,14 +553,14 @@ async fn execute_tool_call(
                 .get("value")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            match db.merge_context(user_id, serde_json::json!({key: value})) {
+            match db.merge_context_from_agent(user_id, serde_json::json!({key: value})) {
                 Ok(_) => format!("Context key '{}' set", key),
                 Err(e) => format!("Error: {}", e),
             }
         }
         "delete_context" => {
             let key = args["key"].as_str().unwrap_or("");
-            match db.merge_context(user_id, serde_json::json!({key: null})) {
+            match db.merge_context_from_agent(user_id, serde_json::json!({key: null})) {
                 Ok(_) => format!("Context key '{}' deleted", key),
                 Err(e) => format!("Error: {}", e),
             }

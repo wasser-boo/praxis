@@ -1,5 +1,5 @@
 pub mod assets;
-pub mod cl;
+pub mod sm;
 pub mod config;
 pub mod context_cmd;
 pub mod dashboard;

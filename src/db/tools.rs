@@ -697,9 +697,15 @@ fn get_default_tools() -> Vec<Tool> {
             is_enabled: true,
         },
         Tool {
+            name: "search_skills".into(),
+            description: Some("Search the persistent skill metadata index using a few keywords. Returns at most 20 names, short descriptions, required_parameters and activation flags, never instructions. Hidden skills are excluded. A user_only result needs human selection via /skill or authenticated context controls. Refine the query rather than enumerating the catalog. Follow the POML discovery policy.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string","maxLength":512,"description":"Literal word-prefix search over names/descriptions. Empty lists a bounded first page."},"limit":{"type":"integer","minimum":1,"maximum":20,"default":5}},"required":["query"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
             name: "use_skill".into(),
-            description: Some("Load a named skill's instructions with its required parameters. Follow the returned instructions using normal tools; this does not run scripts or complete the task. Available skills and required_parameters are listed in the system prompt.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"Registered skill name, e.g. code_review, debug, tmux, poml_templates"},"parameters":{"type":"object","description":"Inputs for the skill: code_review requires code; debug requires error; tmux and poml_templates require user_request. Required values are non-empty strings.","additionalProperties":true}},"required":["name","parameters"],"additionalProperties":false}),
+            description: Some("Load one registered skill's instructions on demand. Discover matching names and required_parameters with search_skills, following the POML discovery policy. Hidden dependencies may be loaded by exact name. User-only skills cannot be activated by this tool. Follow returned instructions with normal tools; loading does not execute scripts or complete the task.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","maxLength":64,"description":"Exact registered skill name"},"parameters":{"type":"object","description":"Required non-empty string inputs advertised by discovery; additional inputs are skill-specific.","additionalProperties":true}},"required":["name","parameters"],"additionalProperties":false}),
             is_enabled: true,
         },
         Tool {

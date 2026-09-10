@@ -45,11 +45,11 @@ pub fn route_context(
     if ctx.active_state.is_none() {
         ctx.active_state = ctx.settings.active_state.clone();
     }
-    let workflow = crate::cl::load_file_in(&root.join("contexts"), workflow_name(ctx))
+    let workflow = crate::sm::load_file_in(&root.join("contexts"), workflow_name(ctx))
         .map_err(|e| anyhow::anyhow!("Workflow routing failed: {e}"))?;
     let mut value = serde_json::to_value(&*ctx)?;
     // Secret overrides are deliberately not applied to global credentials.
-    let _ = crate::cl::apply_to_context(&workflow, &mut value);
+    let _ = crate::sm::apply_to_context(&workflow, &mut value);
     crate::db::contexts::normalize_legacy_keys(&mut value);
     let mut routed: Context = serde_json::from_value(value)?;
     anyhow::ensure!(
@@ -62,6 +62,8 @@ pub fn route_context(
             "Workflow selected an undefined state: {active}"
         );
     }
+    anyhow::ensure!(routed.settings.active_skill == ctx.settings.active_skill,
+        "Persistent skill selection is user-only; workflows must use task-local use_skill instead");
     routed.settings.active_state = routed.active_state.clone();
     if routed.custom_data.is_null() {
         routed.custom_data = json!({});
@@ -156,8 +158,8 @@ pub fn base_context(ctx: &Context, input: &str) -> anyhow::Result<Value> {
         value["custom_data"] = json!({});
     }
     value["custom_data"]["user_prompt"] = json!(input);
-    if value["cl_data"].is_null() {
-        value["cl_data"] = json!({});
+    if value["sm_data"].is_null() {
+        value["sm_data"] = json!({});
     }
     value["used_tools_history_size"] = json!(ctx.settings.tool_history_limit);
     value["tag_instructions"] = json!(if ctx.settings.tags_enabled {
@@ -173,6 +175,7 @@ pub fn base_context(ctx: &Context, input: &str) -> anyhow::Result<Value> {
     value["active_skill"] = json!(ctx.settings.active_skill.as_deref().unwrap_or(""));
     value["active_skill_instructions"] = json!("");
     value["skills"] = json!([]);
+    value["skill_discovery_instructions"] = json!("");
     value["tools"] = json!([]);
     value["memory"] = json!({"facts": [], "topics": [], "preferences": {}, "variables": {}});
     value["paired_users"] = json!([]);
@@ -197,8 +200,6 @@ pub async fn build_context(
     uptime_secs: u64,
     root: &Path,
 ) -> anyhow::Result<Value> {
-    let mut registry = crate::skills::SkillRegistry::new();
-    registry.load_from_dir(&root.join("skills"))?;
     let memory = crate::db::memory::load_memory(db, &ctx.user_id)?;
     let mut tools = crate::db::tools::to_tool_definitions(db)?;
     tools.extend(plugins.tool_definitions());
@@ -223,7 +224,6 @@ pub async fn build_context(
     value["uptime"] = json!(format!("{}m {}s", uptime_secs / 60, uptime_secs % 60));
     value["paired_users_count"] = json!(paired.len());
     value["paired_users"] = json!(paired);
-    value["skills"] = registry.to_context_array();
     value["tools"] = json!(tools);
     value["memory"] = json!({"facts": memory.learned_facts, "topics": memory.last_topics, "preferences": memory.user_preferences, "variables": memory.custom_variables});
     value["conversation_text"] = json!(messages
@@ -237,17 +237,16 @@ pub async fn build_context(
     value["compaction_token_limit"] = json!(compaction_limit);
     value["compaction_percentage"] = json!(percentage(compaction_limit));
     value["message_count"] = json!(messages.len());
+    crate::skills::discovery::enrich(db, &mut value, root).await?;
     if let Some(name) = ctx.settings.active_skill.as_deref() {
         anyhow::ensure!(
             crate::db::tools::get(db, "use_skill")?.is_enabled,
             "Active skill cannot load: use_skill is disabled"
         );
-        let skill = registry
-            .get(name)
-            .ok_or_else(|| anyhow::anyhow!("Active skill is not registered: {name}"))?;
+        let skill = crate::skills::lookup_skill(db, &root.join("skills"), name)?;
         let parameters = skill.parameters_for_task(&value, input)?;
         value["active_skill_instructions"] =
-            json!(crate::skills::execute_skill(skill, &parameters).await?);
+            json!(crate::skills::execute_skill(&skill, &parameters).await?);
     }
     Ok(value)
 }
@@ -413,7 +412,7 @@ mod tests {
         assert_eq!(names, vec!["chat", "coding", "default", "self_learning", "standard"]);
         let mut explicit_selections = 0;
         for name in names {
-            let sm = crate::cl::load_file_in(&contexts, &name).unwrap();
+            let sm = crate::sm::load_file_in(&contexts, &name).unwrap();
             assert!(!sm.states.is_empty(), "{name}");
             for (state_name, state) in &sm.states {
                 let mut ctx = Context {
@@ -605,7 +604,7 @@ mod tests {
             "active_skill",
             "active_skill_instructions",
             "settings",
-            "cl_data",
+            "sm_data",
             "sm_file",
             "active_state",
             "tokens_used",

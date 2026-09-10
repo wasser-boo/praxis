@@ -1,15 +1,15 @@
-# Linux Installation mit Praxis: POML Templates, CL und set_context
+# Linux Installation mit Praxis: POML Templates, SM und set_context
 
 ## Übersicht
 
 Diese Dokumentation erklärt wie man in Praxis eine VM-gestützte Linux-Installation
-mit POML-Templates, CL-Dateien (Context Language) und `set_context` baut.
+mit POML-Templates, SM-Dateien (Statemachine) und `set_context` baut.
 
 Das System besteht aus drei Schichten:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  CL-Datei (State Machine)                               │
+│  SM-Datei (State Machine)                               │
 │  Definiert States, Transitions, Overrides               │
 │  Wechselt das system_template je nach Context-Variable  │
 ├─────────────────────────────────────────────────────────┤
@@ -19,7 +19,7 @@ Das System besteht aus drei Schichten:
 ├─────────────────────────────────────────────────────────┤
 │  set_context (Tool)                                     │
 │  Agent setzt Context-Variablen (z.B. screen="disk")     │
-│  Triggert CL-Transition → neues system_template         │
+│  Triggert SM-Transition → neues system_template         │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -30,7 +30,7 @@ Das System besteht aus drei Schichten:
 ```
 praxis/
 ├── contexts/
-│   └── linux-install.cl          # CL State Machine
+│   └── linux-install.cl          # SM State Machine
 ├── templates/
 │   ├── system.poml               # Existierendes Default-Template
 │   ├── linux/
@@ -49,18 +49,18 @@ praxis/
 
 ---
 
-## 2. CL-Datei: `contexts/linux-install.cl`
+## 2. SM-Datei: `contexts/linux-install.cl`
 
-### Was ist CL?
+### Was ist SM?
 
-CL (Context Language) ist eine State Machine die in Praxis eingebaut ist.
-Sie wird in `src/cl.rs` geparsed. Eine CL-Datei definiert:
+SM (Statemachine) ist eine State Machine die in Praxis eingebaut ist.
+Sie wird in `src/sm.rs` geparsed. Eine SM-Datei definiert:
 
 - **States** mit Variablen (z.B. welches Template zu verwenden ist)
 - **Transitions** zwischen States basierend auf Context-Bedingungen
 - **Overrides** die Context-Variablen ändern wenn Bedingungen erfüllt sind
 
-### CL-Syntax (Referenz aus `src/cl.rs`)
+### SM-Syntax (Referenz aus `src/sm.rs`)
 
 ```cl
 # Metadata
@@ -89,12 +89,12 @@ bedingung -> use ziel_state
 if bedingung -> key = value
 ```
 
-### Vollständige CL-Datei
+### Vollständige SM-Datei
 
 ```cl
 # Linux Installation Workflow fuer Void Linux
 # Der Agent navigiert Screens via set_context(screen, "...")
-# Die CL wechselt dann automatisch das system_template
+# Die SM wechselt dann automatisch das system_template
 
 @name "linux-install"
 @version "1.0"
@@ -155,7 +155,7 @@ bootloader -> done : when screen == "done"
 screen == "" -> use boot
 ```
 
-### Wie die CL funktioniert (Code-Flow)
+### Wie die SM funktioniert (Code-Flow)
 
 In `src/gateway/agent_loop.rs` passiert folgendes pro Turn:
 
@@ -164,8 +164,8 @@ JEDER TURN (in der Loop, line 293+):
 
 1. Context wird frisch aus DB geladen (line 322-325)
    → pickt set_context Änderungen vom vorigen Turn auf
-2. CL wird angewandt (line 328-337):
-   a. cl::apply_to_context() liest den frischen Context
+2. SM wird angewandt (line 328-337):
+   a. sm::apply_to_context() liest den frischen Context
    b. Evaluiert Transitions (z.B. screen == "disk" → wechselt State zu disk)
    c. Wendet State-Variablen an (z.B. system_template = "applications/cf-disk")
    d. Wendet Overrides an
@@ -179,7 +179,7 @@ JEDER TURN (in der Loop, line 293+):
 7. Nächster Turn → zurück zu Schritt 1
 ```
 
-Der entscheidende Punkt: Die CL wird **pro Turn** angewandt, nicht einmalig.
+Der entscheidende Punkt: Die SM wird **pro Turn** angewandt, nicht einmalig.
 Das bedeutet `set_context` Änderungen werden im **nächsten Turn sofort**
 berücksichtigt — der System-Prompt wechselt ohne Verzögerung.
 
@@ -203,7 +203,7 @@ Wichtigste Features:
 ### 3.1 Haupt-Template: `templates/linux/void-linux.poml`
 
 Das ist das **System-Template** das als system_prompt an das LLM gesendet wird.
-Es wird gewählt wenn `system_template = "linux/void-linux"` in der CL steht.
+Es wird gewählt wenn `system_template = "linux/void-linux"` in der SM steht.
 
 ```xml
 <poml>
@@ -266,7 +266,7 @@ Es wird gewählt wenn `system_template = "linux/void-linux"` in der CL steht.
 ### 3.2 Screen-Template Beispiel: `templates/applications/cf-disk.poml`
 
 Dieses Template wird geladen wenn `system_template = "applications/cf-disk"`
-in der CL steht (also wenn `screen == "disk"`).
+in der SM steht (also wenn `screen == "disk"`).
 
 ```xml
 <poml>
@@ -320,7 +320,7 @@ in der CL steht (also wenn `screen == "disk"`).
 ### 3.3 Task-Template: `templates/installer/linux-installers.poml`
 
 Das Task-Template wird über `task_template = installer/linux-installers`
-in der CL geladen. Es bindet das passende Screen-Template ein.
+in der SM geladen. Es bindet das passende Screen-Template ein.
 
 ```xml
 <poml>
@@ -404,8 +404,8 @@ TURN N+1:
 4. Context wird frisch aus DB geladen (line 322)
    → screen = "disk" ist jetzt im Context
    ↓
-5. CL wird angewandt (line 328):
-   - cl::apply_to_context() liest den frischen Context
+5. SM wird angewandt (line 328):
+   - sm::apply_to_context() liest den frischen Context
    - Transition: boot → disk (screen == "disk")
    - State-Vars: system_template = "applications/cf-disk"
    ↓
@@ -426,7 +426,7 @@ User: "Installiere Void Linux"
          ▼
 ┌─ Turn 1 ──────────────────────────────────────────────┐
 │ 1. Context laden (default active_state = "boot")      │
-│ 2. CL anwenden → system_template = "linux/void-linux" │
+│ 2. SM anwenden → system_template = "linux/void-linux" │
 │ 3. System-Prompt: linux/void-linux.poml               │
 │ 4. LLM sieht: "Du bist ein Linux Experte..."          │
 │ 5. LLM nimmt Screenshot → sieht Boot-Menü             │
@@ -438,7 +438,7 @@ User: "Installiere Void Linux"
          ▼
 ┌─ Turn 2 ──────────────────────────────────────────────┐
 │ 1. Context laden (screen = "disk")                    │
-│ 2. CL anwenden:                                       │
+│ 2. SM anwenden:                                       │
 │    - Transition: boot → disk (screen == "disk")       │
 │    - State-Vars: system_template = "applications/     │
 │      cf-disk"                                         │
@@ -453,7 +453,7 @@ User: "Installiere Void Linux"
          ▼
 ┌─ Turn 3 ──────────────────────────────────────────────┐
 │ 1. Context laden (screen = "filesystem")              │
-│ 2. CL anwenden:                                       │
+│ 2. SM anwenden:                                       │
 │    - Transition: disk → filesystem                    │
 │    - system_template = "applications/filesystem"      │
 │ 3. System-Prompt: applications/filesystem.poml        │
@@ -465,9 +465,9 @@ User: "Installiere Void Linux"
        (... weiter bis bootloader → done ...)
 ```
 
-### 4.4 Alternativer Ansatz: Ohne CL Transitions
+### 4.4 Alternativer Ansatz: Ohne SM Transitions
 
-Falls du die CL-Transitions NICHT nutzen willst, kannst du auch
+Falls du die SM-Transitions NICHT nutzen willst, kannst du auch
 direkt `system_template` über `set_context` setzen:
 
 ```
@@ -501,14 +501,14 @@ aus dem Context in das POML-Template injiziert:
 | `{{time}}` | string | Aktuelle Zeit |
 | `{{user_name}}` | string | Username |
 | `{{path}}` | string | Working Directory |
-| `{{active_state}}` | string | Aktiver CL-State |
+| `{{active_state}}` | string | Aktiver SM-State |
 | `{{screen}}` | string | Screen-Wert (von set_context) |
 | `{{skills}}` | array | Verfügbare Skills |
 | `{{tools}}` | array | Verfügbare Tools |
 | `{{memory}}` | object | Gespeicherte Fakten/Preferences |
 | `{{custom_data}}` | object | Custom Context Data |
 
-Zusätzlich werden alle State-Variablen aus der CL injiziert
+Zusätzlich werden alle State-Variablen aus der SM injiziert
 (z.B. `system_template`, `task_template`).
 
 ### 5.2 Conditional Sections
@@ -612,10 +612,10 @@ Der LLM sieht dann:
 
 ## 7. Setup-Anleitung
 
-### 7.1 CL-Datei erstellen
+### 7.1 SM-Datei erstellen
 
 ```bash
-# Erstelle die CL-Datei
+# Erstelle die SM-Datei
 cat > contexts/linux-install.cl << 'EOF'
 # (Inhalt aus Abschnitt 2)
 EOF
@@ -633,14 +633,14 @@ mkdir -p templates/applications
 # (Inhalt aus Abschnitt 3)
 ```
 
-### 7.3 CL aktivieren
+### 7.3 SM aktivieren
 
 Über die Praxis CLI oder das Dashboard:
 
 ```bash
 # Via CLI
 praxis run
-# Dann im Dashboard: Settings → CL File → "linux-install.cl"
+# Dann im Dashboard: Settings → SM File → "linux-install.cl"
 ```
 
 Oder via set_context:
@@ -684,9 +684,9 @@ get_context()
 praxis vm status
 ```
 
-### CL-Datei validieren
+### SM-Datei validieren
 
-Die CL wird beim Laden geparst. Fehler werden geloggt:
+Die SM wird beim Laden geparst. Fehler werden geloggt:
 ```
 # Logs anzeigen
 praxis service logs
@@ -724,7 +724,7 @@ DEBUG Rendered system prompt (first 2000 chars): ...
                        │
                        ▼
 ┌──────────────────────────────────────────────────────────┐
-│               CL: linux-install.cl                       │
+│               SM: linux-install.cl                       │
 │  1. Lade Context (screen="", active_state="boot")        │
 │  2. Auto-Regel → State "boot"                            │
 │  3. State-Vars: system_template = "linux/void-linux"     │
@@ -750,7 +750,7 @@ DEBUG Rendered system prompt (first 2000 chars): ...
                        │
                        ▼
 ┌──────────────────────────────────────────────────────────┐
-│               CL: Nächster Turn                          │
+│               SM: Nächster Turn                          │
 │  1. Context laden (screen="disk")                        │
 │  2. Transition: boot → disk (screen == "disk")           │
 │  3. State-Vars: system_template = "applications/cf-disk" │
@@ -771,11 +771,11 @@ DEBUG Rendered system prompt (first 2000 chars): ...
 
 ### Kernprinzipien
 
-1. **CL steuert das Template**: Die CL-Datei entscheidet welches
+1. **SM steuert das Template**: Die SM-Datei entscheidet welches
    POML-Template als System-Prompt gerendert wird.
 
 2. **set_context triggert Wechsel**: Der Agent setzt die Context-Variable
-   "screen" → die CL erkennt die Änderung → wechselt den State →
+   "screen" → die SM erkennt die Änderung → wechselt den State →
    ändert das system_template.
 
 3. **POML enthält die Anweisungen**: Jedes Screen-Template enthält

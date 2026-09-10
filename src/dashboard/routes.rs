@@ -915,7 +915,7 @@ async fn get_sm_file(
     Path(name): Path<String>,
 ) -> Result<String, StatusCode> {
     let _ = state;
-    let path = crate::cl::resolve_file_in(std::path::Path::new("contexts"), &name).map_err(|_| StatusCode::NOT_FOUND)?;
+    let path = crate::sm::resolve_file_in(std::path::Path::new("contexts"), &name).map_err(|_| StatusCode::NOT_FOUND)?;
     std::fs::read_to_string(path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
@@ -925,7 +925,7 @@ async fn save_sm_file(
     Json(update): Json<SmFileUpdate>,
 ) -> Result<String, StatusCode> {
     let _ = state;
-    crate::cl::save_file_in(std::path::Path::new("contexts"), &name, &update.content).map_err(|_| StatusCode::BAD_REQUEST)?;
+    crate::sm::save_file_in(std::path::Path::new("contexts"), &name, &update.content).map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok("SM file saved".to_string())
 }
 
@@ -1540,9 +1540,9 @@ async fn get_sm_info(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let ctx = state.db.load_context(&user_id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let templates: Vec<String> = ctx.active_templates.clone();
-    let sm_data = if ctx.cl_data.is_object() {
+    let sm_data = if ctx.sm_data.is_object() {
         let mut flat = serde_json::Map::new();
-        for (k, v) in ctx.cl_data.as_object().unwrap() {
+        for (k, v) in ctx.sm_data.as_object().unwrap() {
             if !v.is_null() {
                 flat.insert(k.clone(), v.clone());
             }
@@ -1557,7 +1557,6 @@ async fn get_sm_info(
         "active_skill": ctx.settings.active_skill,
         "active_state": ctx.active_state,
         "active_templates": templates,
-        "cl_data": sm_data,
         "sm_data": sm_data,
     })))
 }

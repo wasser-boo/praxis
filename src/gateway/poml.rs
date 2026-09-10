@@ -96,7 +96,13 @@ pub(crate) async fn render_strict_candidate(
     let cli = std::env::var("POML_CLI")
         .context("Set POML_CLI to the installed Microsoft POML JavaScript CLI path")?;
     let context_file = NamedTempFile::new()?;
-    std::fs::write(context_file.path(), serde_json::to_vec(context)?)?;
+    // Canonical public/saved JSON is sm_data. Retain a render-only alias so
+    // existing user-owned POML templates do not break during an upgrade.
+    let mut render_context = context.clone();
+    if let Some(data) = context.get("sm_data") {
+        render_context["cl_data"] = data.clone();
+    }
+    std::fs::write(context_file.path(), serde_json::to_vec(&render_context)?)?;
     let mut command = tokio::process::Command::new("node");
     let _preload = if let Some(destination) = destination {
         let preload = tempfile::Builder::new().suffix(".cjs").tempfile()?;

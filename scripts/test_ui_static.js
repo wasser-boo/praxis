@@ -42,4 +42,7 @@ for (const needle of [
   assert(css.includes(needle), `CSS missing expected rule fragment: ${needle}`);
 }
 
+assert(js.includes("function contextSmData(ctx)"), 'canonical workflow data helper missing');
+assert(js.includes("'sm_data'"), 'UI must prefer sm_data over legacy data');
+assert(!html.includes('cl-status') && !css.includes('.cl-badge'), 'legacy workflow DOM/CSS identifiers remain');
 console.log('test_ui_static: ok');

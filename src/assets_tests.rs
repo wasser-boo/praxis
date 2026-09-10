@@ -164,7 +164,7 @@ fn onboarding_assets_every_installed_workflow_state_resolves_its_template() {
     let dir = tempfile::tempdir().unwrap();
     install(dir.path(), false).unwrap();
     for asset in BUNDLED_ASSETS.iter().filter(|a| a.path.ends_with(".sm")) {
-        let sm = crate::cl::load_file_in(&dir.path().join("contexts"), asset.path).unwrap();
+        let sm = crate::sm::load_file_in(&dir.path().join("contexts"), asset.path).unwrap();
         assert!(!sm.states.is_empty());
         for state in sm.states.values() {
             if let Some(name) = state.variables.get("settings.system_template") {

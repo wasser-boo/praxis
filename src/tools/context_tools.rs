@@ -4,11 +4,12 @@ pub fn set_context_value(
     key: &str,
     value: &str,
 ) -> anyhow::Result<()> {
-    let key = crate::db::contexts::canonical_context_key(key);
-    if key.contains('.') || matches!(key, "system_template" | "active_skill") {
-        let key = if key.contains('.') { key.to_string() } else { format!("settings.{key}") };
+    let canonical = crate::db::contexts::canonical_context_key(key);
+    let key = canonical.as_ref();
+    if key.contains('.') || matches!(key, "system_template" | "active_skill" | "sm_data") {
+        let key = if matches!(key, "system_template" | "active_skill") { format!("settings.{key}") } else { key.to_string() };
         let value = crate::context_cmd::parse_value(value)?;
-        db.merge_context(user_id, serde_json::json!({key: value}))?;
+        db.merge_context_from_agent(user_id, serde_json::json!({key: value}))?;
         return Ok(());
     }
     let mut ctx = db.load_context(user_id)?;
@@ -55,10 +56,11 @@ pub fn delete_context_value(
     user_id: &str,
     key: &str,
 ) -> anyhow::Result<()> {
-    let key = crate::db::contexts::canonical_context_key(key);
-    if key.contains('.') || matches!(key, "system_template" | "active_skill") {
-        let key = if key.contains('.') { key.to_string() } else { format!("settings.{key}") };
-        db.merge_context(user_id, serde_json::json!({key: null}))?;
+    let canonical = crate::db::contexts::canonical_context_key(key);
+    let key = canonical.as_ref();
+    if key.contains('.') || matches!(key, "system_template" | "active_skill" | "sm_data") {
+        let key = if matches!(key, "system_template" | "active_skill") { format!("settings.{key}") } else { key.to_string() };
+        db.merge_context_from_agent(user_id, serde_json::json!({key: null}))?;
         return Ok(());
     }
     let mut ctx = db.load_context(user_id)?;

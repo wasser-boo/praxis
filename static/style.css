@@ -139,17 +139,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
 }
 @keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-.cl-status-bar {
+.sm-status-bar {
     display: flex; gap: 0.4rem; margin-bottom: 0.75rem; flex-wrap: wrap; align-items: center; flex: 0 0 auto;
     padding: 0.55rem 0.85rem; background: var(--bg-tertiary);
     border-radius: 10px; border: 1px solid var(--border);
 }
-.cl-badge {
+.sm-badge {
     font-size: 0.72rem; font-weight: 600; padding: 0.22rem 0.65rem; border-radius: 6px;
     background: rgba(124,77,255,0.15); color: var(--accent-purple);
 }
-.cl-badge.template { background: rgba(0,217,255,0.1); color: var(--accent-cyan); }
-.cl-badge.vars { background: rgba(0,255,136,0.1); color: var(--success); }
+.sm-badge.template { background: rgba(0,217,255,0.1); color: var(--accent-cyan); }
+.sm-badge.vars { background: rgba(0,255,136,0.1); color: var(--success); }
 
 /* Agent banner avatars (the round pair on the right of the banner) */
 .avatar-sm {
@@ -385,7 +385,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
   body.chat-conversations-open .chat-sidebar::after { content: ''; position: fixed; top: 44px; left: min(82vw, 320px); right: 0; bottom: 0; background: rgba(0,0,0,0.35); pointer-events: none; }
   .chat-app, .content.chat-expanded .chat-app { flex-direction: column; height: calc(100dvh - 44px); min-height: 0; overflow: hidden; }
   .chat-main { padding: 0; min-height: 0; height: 100%; overflow: hidden; }
-  .cl-status-bar { margin: 0.5rem 0.5rem 0.4rem; max-height: 76px; overflow-y: auto; }
+  .sm-status-bar { margin: 0.5rem 0.5rem 0.4rem; max-height: 76px; overflow-y: auto; }
   .agent-banner { margin: 0; border-radius: 0; flex-shrink: 0; }
   .chat-container { border-left: 0; border-right: 0; border-bottom: 0; border-radius: 0; min-height: 0; }
   .avatar-sm, .msg-avatar { width: 40px; height: 40px; border-radius: 10px; }
@@ -419,7 +419,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
 [data-theme="light"] .chat-sidebar { background: #ffffff; }
 [data-theme="light"] .chat-container { background: #ffffff; }
 [data-theme="light"] .chat-msg.assistant .msg-content { background: #f0f1f5; border: 1px solid var(--border); }
-[data-theme="light"] .cl-status-bar { background: #eef0f5; }
+[data-theme="light"] .sm-status-bar { background: #eef0f5; }
 [data-theme="light"] .agent-banner { background: #ffffff; }
 [data-theme="light"] .modal-overlay { background: rgba(255,255,255,0.7); }
 [data-theme="light"] .chat-msg.feedback { background: rgba(255,170,0,0.08); }

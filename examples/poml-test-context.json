@@ -124,7 +124,7 @@
       "output_format": "One suspenseful sentence"
     }
   },
-  "cl_data": {"note": "Synthetic workflow namespace; cl_data is not renamed"},
+  "sm_data": {"note": "Synthetic canonical statemachine data"},
   "memory": {"facts": ["MEMORY_FACT_SENTINEL: learner requested gentle corrections"], "preferences": {"explanation_language": "German"}, "topics": ["introductions"], "variables": {"last_lesson": "greetings"}},
   "time": "2000-01-01 12:00:00",
   "path": "/synthetic/project",

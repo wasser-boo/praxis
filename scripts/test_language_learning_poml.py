@@ -31,7 +31,7 @@ if args.context_db:
     saved = json.loads(rows[0][0])
     cases.append(('saved deployment context (unchanged)', saved, None))
 else:
-    saved = {'settings': {}, 'custom_data': {}, 'cl_data': {}}
+    saved = {'settings': {}, 'custom_data': {}, 'sm_data': {}}
 for mode in ('chat', 'agent'):
     for label, value in [('absent', None), ('empty', ''), ('French', 'Bonjour, aide-moi en allemand.'), ('Japanese', '日本語を練習したいです。')]:
         context = copy.deepcopy(saved)

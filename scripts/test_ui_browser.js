@@ -89,7 +89,7 @@ function makeServer() {
       { role: 'tool', tool_name: 'fixture_tool', content: 'tool output '.repeat(30) },
     ], message_count: 3, total_tokens: 42 });
     if (url.pathname === '/api/chat/send' && req.method === 'POST') return json(res, { type: 'queued' });
-    if (url.pathname === '/api/sm/default' || url.pathname === '/api/cl/default') return json(res, { sm_file: 'standard.sm', active_state: 'routing', system_template: 'language_instructor', active_skill: 'poml_templates', active_templates: [], cl_data: { mode: 'fixture' } });
+    if (url.pathname === '/api/sm/default' || url.pathname === '/api/cl/default') return json(res, { sm_file: 'standard.sm', active_state: 'routing', system_template: 'language_instructor', active_skill: 'poml_templates', active_templates: [], sm_data: { mode: 'fixture' } });
     if (url.pathname === '/api/agent/status/default') return json(res, { active: false });
     if (url.pathname === '/api/chat/stream/default') {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
@@ -238,9 +238,9 @@ async function runViewport(browser, baseURL, width, height, theme = 'dark') {
 
   await page.click('[data-tab="chat"]');
   await page.waitForSelector('.chat-container');
-  await page.waitForFunction(() => document.querySelector('#cl-status-temps')?.textContent === 'System: language_instructor');
-  assert.strictEqual(await page.locator('#cl-status-skill').textContent(), 'Skill: poml_templates');
-  assert((await page.locator('#cl-status-vars').textContent()).includes('fixture'), 'canonical cl_data not displayed');
+  await page.waitForFunction(() => document.querySelector('#sm-status-temps')?.textContent === 'System: language_instructor');
+  assert.strictEqual(await page.locator('#sm-status-skill').textContent(), 'Skill: poml_templates');
+  assert((await page.locator('#sm-status-vars').textContent()).includes('fixture'), 'canonical sm_data not displayed');
   await page.evaluate(() => {
     addChatMessage('user', 'user-long-' + 'x'.repeat(220));
     addChatMessage('assistant', 'assistant markdown with a long token ' + 'y'.repeat(220) + '\n\n```txt\n' + 'z'.repeat(160) + '\n```');

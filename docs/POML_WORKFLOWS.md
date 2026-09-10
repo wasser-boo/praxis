@@ -11,7 +11,7 @@
 
 Both runtime paths use this preparation. Agent iterations reload persisted changes before subsequent rendering. Missing/malformed explicit workflows or templates are errors, not permission to use a different prompt silently. Preview shares the context builder and does not save its routing changes. Secrets are not part of the builder.
 
-`sm_file` is canonical in saved/output JSON. Old `cl_file` and `settings.cl_file` inputs are normalized before merging; **`cl_data` is deliberately unchanged**. A settings-level workflow selection wins over the root-level one.
+`sm_file` and `sm_data` are canonical in saved/output JSON. Old `cl_file`, `settings.cl_file`, `cl_data` and dotted `cl_data.*` inputs are normalized before merging without losing workflow data. The renderer retains `cl_data` only as a compatibility alias for existing user-owned POML. A settings-level workflow selection wins over the root-level one.
 
 ## Built-in profiles
 
@@ -85,11 +85,11 @@ Each primary persona imports a JSON blueprint from `templates/blueprints/` and r
 }
 ```
 
-Save overrides at `custom_data.semantic_blueprint`, or use `cl_data.semantic_blueprint` for a workflow-provided contract. The custom-data object takes precedence over the workflow object; the selected override merges with the persona defaults. `action_to_complete` merges by field; other arrays/fields replace their defaults. The blueprint is task data, not authority to bypass permissions. It is not printed to the user unless requested.
+Save overrides at `custom_data.semantic_blueprint`, or use `sm_data.semantic_blueprint` for a workflow-provided contract. The custom-data object takes precedence over the workflow object; the selected override merges with the persona defaults. `action_to_complete` merges by field; other arrays/fields replace their defaults. The blueprint is task data, not authority to bypass permissions. It is not printed to the user unless requested.
 
 Templates ask for private planning/checking and concise public plans, assumptions, evidence and results—not exposed chain-of-thought. Simple questions still receive direct answers. This is a structured prompt/task contract, not a modification of the model's underlying inference algorithm or a guarantee of correctness.
 
-`shared/runtime.poml` advertises the current input, selected workflow/template/skill, registered skills and required parameters, enabled tools, and **this user's** facts, preferences, topics and memory variables. Only successful memory tool results justify saying information was saved. Tool descriptions and old memories are not new authorization.
+`shared/runtime.poml` advertises the current input, selected workflow/template/skill, the bounded metadata candidates chosen by the [POML discovery policy](SKILLS.md#discovery-belongs-to-poml), enabled tools, and **this user's** facts, preferences, topics and memory variables. Only successful memory tool results justify saying information was saved. Tool descriptions and old memories are not new authorization.
 
 ## Actual SM grammar
 
@@ -120,7 +120,7 @@ Conditions support dotted paths, comparisons, `=~` / `!~` regexes and quote-awar
 
 ## Repair an incomplete onboarding installation
 
-Older onboarding code installed only the previous template list and created the obsolete `contextlanguage/` directory; it omitted the new includes, `contexts/standard.sm`, native skills and bitmap icons. This caused the first paired message to fail with `Workflow routing failed: CL IO Error: No such file or directory` and the logo to return 404. Changing `sm_file` does not create the missing file.
+Older onboarding code installed only the previous template list and created the obsolete `contextlanguage/` directory; it omitted the new includes, `contexts/standard.sm`, native skills and bitmap icons. This caused the first paired message to fail with `Workflow routing failed: SM IO Error: No such file or directory` and the logo to return 404. Changing `sm_file` does not create the missing file.
 
 Use the **updated binary**, not interactive onboarding, to repair the working directory used by `praxis run`:
 

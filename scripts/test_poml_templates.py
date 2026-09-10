@@ -58,7 +58,11 @@ def main():
                     output = json.loads(result.stdout)['messages']
                     assert isinstance(output, str) and output.strip(), 'Empty/non-text output'
                     if label in ('full', 'chat'):
-                        if name == 'compaction.poml':
+                        if name == 'discovery/skills.poml':
+                            plan = json.loads(output)
+                            assert plan['names'] == [] and plan['queries'] == []
+                            assert 'search_skills' in plan['instructions']
+                        elif name == 'compaction.poml':
                             assert 'CONVERSATION_SENTINEL' in output
                         elif name != 'shared/blueprint.poml' and name != 'shared/task_inputs.poml':
                             assert 'POML_CURRENT_INPUT_SENTINEL' in output, 'Current user input was omitted'

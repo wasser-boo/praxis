@@ -4,7 +4,7 @@ This reference covers all **11 `Context` fields and 82 `ContextSettings` fields*
 
 ## Storage, types, defaults, and safe editing
 
-The active deployment is `/workspace/release`. Its context is stored in `data/praxis.db`, in the `contexts` table's JSON `data` column. The `contexts/` and `contextlanguage/` directories contain optional workflow/preset files; simply editing a JSON file there does **not** update a saved database context. Workflows run before rendering on both message paths. Select them through `sm_file` (or the higher-priority `settings.sm_file`); the default is `standard`. Legacy `cl_file` inputs are normalized to `sm_file`, but `cl_data` is unchanged.
+The active deployment is `/workspace/release`. Its context is stored in `data/praxis.db`, in the `contexts` table's JSON `data` column. The `contexts/` and `contextlanguage/` directories contain optional workflow/preset files; simply editing a JSON file there does **not** update a saved database context. Workflows run before rendering on both message paths. Select them through `sm_file` (or the higher-priority `settings.sm_file`); the default is `standard`. Legacy `cl_file` and `cl_data` inputs are normalized to `sm_file` and `sm_data`. Old saved workflow data is preserved; normal saves/output use only the canonical names.
 
 Use the dashboard context editor or `/context` rather than editing SQLite while Praxis is running. In Discord, select `/context` and put the following in its **command** argument. The web chat/TUI accept the complete slash command:
 
@@ -20,7 +20,7 @@ Use the dashboard context editor or `/context` rather than editing SQLite while 
 - JSON booleans are `true`/`false`, not strings or `1`/`0`. Arrays must be JSON arrays. Quote numeric Discord IDs because these fields require strings.
 - A dotted update changes only that leaf. Dashboard and `/context` updates recursively merge JSON objects; arrays/scalars replace the addressed value. Prefer precise dotted updates, and back up before broad changes.
 - `null` is allowed only for optional fields or arbitrary JSON. `/context unset` writes `null`; it does not remove the key or reset a non-optional field to its default.
-- Unknown top-level and `settings` keys are discarded during Rust deserialization. Put extension values in `custom_data` or `cl_data`, not arbitrary root/settings keys.
+- Unknown top-level and `settings` keys are discarded during Rust deserialization. Put extension values in `custom_data` or `sm_data`, not arbitrary root/settings keys.
 - **Defaults below are for newly created contexts.** Defaults apply when fields are absent, not when an explicit value is present. Four partial-JSON exceptions are listed below.
 - **Allowed values:** Rust enforces JSON types and integer representability. Most strings and numeric settings have no additional central validation. A listed operational choice/range can therefore be required by the consumer even if the editor accepts other values. Provider-specific models, voices, languages, and credentials are validated by that provider, not by saving the context.
 - `I32` means integer **−2,147,483,648 through 2,147,483,647**. `Usize` means integer **0 through 18,446,744,073,709,551,615 on this 64-bit deployment**; use practical small values. JSON numbers passed through a browser may lose precision above 2^53−1.
@@ -49,11 +49,11 @@ If the entire `settings` object is absent, the new-context defaults are used ins
 | `mode` | string | Operational values `"agent"`, `"chat"`; other strings are stored but have no defined mode semantics | `"agent"` | Passed to prompts. It does not by itself select the multi-turn path or reliably disable tools; `max_llm_turns` selects the path. |
 | `username` | string or null | Display text or `null` | `null` | Display name; runtime POML normally falls back to `"User"`. Not a credential or identity key. |
 | `sm_file` | string or null | Relative workflow name under `contexts/`, or `null`; `.sm`/`.cl` extension may be omitted | `null` → `standard` | Fallback workflow selection if `settings.sm_file` is null. Runs before rendering on both runtime paths. Legacy `cl_file` is accepted on input, never emitted. |
-| `active_state` | string or null | State name defined by the selected workflow, or `null` | `null` | Root workflow state used by the CL engine and dashboard. Distinct from the duplicate field under settings. |
+| `active_state` | string or null | State name defined by the selected workflow, or `null` | `null` | Root workflow state used by the SM engine and dashboard. Distinct from the duplicate field under settings. |
 | `active_templates` | array of strings | Template names, e.g. `["tasks/plan"]`; `[]` allowed | `[]` | Root list exposed by dashboard workflow endpoints. Not the same as the settings template stack; neither replaces `settings.system_template`. |
 | `settings` | object | The 82 documented settings below; do not set to null | New-context defaults | Typed per-context configuration. Prefer dotted updates to individual fields. |
 | `custom_data` | JSON | Prefer an object, or `null`; arbitrary extension keys/JSON values | `null` | Application/plugin data and tool history. Exposed to POML; null is normalized to `{}` for system rendering. Non-object values can break consumers. |
-| `cl_data` | JSON | Prefer an object, or `null`; arbitrary workflow-specific JSON | `null` | Workflow data namespace, supports dotted updates, exposed to POML. |
+| `sm_data` | JSON | Prefer an object, or `null`; arbitrary workflow-specific JSON | `null` | Canonical statemachine data namespace; supports dotted updates and POML. Legacy `cl_data`/`cl_data.*` inputs are accepted; canonical values win conflicts. |
 | `session_id` | string | `""` or `"default"`, or a session ID created through session commands; avoid the reserved `:::` separator | `""` | Selects the session. Non-default rows use `user_id:::session_id`; the base row points to the current session. Use session commands rather than manually editing IDs. |
 
 ## Voice: input, output, and Discord
@@ -148,7 +148,7 @@ These settings do not affect the selected ElevenLabs backend unless RVC is enabl
 |---|---|---|---|---|
 | `settings.system_template` | string or null | Existing name relative to `templates/`, **without `.poml`**; e.g. `"standard"`, `"language_instructor"`, `"roles/researcher"`; null → `"standard"` | `null` | System POML selected by both message paths after routing. Invalid/missing explicit selections error instead of falling back. Empty string, traversal and absolute paths are invalid. |
 | `settings.sm_file` | string or null | Relative workflow name under `contexts/`, or `null`; `.sm`/`.cl` extension can be omitted | `null` | Workflow override on both message paths; takes precedence over root `sm_file`. `.sm` is preferred to legacy `.cl`. A malformed `.sm` is not hidden by a fallback. Legacy `settings.cl_file` updates are normalized before merging. |
-| `settings.active_skill` | string or null | Registered skill name, or `null` for no active skill | `null` | `/skill skillname:NAME` selects persistent instructions for subsequent tasks; `off` clears. The current raw task supplies required code/error/user_request arguments. Does not execute scripts or enable disabled tools. |
+| `settings.active_skill` | string or null | Registered skill name, or `null` for no active skill | `null` | `/skill skillname:NAME` selects persistent instructions for subsequent tasks; `off` clears. The current raw task supplies required code/error/user_request arguments. Does not execute scripts or enable disabled tools. Persistent selection is human-only; agent context tools and SM transitions cannot change it. |
 | `settings.active_state` | string or null | Workflow state name or `null` | `null` | Compatibility state marker synchronized with root `active_state` when shared workflow routing runs. |
 | `settings.active_templates` | array of strings | Template names without `.poml`, or `[]` | `[]` | Workflow stack modified by push/pop/next actions and tags. Does not directly select the system template. |
 | `settings.current_template` | string | Member of the settings template stack, or `""` | `""` | Cursor used by `agent_next`; not the system POML selection. |
@@ -208,7 +208,8 @@ The complete synthetic render fixture is [`examples/poml-test-context.json`](../
 | `system_info` | String | Both system paths; `Praxis v<version>`. |
 | `time` | Local datetime string | Both system paths; `YYYY-MM-DD HH:MM:SS`. |
 | `path` | Path string | Non-empty `settings.path`, otherwise process cwd, consistently across the shared builder. Metadata does not change cwd. |
-| `skills` | Array of `{name: string, description: string, required_parameters: string[]}` | Loaded from local skill directories; `[]` if none. Both system paths. See [Skills](SKILLS.md) for the `use_skill` input contract. |
+| `skills` | Array of bounded metadata summaries | Candidates selected by the POML discovery plan, at most 20; default `[]`, **not the complete catalog**. Contains name, description, required_parameters, skill_hidden and user_only. Instructions load only on use. See [Skills](SKILLS.md). |
+| `skill_discovery_instructions` | String | Discovery guidance rendered from `templates/discovery/skills.poml` (or the context-selected variant). Shown by the shared runtime include in agent mode. |
 | `tools` | Array of `{name, description, parameters}` | Enabled DB tools plus registered plugin tools, shared by both runtime paths and preview. Schemas describe capabilities, not permission to perform arbitrary actions. |
 | `active_skill` | Skill-name string | Selected skill, or `""` when off. |
 | `active_skill_instructions` | String | Strictly rendered instructions using the current task, or `""`. Runtime also appends these separately so a custom system template cannot accidentally omit them. Loading does not mean execution. |
@@ -224,7 +225,7 @@ The complete synthetic render fixture is [`examples/poml-test-context.json`](../
 | `memory.preferences` | Object | Preference-name → arbitrary JSON value mappings. Empty object when none. |
 | `memory.variables` | Object | Arbitrary named JSON memory values. Empty object when none. |
 | `custom_data` | JSON, operationally object | Saved custom data, normalized from null to `{}`. Not flattened into top-level variables. |
-| `cl_data` | JSON, operationally object | Saved workflow data, normalized from null to `{}`. |
+| `sm_data` | JSON, operationally object | Saved statemachine data, normalized from null to `{}`. Old POML can still read a renderer-only `cl_data` compatibility alias; public/saved context JSON uses `sm_data`. |
 | `used_tools_history_size` | Non-negative integer | Both system paths; alias for `settings.tool_history_limit` (0 = no retained entries). |
 | `active_state` | State-name string | Routed root state (settings fallback); `""` when unset. |
 | `tag_instructions` | Instruction string | Tag syntax when `settings.tags_enabled` is true; otherwise `""`. |
@@ -253,7 +254,7 @@ The shared builder also supplies these metadata variables. Dedicated compaction 
 
 ## Built-in custom-data and workflow namespaces
 
-There is no finite list of user/plugin-defined keys: `custom_data` and `cl_data` are explicitly open JSON namespaces. Their allowed values are JSON strings, numbers, booleans, arrays, objects, and null. The following keys have built-in uses; new application-specific keys must be documented by their owner.
+There is no finite list of user/plugin-defined keys: `custom_data` and `sm_data` are explicitly open JSON namespaces. Their allowed values are JSON strings, numbers, booleans, arrays, objects, and null. The following keys have built-in uses; new application-specific keys must be documented by their owner.
 
 | Variable | Type / allowed values | Default/source and meaning |
 |---|---|---|
@@ -279,10 +280,11 @@ There is no finite list of user/plugin-defined keys: `custom_data` and `cl_data`
 | `custom_data.<plugin-key>` | Plugin-defined JSON | Enabled plugins can supply defaults; existing custom values take precedence. See the plugin manifest/handler for each plugin's allowed values. |
 | `custom_data.language_learning` | Object | Tutor overrides: `target_language`, `explanation_language`, `level`, `lesson_goal`, `reply_style`. See [POML workflows](POML_WORKFLOWS.md). |
 | `custom_data.semantic_blueprint` | Object | Semantic goal, participants, action, constraints, success criteria and output-format overrides. Not a tool permission grant. |
-| `cl_data.semantic_blueprint` | Object | Workflow-provided blueprint override; lower priority than `custom_data.semantic_blueprint`. |
-| `cl_data.<name>` | Workflow-defined JSON | Free-form workflow data, preferably objects for dotted updates. The selected workflow defines allowed keys and values. |
+| `sm_data.semantic_blueprint` | Object | Workflow-provided blueprint override; lower priority than `custom_data.semantic_blueprint`. |
+| `sm_data.<name>` | Workflow-defined JSON | Free-form workflow data, preferably objects for dotted updates. The selected workflow defines allowed keys and values. |
+| `custom_data.skill_discovery_template` | Template-name string | Optional POML discovery plan, without `.poml`; default `discovery/skills`. Configure instructions, pinned names, queries and result count here; access flags and safety bounds remain enforced. |
 
-CL files also have their own transient variables, conditions, state names, and overrides. Those are workflow definitions rather than additional fields of `ContextSettings`. Unknown typed root/settings fields do not survive a normal context save; use the documented open namespaces for new persistent data.
+SM files also have their own transient variables, conditions, state names, and overrides. Those are workflow definitions rather than additional fields of `ContextSettings`. Unknown typed root/settings fields do not survive a normal context save; use the documented open namespaces for new persistent data.
 
 ## Documentation coverage check
 

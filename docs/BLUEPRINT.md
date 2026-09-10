@@ -18,7 +18,7 @@ praxis/                           ← NEUES Projekt (hier implementieren)
 │   └── BLUEPRINT.md              ← DIESE DATEI (alles drin)
 ├── reference/                    ← ALTER CODE (nur zum Nachschlagen)
 │   └── src/                      ← Kopie des alten Projekts (zum Nachschlagen)
-│       ├── cl.rs                 ← Context Language Parser
+│       ├── sm.rs                 ← Statemachine Parser
 │       ├── tags.rs               ← §-Tag Parser
 │       ├── event_channel.rs      ← Event Bus
 │       ├── gateway/              ← Gateway (alt)
@@ -28,7 +28,7 @@ praxis/                           ← NEUES Projekt (hier implementieren)
 │       ├── db/                   ← Database (alt)
 │       └── dashboard/            ← Dashboard (alt)
 ├── templates/                    ← POML Templates
-├── contexts/                     ← CL Workflows
+├── contexts/                     ← SM Workflows
 ├── migrations/                   ← SQL Migrations
 ├── skills/                       ← User Skills (NEU)
 └── plugins/                      ← Plugins (NEU)
@@ -48,7 +48,7 @@ praxis/                           ← NEUES Projekt (hier implementieren)
 3. [Cargo.toml](#3-cargotoml)
 4. [Configuration](#4-configuration)
 5. [Database Layer](#5-database-layer)
-6. [Context Language](#6-context-language)
+6. [Statemachine](#6-context-language)
 7. [Tags System](#7-tags-system)
 8. [Event Channel](#8-event-channel)
 9. [Gateway](#9-gateway)
@@ -268,7 +268,7 @@ praxis/
 │   ├── plugins/                     # Plugin System (NEU)
 │   │   └── mod.rs                   # Plugin Registry + Execution
 │   │
-│   ├── cl.rs                        # Context Language Parser
+│   ├── sm.rs                        # Statemachine Parser
 │   ├── tags.rs                      # §-Tag Parser
 │   ├── event_channel.rs             # Event Bus
 │   └── config.rs                    # Configuration (NEU)
@@ -282,7 +282,7 @@ praxis/
 │   ├── skills/
 │   └── snippets/
 │
-├── contexts/                        # CL Workflow-Dateien
+├── contexts/                        # SM Workflow-Dateien
 │   ├── default.cl
 │   ├── chat.cl
 │   ├── coding.cl
@@ -1023,53 +1023,53 @@ pub async fn update_secrets(new_secrets: Secrets) {
 
 ---
 
-# 6. Context Language
+# 6. Statemachine
 
-Die Context Language (.cl) ist eine State-Machine für Workflows. Sie definiert:
+Die Statemachine (.cl) ist eine State-Machine für Workflows. Sie definiert:
 - States (Schritte im Workflow)
 - Transitions (Wechsel zwischen Schritten)
 - Auto-Rules (automatische Aktionen)
 - Overrides (Context-Änderungen pro State)
 
 ```rust
-// src/cl.rs
+// src/sm.rs
 
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClFile {
+pub struct SmFile {
     pub name: String,
     pub initial_state: String,
-    pub states: HashMap<String, ClState>,
+    pub states: HashMap<String, SmState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClState {
+pub struct SmState {
     pub task_template: Option<String>,
     pub role_template: Option<String>,
-    pub transitions: Vec<ClTransition>,
-    pub auto_rules: Vec<ClAutoRule>,
+    pub transitions: Vec<SmTransition>,
+    pub auto_rules: Vec<SmAutoRule>,
     pub overrides: Option<serde_json::Value>,
     pub secret_overrides: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClTransition {
+pub struct SmTransition {
     pub target: String,
     pub condition: Option<String>,
     pub on: Option<String>, // tag name like "next", "done"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClAutoRule {
+pub struct SmAutoRule {
     pub condition: String,
     pub action: String, // "next", "set", "push", "pop"
     pub target: Option<String>,
     pub value: Option<String>,
 }
 
-impl ClFile {
+impl SmFile {
     pub fn parse(content: &str) -> anyhow::Result<Self> {
         // Simple key-value parser for .cl files
         // Format:
@@ -1080,7 +1080,7 @@ impl ClFile {
 
         let mut states = HashMap::new();
         let mut current_state: Option<String> = None;
-        let mut current_state_data = ClStateBuilder::default();
+        let mut current_state_data = SmStateBuilder::default();
         let mut initial_state = String::new();
         let mut name = String::new();
 
@@ -1097,7 +1097,7 @@ impl ClFile {
                         initial_state = state_name.clone();
                     }
                     states.insert(state_name, current_state_data.build());
-                    current_state_data = ClStateBuilder::default();
+                    current_state_data = SmStateBuilder::default();
                 }
                 current_state = Some(line[1..line.len()-1].to_string());
             } else if let Some(eq_pos) = line.find('=') {
@@ -1115,7 +1115,7 @@ impl ClFile {
                 let parts: Vec<&str> = line.split("->").collect();
                 if parts.len() == 2 {
                     let target = parts[1].trim().to_string();
-                    current_state_data.transitions.push(ClTransition {
+                    current_state_data.transitions.push(SmTransition {
                         target,
                         condition: None,
                         on: Some(parts[0].trim().to_string()),
@@ -1137,16 +1137,16 @@ impl ClFile {
 }
 
 #[derive(Default)]
-struct ClStateBuilder {
+struct SmStateBuilder {
     task_template: Option<String>,
     role_template: Option<String>,
-    transitions: Vec<ClTransition>,
-    auto_rules: Vec<ClAutoRule>,
+    transitions: Vec<SmTransition>,
+    auto_rules: Vec<SmAutoRule>,
 }
 
-impl ClStateBuilder {
-    fn build(self) -> ClState {
-        ClState {
+impl SmStateBuilder {
+    fn build(self) -> SmState {
+        SmState {
             task_template: self.task_template,
             role_template: self.role_template,
             transitions: self.transitions,
@@ -1158,7 +1158,7 @@ impl ClStateBuilder {
 }
 ```
 
-## Example CL File
+## Example SM File
 
 ```
 # contexts/default.cl

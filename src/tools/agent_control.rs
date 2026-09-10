@@ -40,10 +40,10 @@ pub async fn run(
             ctx.settings.llm_turn += 1;
 
             let path = crate::gateway::prompt::workflow_name(&ctx).to_string();
-            let sm = crate::cl::load_file(&path).map_err(|e| format!("Failed to load SM workflow: {e}"))?;
+            let sm = crate::sm::load_file(&path).map_err(|e| format!("Failed to load SM workflow: {e}"))?;
             let mut value = serde_json::to_value(&ctx).map_err(|e| e.to_string())?;
-            if let Some(next) = crate::cl::advance_workflow(&sm, &value) {
-                if !crate::cl::transition_to(&sm, &mut value, &next) {
+            if let Some(next) = crate::sm::advance_workflow(&sm, &value) {
+                if !crate::sm::transition_to(&sm, &mut value, &next) {
                     return Err(format!("SM target state does not exist: {next}"));
                 }
                 ctx = serde_json::from_value(value).map_err(|e| e.to_string())?;

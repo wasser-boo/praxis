@@ -73,6 +73,8 @@ def main():
             'debug': ('error', 'TypeError: 日本語 {{not_evaluated}}', 'Root Cause'),
             'tmux': ('user_request', 'List sessions; do not run commands {{not_evaluated}}', 'tmux'),
             'poml_templates': ('user_request', 'Create a French tutor {{not_evaluated}}', 'update_template'),
+            'skill_creator': ('user_request', 'Create a skill 日本語 {{not_evaluated}}', 'poml_templates'),
+            'mnemodim-palace': ('user_request', 'Inspect a palace 日本語 {{not_evaluated}}', 'mnemodim_tool.py'),
         }
         manifests = {}
         for name, (key, sample, instruction) in samples.items():
@@ -88,6 +90,15 @@ def main():
         render(authoring / 'skill.poml', {'user_request': 'Build a template'},
                ('{{', 'for="', '<let', '<include', 'typeof', 'loop.index',
                 'https://microsoft.github.io/poml/stable/language/template/'))
+        render(authoring / 'skill.poml', {'user_request': 'Create a skill', 'target_kind': 'skill'},
+               ('staged skill package', 'Return to the calling skill'), ('Save with update_template', 'key settings.system_template'))
+        render(ROOT / 'skills/mnemodim-palace/skill.poml', {'user_request': 'Inspect only'},
+               ('references/format-cheatsheet.md', 'references/media.md'),
+               ('Major(2,', 'Built-ins include', '/home/marvin/.pi', 'codex_generate_image'))
+        render(ROOT / 'skills/skill_creator/skill.poml', {'user_request': 'Create a skill'},
+               ('target_kind', 'references/authoring.md'), ('https://microsoft.github.io',))
+        discovery = ROOT / 'templates/discovery/skills.poml'
+        render(discovery, {}, ('search_skills', '"queries":[]', '"names":[]', '"limit":5'))
         example = authoring / 'examples/starter.poml'
         render(example, {}, ('You are a helpful assistant', '1. Be accurate', 'No current request supplied'))
         render(example, {'user_prompt': None, 'custom_data': None}, ('No current request supplied',))

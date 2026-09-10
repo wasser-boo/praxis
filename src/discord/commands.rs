@@ -209,13 +209,34 @@ fn apply_skill_command_from_dir(
     directory: &std::path::Path,
 ) -> anyhow::Result<String> {
     skill_command_context(db, discord_user_id, guild, channel)?;
-    let mut registry = crate::skills::SkillRegistry::new();
-    // off stays usable for authorized users even if the directory is unreadable.
-    if !argument.trim().eq_ignore_ascii_case("off") {
-        registry.load_from_dir(directory)?;
+    let name = argument.trim();
+    let off = name.eq_ignore_ascii_case("off");
+    let list = name.is_empty() || name.eq_ignore_ascii_case("list") || name.starts_with("list ");
+    if list || name.starts_with("search ") {
+        let mut index = crate::skills::SkillIndex::open(&db.data_dir(), directory)?;
+        index.ensure_indexed()?;
+        let result = if let Some(query) = name.strip_prefix("search ") {
+            index.search(query, 8, true)?
+        } else { index.browse(name.strip_prefix("list ").unwrap_or(""), 8, true)? };
+        // Recheck after index/filesystem access, before any metadata disclosure.
+        let ctx = skill_command_context(db, discord_user_id, guild, channel)?;
+        let lines = result.skills.iter().map(|s| format!("{}{}{} — {}", s.name,
+            if s.skill_hidden { " [hidden]" } else { "" }, if s.user_only { " [user-only]" } else { "" },
+            crate::util::truncate_chars(&s.description, 90))).collect::<Vec<_>>().join("\n");
+        let more = result.next_after.map(|cursor| format!("\nNext page: /skill skillname:list {cursor}")).unwrap_or_default();
+        return Ok(format!("Active skill: {}\nAvailable skills:\n{}{}\nUse /skill skillname:NAME, off, or search KEYWORDS.", ctx.settings.active_skill.as_deref().unwrap_or("off"), if lines.is_empty() { "(none)" } else { &lines }, more));
     }
-    // Recheck authorization immediately before returning data/changing context.
-    apply_skill_command(db, discord_user_id, guild, channel, argument, &registry)
+    // off needs neither a readable skill directory nor an enabled loader.
+    if !off {
+        crate::skills::lookup_skill(db, directory, name)?;
+        anyhow::ensure!(crate::db::tools::get(db, "use_skill")?.is_enabled, "use_skill is disabled");
+    }
+    let mut ctx = skill_command_context(db, discord_user_id, guild, channel)?;
+    ctx.settings.active_skill = if off { None } else { Some(name.to_string()) };
+    db.save_context(&ctx)?;
+    Ok(if off { "Active skill disabled.".to_string() } else {
+        format!("Skill '{name}' is active for your messages. This loads instructions; it does not execute actions or change tool permissions.")
+    })
 }
 
 pub fn apply_skill_command(
@@ -247,16 +268,23 @@ pub fn apply_skill_command(
 }
 
 pub async fn handle_skill_command(db: &Database, ctx: &Context, command: &CommandInteraction) -> anyhow::Result<()> {
-    let result = (|| {
-        let argument = command.data.options.iter().find(|o| o.name == "skillname").and_then(|o| o.value.as_str()).unwrap_or("list");
-        apply_skill_command_from_dir(db, &command.user.id.to_string(), command.guild_id.map(|g| g.to_string()).as_deref(), &command.channel_id.to_string(), argument, std::path::Path::new("skills"))
-    })();
-    let response = match result { Ok(text) => text, Err(error) => format!("Error: {error}") };
-    command.create_response(&ctx.http, serenity::builder::CreateInteractionResponse::Message(
-        serenity::builder::CreateInteractionResponseMessage::new()
-            .content(crate::util::truncate_chars(&response, 1900))
-            .ephemeral(true)
+    // A first index build may take longer than Discord's interaction deadline.
+    // Defer ephemerally without disclosing metadata, then authorize inside the worker.
+    command.create_response(&ctx.http, serenity::builder::CreateInteractionResponse::Defer(
+        serenity::builder::CreateInteractionResponseMessage::new().ephemeral(true)
     )).await?;
+    let db = db.clone();
+    let user = command.user.id.to_string();
+    let guild = command.guild_id.map(|g| g.to_string());
+    let channel = command.channel_id.to_string();
+    let argument = command.data.options.iter().find(|o| o.name == "skillname").and_then(|o| o.value.as_str()).unwrap_or("list").to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        apply_skill_command_from_dir(&db, &user, guild.as_deref(), &channel, &argument, std::path::Path::new("skills"))
+    }).await?;
+    let response = match result { Ok(text) => text, Err(error) => format!("Error: {error}") };
+    command.edit_response(&ctx.http, serenity::builder::EditInteractionResponse::new()
+        .content(crate::util::truncate_chars(&response, 1900))
+    ).await?;
     Ok(())
 }
 

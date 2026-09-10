@@ -78,14 +78,11 @@ pub async fn run(db: &Database, args: &Value) -> anyhow::Result<String> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("Template content is required"))?;
     // Synthetic context only: validation must not silently expose stored user data.
-    let mut skills = crate::skills::SkillRegistry::new();
-    skills.load_from_dir(Path::new("skills"))?;
     let mut validation = crate::db::contexts::Context {
         user_id: "validation".into(), ..Default::default()
     };
     validation.settings.path = ".".into();
-    let mut default_context = crate::gateway::prompt::base_context(&validation, "Validation test")?;
-    default_context["skills"] = skills.to_context_array();
+    let default_context = crate::gateway::prompt::base_context(&validation, "Validation test")?;
     let context = args.get("context").unwrap_or(&default_context);
     let rendered = save_validated(Path::new("templates"), name, content, context).await?;
     db.save_template(name, content, None, false).map_err(|e| {

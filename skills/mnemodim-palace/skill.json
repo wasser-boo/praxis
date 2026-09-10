@@ -1,0 +1,7 @@
+{
+  "name": "mnemodim-palace",
+  "description": "Create, inspect, repair and edit mnemodim memory-palace ZIP packages: Gedächtnispaläste, stages, loci, Major mappings, workbook tables, formulas, actions, images and narration.",
+  "required_parameters": ["user_request"],
+  "skill_hidden": false,
+  "user_only": false
+}

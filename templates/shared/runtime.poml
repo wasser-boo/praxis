@@ -20,10 +20,10 @@
   <cp caption="Skills">
     <p>Skills are reusable instructions, not completed actions. Active skill: {{rt_active_skill || 'none'}}. A Discord /skill selection applies to subsequent messages until changed or switched off.</p>
     <list>
-      <item for="skill in rt_skills">{{skill.name}}: {{skill.description}}. Required string inputs: {{Array.isArray(skill.required_parameters) ? skill.required_parameters.join(', ') : 'see skill definition'}}.</item>
+      <item for="skill in rt_skills">{{skill.name}}: {{skill.description}}. Required string inputs: {{Array.isArray(skill.required_parameters) ? skill.required_parameters.join(', ') : 'see skill definition'}}. Activation: {{skill.user_only ? 'user-only; ask the user to select it' : 'use_skill'}}.</item>
     </list>
-    <p if="!rt_skills.length">No skills were advertised in this render context.</p>
-    <p if="rt_mode === 'agent'">When the task matches a skill and the enabled tools include use_skill, call use_skill with a registered name and parameters object. For example: name poml_templates, parameters containing user_request. Follow the loaded instructions using normal tools; never repeatedly load the same skill instead of doing the task.</p>
+    <p if="!rt_skills.length">No skill candidates were preloaded. This is not the complete skill catalog.</p>
+    <p if="rt_mode === 'agent' ? typeof skill_discovery_instructions === 'string' : false">{{skill_discovery_instructions}}</p>
     <p>If a skill is active, the runtime appends its rendered instructions separately so custom templates cannot omit it. Follow those instructions directly instead of reloading them.</p>
   </cp>
   <cp caption="Enabled capabilities">

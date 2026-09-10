@@ -1,6 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::io::Read;
+
+mod index;
+pub use index::{lookup_skill, SkillIndex};
+pub mod discovery;
+
+pub fn validate_name(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'), "Invalid skill name (1..64 letters, digits, _ or -)");
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
@@ -9,11 +19,45 @@ pub struct Skill {
     /// Required non-empty string inputs, injected as top-level POML variables.
     #[serde(default)]
     pub required_parameters: Vec<String>,
+    /// Omit metadata from model discovery. Exact-name dependencies remain usable.
+    #[serde(default)]
+    pub skill_hidden: bool,
+    /// Only a human context selection may activate this skill, never use_skill.
+    #[serde(default)]
+    pub user_only: bool,
     #[serde(skip)]
     pub folder: String,
 }
 
 impl Skill {
+    /// Read a bounded manifest only. Never read/render instruction bodies here.
+    pub fn from_dir(root: &Path, folder: &Path) -> anyhow::Result<Self> {
+        let root = root.canonicalize()?;
+        let folder = if folder.is_absolute() { folder.to_path_buf() } else { std::env::current_dir()?.join(folder) };
+        let relative = folder.strip_prefix(&root)?;
+        let mut checked = root.clone();
+        for component in relative.components() {
+            anyhow::ensure!(matches!(component, std::path::Component::Normal(_)), "Invalid skill folder");
+            checked.push(component);
+            let meta = std::fs::symlink_metadata(&checked)?;
+            anyhow::ensure!(meta.is_dir() && !meta.file_type().is_symlink(), "Skill folders must be local directories, not symlinks");
+        }
+        for name in ["skill.json", "skill.poml"] {
+            let meta = std::fs::symlink_metadata(checked.join(name))?;
+            anyhow::ensure!(meta.is_file() && !meta.file_type().is_symlink(), "Skill files must be regular local files");
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(checked.join("skill.json"))?.take(16385).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() <= 16384, "Skill manifest exceeds 16 KiB");
+        let mut skill: Skill = serde_json::from_slice(&bytes)?;
+        validate_name(&skill.name)?;
+        anyhow::ensure!(!skill.description.trim().is_empty() && skill.description.chars().count() <= 1024, "Skill description must contain 1..1024 characters");
+        anyhow::ensure!(skill.required_parameters.len() <= 16, "At most 16 required skill parameters");
+        for key in &skill.required_parameters { validate_name(key)?; }
+        skill.folder = checked.to_string_lossy().to_string();
+        Ok(skill)
+    }
+
     /// Automatic activation maps only the documented task-input aliases.
     /// Other required inputs must already exist in the shared context.
     pub fn parameters_for_task(&self, context: &serde_json::Value, task: &str) -> anyhow::Result<serde_json::Value> {
@@ -73,22 +117,7 @@ impl SkillRegistry {
                 if skill_json.exists() && skill_poml.exists() {
                     // A broken optional skill must not hide unrelated valid skills.
                     let loaded = (|| -> anyhow::Result<Skill> {
-                        let content = std::fs::read_to_string(&skill_json)?;
-                        let mut skill: Skill = serde_json::from_str(&content)?;
-                        anyhow::ensure!(
-                            !skill.name.is_empty()
-                                && skill
-                                    .name
-                                    .bytes()
-                                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
-                            "Invalid skill name"
-                        );
-                        anyhow::ensure!(
-                            !skill.description.trim().is_empty(),
-                            "Missing skill description"
-                        );
-                        skill.folder = path.to_string_lossy().to_string();
-                        Ok(skill)
+                        Skill::from_dir(dir, &path)
                     })();
                     match loaded {
                         Ok(skill) => {
@@ -120,11 +149,14 @@ impl SkillRegistry {
         let skills: Vec<serde_json::Value> = self
             .list()
             .into_iter()
+            .filter(|s| !s.skill_hidden)
+            .take(index::MAX_RESULTS)
             .map(|s| {
                 serde_json::json!({
                     "name": s.name,
                     "description": s.description,
-                    "required_parameters": s.required_parameters
+                    "required_parameters": s.required_parameters,
+                    "user_only": s.user_only
                 })
             })
             .collect();
@@ -137,7 +169,9 @@ pub async fn execute_skill(skill: &Skill, context: &serde_json::Value) -> anyhow
     let poml_path = format!("{}/skill.poml", skill.folder);
     tracing::info!("Rendering skill: {} from {}", skill.name, poml_path);
     // Never present unrendered fallback markup as a successfully loaded skill.
-    crate::gateway::poml::render_strict(&poml_path, context).await
+    let mut parameters = context.clone();
+    parameters["skill_dir"] = serde_json::json!(skill.folder);
+    crate::gateway::poml::render_strict(&poml_path, &parameters).await
 }
 
 pub async fn execute_skill_by_name(
@@ -150,6 +184,9 @@ pub async fn execute_skill_by_name(
         .ok_or_else(|| anyhow::anyhow!("Skill not found: {}", name))?;
     execute_skill(skill, context).await
 }
+
+#[cfg(test)]
+mod discovery_tests;
 
 #[cfg(test)]
 mod skill_tests {

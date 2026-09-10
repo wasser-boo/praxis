@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 CARGO_BIN="${CARGO_BIN:-cargo}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 for filter in \
-  'assets::' 'cl::' 'context_cmd::' 'db::contexts::' 'db::memory::' 'db::tools::' 'skills::' \
+  'assets::' 'sm::' 'context_cmd::' 'db::contexts::' 'db::memory::' 'db::tools::' 'skills::' \
   'gateway::agent_loop::' 'gateway::message_handler::' \
   'gateway::llm::skill_tool_loop_tests' 'gateway::poml::' 'gateway::templates::' \
   'gateway::prompt::' 'tools::update_template::' 'tools::context_tools::' \

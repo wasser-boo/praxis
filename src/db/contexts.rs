@@ -1,6 +1,10 @@
 use super::Database;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+#[path = "sm_migration_tests.rs"]
+mod sm_migration_tests;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
     pub user_id: String,
@@ -23,10 +27,10 @@ pub struct Context {
     pub settings: ContextSettings,
     #[serde(default)]
     pub custom_data: serde_json::Value,
-    /// Workflow-specific data for CL system (e.g., application context, device, etc.)
-    /// Supports deep merge via dot-notation in set_context
-    #[serde(default)]
-    pub cl_data: serde_json::Value,
+    /// Statemachine-specific data; legacy cl_data is accepted on input only.
+    /// Supports deep merge via dot-notation in set_context.
+    #[serde(default, alias = "cl_data")]
+    pub sm_data: serde_json::Value,
     /// Session identifier for multi-session support (e.g., "default", "session-2")
     #[serde(default)]
     pub session_id: String,
@@ -44,7 +48,7 @@ impl Default for Context {
             active_templates: Vec::new(),
             settings: ContextSettings::default(),
             custom_data: serde_json::Value::Null,
-            cl_data: serde_json::Value::Null,
+            sm_data: serde_json::Value::Null,
             session_id: String::new(),
         }
     }
@@ -463,6 +467,15 @@ impl Database {
         user_id: &str,
         updates: serde_json::Value,
     ) -> anyhow::Result<Context> {
+        self.merge_context_with_actor(user_id, updates, false)
+    }
+
+    /// Model/tool-originated updates cannot grant user-only skill activation.
+    pub fn merge_context_from_agent(&self, user_id: &str, updates: serde_json::Value) -> anyhow::Result<Context> {
+        self.merge_context_with_actor(user_id, updates, true)
+    }
+
+    fn merge_context_with_actor(&self, user_id: &str, updates: serde_json::Value, from_agent: bool) -> anyhow::Result<Context> {
         anyhow::ensure!(updates.is_object(), "Context updates must be an object");
         let mut ctx = self.load_context(user_id)?;
         let previous_template = ctx.settings.system_template.clone();
@@ -496,10 +509,9 @@ impl Database {
             }
         }
         if ctx.settings.active_skill != previous_skill {
+            anyhow::ensure!(!from_agent, "Persistent skill selection is user-only; ask the user to select it. Use use_skill for permitted task-local loading");
             if let Some(name) = &ctx.settings.active_skill {
-                let mut registry = crate::skills::SkillRegistry::new();
-                registry.load_from_dir(std::path::Path::new("skills"))?;
-                anyhow::ensure!(registry.get(name).is_some(), "Unknown skill: {name}");
+                crate::skills::lookup_skill(self, std::path::Path::new("skills"), name)?;
             }
         }
         self.save_context(&ctx)?;
@@ -526,7 +538,7 @@ impl Database {
     }
 
     /// Fork a context: create a new context under `new_user_id` by cloning
-    /// the context at `parent_user_id`. Settings, custom_data, cl_data, and
+    /// the context at `parent_user_id`. Settings, custom_data, sm_data, and
     /// other state are copied. The new context starts with `turn = 0` and
     /// no associated messages. Returns the newly-created Context.
     pub fn fork_context(
@@ -698,17 +710,41 @@ fn decode_context(data: &str) -> anyhow::Result<Context> {
     Ok(serde_json::from_value(value)?)
 }
 
-/// Canonicalize legacy update paths, without renaming application-owned cl_data.
-pub fn canonical_context_key(key: &str) -> &str {
+/// Canonicalize legacy workflow names and dotted data paths on input.
+pub fn canonical_context_key(key: &str) -> std::borrow::Cow<'_, str> {
     match key {
-        "cl_file" => "sm_file",
-        "settings.cl_file" => "settings.sm_file",
-        _ => key,
+        "cl_file" => "sm_file".into(),
+        "settings.cl_file" => "settings.sm_file".into(),
+        "cl_data" => "sm_data".into(),
+        _ => match key.strip_prefix("cl_data.") {
+            Some(rest) => format!("sm_data.{rest}").into(),
+            None => key.into(),
+        },
     }
 }
 
 pub fn normalize_legacy_keys(value: &mut serde_json::Value) {
     if let Some(obj) = value.as_object_mut() {
+        // Preserve legacy-only entries if both namespaces occur; explicit
+        // canonical values (including null) win conflicts deterministically.
+        let canonical_data = obj.get("sm_data").cloned();
+        if let Some(mut legacy) = obj.remove("cl_data") {
+            if let Some(canonical) = obj.remove("sm_data") { merge_value(&mut legacy, &canonical); }
+            obj.insert("sm_data".into(), legacy);
+        }
+        let legacy_paths: Vec<_> = obj.keys().filter(|key| key.starts_with("cl_data.")).cloned().collect();
+        for old in legacy_paths {
+            let new = canonical_context_key(&old).into_owned();
+            if let Some(legacy) = obj.remove(&old) {
+                let mut existing = canonical_data.as_ref();
+                let mut conflict = false;
+                for part in old[8..].split('.') {
+                    if existing.is_some_and(|v| !v.is_object()) { conflict = true; break; }
+                    existing = existing.and_then(|data| data.get(part));
+                }
+                if !conflict && existing.is_none() { obj.entry(new).or_insert(legacy); }
+            }
+        }
         let nested_canonical = obj.get("settings").and_then(|v| v.as_object()).is_some_and(|s| s.contains_key("sm_file"));
         for (old, new) in [("cl_file", "sm_file"), ("settings.cl_file", "settings.sm_file")] {
             if let Some(legacy) = obj.remove(old) {
@@ -831,7 +867,7 @@ mod db_tests {
             user_id: "alice".into(),
             username: Some("Alice".into()),
             custom_data: serde_json::json!({"origin":"base", "keep":true}),
-            cl_data: serde_json::json!({"project":"base project"}),
+            sm_data: serde_json::json!({"project":"base project"}),
             ..Default::default()
         };
         base.settings.model = Some("base-model".into());
@@ -890,7 +926,8 @@ mod db_tests {
         let json = serde_json::to_value(ctx).unwrap();
         assert!(json.get("cl_file").is_none());
         assert!(json["settings"].get("cl_file").is_none());
-        assert_eq!(json["cl_data"]["keep"], true);
+        assert_eq!(json["sm_data"]["keep"], true);
+        assert!(json.get("cl_data").is_none());
     }
 
     #[test]

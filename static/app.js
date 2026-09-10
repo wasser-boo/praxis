@@ -1232,10 +1232,15 @@ async function chatUploadAvatar() {
     input.click();
 }
 
-// ═══ CL Status ════════════════════════════════════════════════════════════════
+// ═══ SM Status ════════════════════════════════════════════════════════════════
 
 function contextSmFile(ctx) {
     return ctx?.sm_file || ctx?.cl_file || '';
+}
+
+function contextSmData(ctx) {
+    return Object.prototype.hasOwnProperty.call(ctx || {}, 'sm_data')
+        ? (ctx.sm_data || {}) : (ctx?.cl_data || {});
 }
 
 async function loadCLStatus() {
@@ -1247,26 +1252,26 @@ async function loadCLStatus() {
             res = await apiGet(`/api/cl/${encodedUser}`);
         }
         const data = await res.json();
-        const bar = document.getElementById('chat-cl-status');
+        const bar = document.getElementById('chat-sm-status');
         const smFile = contextSmFile(data);
-        const vars = data.cl_data || data.sm_data || {};
+        const vars = contextSmData(data);
         if (smFile || data.system_template || data.active_state || Object.keys(vars).length > 0) {
             bar.style.display = 'flex';
-            document.getElementById('cl-status-file').textContent = smFile ? `Statemachine: ${smFile}` : '-';
-            document.getElementById('cl-status-state').textContent = data.active_state ? `State: ${data.active_state}` : '-';
+            document.getElementById('sm-status-file').textContent = smFile ? `Statemachine: ${smFile}` : '-';
+            document.getElementById('sm-status-state').textContent = data.active_state ? `State: ${data.active_state}` : '-';
             const temps = data.active_templates || [];
-            const templateBadge = document.getElementById('cl-status-temps');
+            const templateBadge = document.getElementById('sm-status-temps');
             templateBadge.textContent = data.system_template
                 ? `System: ${data.system_template}`
                 : (temps.length ? `Templates: ${temps.join(', ')}` : '-');
             templateBadge.title = temps.length ? `Template stack: ${temps.join(', ')}` : 'Effective system template';
-            templateBadge.className = data.system_template || temps.length ? 'cl-badge template' : 'cl-badge';
-            const skillBadge = document.getElementById('cl-status-skill');
+            templateBadge.className = data.system_template || temps.length ? 'sm-badge template' : 'sm-badge';
+            const skillBadge = document.getElementById('sm-status-skill');
             skillBadge.textContent = data.active_skill ? `Skill: ${data.active_skill}` : '';
             skillBadge.style.display = data.active_skill ? '' : 'none';
-            // cl_data is still the canonical workflow namespace.
+            // sm_data is canonical; contextSmData accepts older API responses.
             const varKeys = Object.keys(vars).filter(k => k !== 'active_state' && k !== 'active_templates');
-            const varsEl = document.getElementById('cl-status-vars');
+            const varsEl = document.getElementById('sm-status-vars');
             if (varKeys.length > 0) {
                 varsEl.textContent = varKeys.slice(0, 5).map(k => `${k}: ${JSON.stringify(vars[k]).substring(0, 40)}`).join(', ');
                 varsEl.style.display = '';
@@ -1324,8 +1329,9 @@ async function viewContext(userId) {
             ? Object.entries(ctx.custom_data).map(([k, v]) => `<div class="data-item"><span class="name">${escapeHtml(k)}</span><span class="meta">${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</span></div>`).join('')
             : '<div class="data-item"><span class="name">None</span></div>';
 
-        const clDataHtml = ctx.cl_data && Object.keys(ctx.cl_data).length > 0
-            ? Object.entries(ctx.cl_data).map(([k, v]) => `<div class="data-item"><span class="name">${escapeHtml(k)}</span><span class="meta">${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</span></div>`).join('')
+        const smData = contextSmData(ctx);
+        const smDataHtml = Object.keys(smData).length > 0
+            ? Object.entries(smData).map(([k, v]) => `<div class="data-item"><span class="name">${escapeHtml(k)}</span><span class="meta">${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</span></div>`).join('')
             : '<div class="data-item"><span class="name">None</span></div>';
 
         const uid = escapeHtml(userId);
@@ -1341,7 +1347,7 @@ async function viewContext(userId) {
                 </div>
                 <h3>Settings</h3><div class="data-list" style="margin-bottom:1rem;max-height:200px;overflow-y:auto">${settingsHtml}</div>
                 <h3>Custom Data</h3><div class="data-list" style="margin-bottom:1rem">${customDataHtml}</div>
-                <h3>SM Data</h3><div class="data-list" style="margin-bottom:1rem">${clDataHtml}</div>
+                <h3>SM Data</h3><div class="data-list" style="margin-bottom:1rem">${smDataHtml}</div>
                 <button class="btn btn-primary" style="width:auto" id="ctx-edit-btn">Edit</button>
                 <button class="btn btn-danger" style="width:auto" id="ctx-delete-btn">Delete</button>
             </div>

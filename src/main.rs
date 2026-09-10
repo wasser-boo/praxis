@@ -42,6 +42,16 @@ enum Cli {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Manage the offline skill metadata index (no secrets, providers or services)
+    Skill {
+        #[arg(long, default_value = ".", global = true)]
+        directory: std::path::PathBuf,
+        /// Index storage directory (default: DIRECTORY/data); match DATA_DIR for runtime
+        #[arg(long, global = true)]
+        data_dir: Option<std::path::PathBuf>,
+        #[command(subcommand)]
+        action: SkillAction,
+    },
     /// Manage plugins
     Plugin {
         #[command(subcommand)]
@@ -94,6 +104,28 @@ enum ServiceAction {
         /// Number of lines to show
         #[arg(long, short = 'n', default_value = "100")]
         lines: usize,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum SkillAction {
+    /// Rebuild the metadata index, or refresh only one folder relative to skills/
+    Index {
+        #[arg(long)]
+        folder: Option<String>,
+    },
+    /// Search metadata as a human operator (includes hidden and user-only skills)
+    Search {
+        query: String,
+        #[arg(long, default_value = "5")]
+        limit: usize,
+    },
+    /// Browse a bounded page; pass the returned next_after to continue
+    List {
+        #[arg(long, default_value = "")]
+        after: String,
+        #[arg(long, default_value = "10")]
+        limit: usize,
     },
 }
 
@@ -290,6 +322,24 @@ async fn run() -> anyhow::Result<()> {
         println!("Configuration, secrets, databases and service state were not changed.");
         return Ok(());
     }
+    if let Cli::Skill { directory, data_dir, action } = &cli {
+        let data = data_dir.clone().unwrap_or_else(|| directory.join("data"));
+        let mut index = praxis::skills::SkillIndex::open(&data, &directory.join("skills"))?;
+        let result = match action {
+            SkillAction::Index { folder: Some(folder) } => serde_json::to_value(index.refresh(folder)?)?,
+            SkillAction::Index { folder: None } => serde_json::to_value(index.rebuild()?)?,
+            SkillAction::Search { query, limit } => {
+                index.ensure_indexed()?;
+                serde_json::to_value(index.search(query, *limit, true)?)?
+            }
+            SkillAction::List { after, limit } => {
+                index.ensure_indexed()?;
+                serde_json::to_value(index.browse(after, *limit, true)?)?
+            }
+        };
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     load_dotenv();
 
     // Service and Plugin commands don't need logging setup
@@ -370,6 +420,7 @@ async fn run() -> anyhow::Result<()> {
         Cli::RepairAssets { .. } => unreachable!(),
         Cli::Service { .. } => unreachable!(),
         Cli::Plugin { .. } => unreachable!(),
+        Cli::Skill { .. } => unreachable!(),
     }
 }
 
@@ -1246,6 +1297,7 @@ async fn handle_backup(
     }
 
     // Context language files
+    // Preserve obsolete installations in backups; new workflows use contexts/.
     if std::path::Path::new("contextlanguage").exists() {
         includes.push("contextlanguage".to_string());
     }

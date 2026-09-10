@@ -198,7 +198,8 @@ The LLM has access to these built-in tools:
 | `write_file` | Create/overwrite file |
 | `edit_file` | Find/replace in file |
 | `read_file` | Read file contents |
-| `use_skill` | Load a named skill's rendered instructions with explicit parameters |
+| `search_skills` | Search bounded metadata results; strategy is configured in POML |
+| `use_skill` | Lazily load one permitted skill's instructions with explicit parameters |
 | `update_template` | Strictly validate and save a POML template without overwriting on render failure |
 | `get_context` | Read user context |
 | `set_context` | Set context variable |
@@ -234,7 +235,7 @@ Control behavior per user with typed settings and custom application data. Merge
 }
 ```
 
-See the [complete context reference](docs/CONTEXT_VARIABLES.md). Legacy `cl_file` updates are accepted and normalized to `sm_file`; `cl_data` remains unchanged.
+See the [complete context reference](docs/CONTEXT_VARIABLES.md). Legacy `cl_file` and `cl_data` inputs are normalized to canonical `sm_file` and `sm_data`; stored workflow data is preserved.
 
 ## Templates (POML)
 
@@ -249,7 +250,9 @@ Customize LLM behavior with POML templates in `templates/`:
 
 The built-in **`poml_templates` skill** creates and validates templates using Microsoft's POML syntax. Ask Praxis to use it in agent mode. Configure `POML_CLI` to the installed Microsoft JavaScript CLI path; Node is required. The skill loads via `use_skill`, then guides the agent to save through `update_template`. Creating a template does not activate it.
 
-Use Discord `/skill skillname:poml_templates` to apply the skill to subsequent tasks; `/skill skillname:off` clears it and `/skill` lists skills. Selection never executes scripts or enables disabled tools.
+Discovery is configurable through `templates/discovery/skills.poml`; the default prompt contains no full catalog. `search_skills` uses a persistent metadata index, then `use_skill` loads one workflow. Manifests support independent `skill_hidden` and `user_only` flags.
+
+Use Discord `/skill skillname:skill_creator` to create skills through the existing POML authoring skill, or `/skill skillname:mnemodim-palace` for memory-palace packages. The creator is user-only by default. `/skill skillname:off` clears selection and `/skill` browses a bounded page. Agent context tools/SM transitions cannot change persistent selection. See [Skills and POML discovery](docs/SKILLS.md) for configuration, indexing and media safety.
 
 See [Skills and POML authoring](docs/SKILLS.md), [Semantic templates and workflows](docs/POML_WORKFLOWS.md), and the [workflow/UI change report](docs/WORKFLOW_UI_CHANGE_REPORT.md). `examples/poml-test-context.json` supplies complete synthetic render data; `scripts/test_poml_templates.py` strictly tests every shipped template.
 
@@ -285,10 +288,10 @@ Additional sections:
 
 ```ini
 [transitions]
-plan -> coding : when cl_data.approved == true
+plan -> coding : when sm_data.approved == true
 
 [auto]
-cl_data.needs_review == true -> use testing
+sm_data.needs_review == true -> use testing
 
 [overrides]
 if custom_data.user_prompt =~ "(?i)^reset role$" -> settings.system_template = "standard"

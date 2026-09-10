@@ -50,45 +50,45 @@ fn split_condition_preserving_quotes<'a>(input: &'a str, delimiter: &str) -> Vec
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ContextLang {
+pub struct StateMachine {
     pub name: String,
     pub version: String,
     pub steps: Vec<String>,
-    pub states: HashMap<String, ClState>,
-    pub transitions: Vec<ClTransition>,
-    pub auto_rules: Vec<ClAutoRule>,
-    pub overrides: Vec<ClOverride>,
+    pub states: HashMap<String, SmState>,
+    pub transitions: Vec<SmTransition>,
+    pub auto_rules: Vec<SmAutoRule>,
+    pub overrides: Vec<SmOverride>,
     #[serde(default)]
-    pub secret_overrides: Vec<ClSecretOverride>,
+    pub secret_overrides: Vec<SmSecretOverride>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ClState {
+pub struct SmState {
     pub variables: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClTransition {
+pub struct SmTransition {
     pub from: String,
     pub to: String,
     pub condition: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClAutoRule {
+pub struct SmAutoRule {
     pub condition: String,
     pub target_state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClOverride {
+pub struct SmOverride {
     pub condition: String,
     pub key: String,
     pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClSecretOverride {
+pub struct SmSecretOverride {
     pub condition: String,
     pub key: String,
     pub value: String,
@@ -111,28 +111,28 @@ const ALLOWED_SECRET_FIELDS: &[&str] = &[
 ];
 
 #[derive(Debug)]
-pub enum ClError {
+pub enum SmError {
     ParseError(String),
     IoError(std::io::Error),
 }
 
-impl std::fmt::Display for ClError {
+impl std::fmt::Display for SmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClError::ParseError(msg) => write!(f, "CL Parse Error: {}", msg),
-            ClError::IoError(e) => write!(f, "CL IO Error: {}", e),
+            SmError::ParseError(msg) => write!(f, "SM Parse Error: {}", msg),
+            SmError::IoError(e) => write!(f, "SM IO Error: {}", e),
         }
     }
 }
 
-impl From<std::io::Error> for ClError {
+impl From<std::io::Error> for SmError {
     fn from(e: std::io::Error) -> Self {
-        ClError::IoError(e)
+        SmError::IoError(e)
     }
 }
 
-pub fn parse(content: &str) -> Result<ContextLang, ClError> {
-    let mut cl = ContextLang::default();
+pub fn parse(content: &str) -> Result<StateMachine, SmError> {
+    let mut sm = StateMachine::default();
     let mut current_section: Option<String> = None;
     let mut current_state_name: Option<String> = None;
 
@@ -152,14 +152,14 @@ pub fn parse(content: &str) -> Result<ContextLang, ClError> {
                     let name = parts
                         .get(1)
                         .ok_or_else(|| {
-                            ClError::ParseError(format!(
+                            SmError::ParseError(format!(
                                 "Line {}: [state] requires a name",
                                 line_num + 1
                             ))
                         })?
                         .to_string();
                     current_state_name = Some(name.clone());
-                    cl.states.entry(name).or_default();
+                    sm.states.entry(name).or_default();
                     current_section = Some("state".to_string());
                 }
                 "transitions" => {
@@ -179,7 +179,7 @@ pub fn parse(content: &str) -> Result<ContextLang, ClError> {
                     current_section = Some("secrets".to_string());
                 }
                 other => {
-                    return Err(ClError::ParseError(format!(
+                    return Err(SmError::ParseError(format!(
                         "Line {}: Unknown section [{}]",
                         line_num + 1,
                         other
@@ -192,10 +192,10 @@ pub fn parse(content: &str) -> Result<ContextLang, ClError> {
         if trimmed.starts_with('@') {
             let (key, value) = parse_metadata(trimmed, line_num)?;
             match key.as_str() {
-                "name" => cl.name = value,
-                "version" => cl.version = value,
+                "name" => sm.name = value,
+                "version" => sm.version = value,
                 "steps" => {
-                    cl.steps = parse_array(&value);
+                    sm.steps = parse_array(&value);
                 }
                 _ => {}
             }
@@ -206,7 +206,7 @@ pub fn parse(content: &str) -> Result<ContextLang, ClError> {
             Some("state") => {
                 if let Some(ref state_name) = current_state_name {
                     let (key, value) = parse_assignment(trimmed, line_num)?;
-                    cl.states
+                    sm.states
                         .entry(state_name.clone())
                         .or_default()
                         .variables
@@ -215,24 +215,24 @@ pub fn parse(content: &str) -> Result<ContextLang, ClError> {
             }
             Some("transitions") => {
                 let transition = parse_transition(trimmed, line_num)?;
-                cl.transitions.push(transition);
+                sm.transitions.push(transition);
             }
             Some("auto") => {
                 let rule = parse_auto_rule(trimmed, line_num)?;
-                cl.auto_rules.push(rule);
+                sm.auto_rules.push(rule);
             }
             Some("overrides") => {
                 let overr = parse_override(trimmed, line_num)?;
-                cl.overrides.push(overr);
+                sm.overrides.push(overr);
             }
             Some("secrets") => {
                 let secret_overr = parse_secret_override(trimmed, line_num)?;
-                cl.secret_overrides.push(secret_overr);
+                sm.secret_overrides.push(secret_overr);
             }
             _ => {
                 if trimmed.contains('=') && !trimmed.contains("->") {
                     let (key, value) = parse_assignment(trimmed, line_num)?;
-                    cl.states
+                    sm.states
                         .entry("_default".to_string())
                         .or_default()
                         .variables
@@ -242,10 +242,10 @@ pub fn parse(content: &str) -> Result<ContextLang, ClError> {
         }
     }
 
-    Ok(cl)
+    Ok(sm)
 }
 
-fn parse_metadata(line: &str, _line_num: usize) -> Result<(String, String), ClError> {
+fn parse_metadata(line: &str, _line_num: usize) -> Result<(String, String), SmError> {
     let rest = line.strip_prefix('@').unwrap();
     let parts: Vec<&str> = rest.splitn(2, ' ').collect();
     let key = parts[0].to_string();
@@ -273,10 +273,10 @@ fn parse_array(value: &str) -> Vec<String> {
     }
 }
 
-fn parse_assignment(line: &str, line_num: usize) -> Result<(String, String), ClError> {
+fn parse_assignment(line: &str, line_num: usize) -> Result<(String, String), SmError> {
     let parts: Vec<&str> = line.splitn(2, '=').collect();
     if parts.len() != 2 {
-        return Err(ClError::ParseError(format!(
+        return Err(SmError::ParseError(format!(
             "Line {}: Expected 'key = value', got '{}'",
             line_num + 1,
             line
@@ -295,11 +295,11 @@ fn parse_assignment(line: &str, line_num: usize) -> Result<(String, String), ClE
     Ok((key, value))
 }
 
-fn parse_transition(line: &str, line_num: usize) -> Result<ClTransition, ClError> {
+fn parse_transition(line: &str, line_num: usize) -> Result<SmTransition, SmError> {
     let line = line.replace('→', "->");
     let parts: Vec<&str> = line.splitn(2, "->").collect();
     if parts.len() != 2 {
-        return Err(ClError::ParseError(format!(
+        return Err(SmError::ParseError(format!(
             "Line {}: Expected 'from -> to : when condition', got '{}'",
             line_num + 1,
             line
@@ -318,18 +318,18 @@ fn parse_transition(line: &str, line_num: usize) -> Result<ClTransition, ClError
         String::new()
     };
 
-    Ok(ClTransition {
+    Ok(SmTransition {
         from,
         to,
         condition,
     })
 }
 
-fn parse_auto_rule(line: &str, line_num: usize) -> Result<ClAutoRule, ClError> {
+fn parse_auto_rule(line: &str, line_num: usize) -> Result<SmAutoRule, SmError> {
     let line = line.replace('→', "->");
     let parts: Vec<&str> = line.splitn(2, "->").collect();
     if parts.len() != 2 {
-        return Err(ClError::ParseError(format!(
+        return Err(SmError::ParseError(format!(
             "Line {}: Expected 'condition -> use state', got '{}'",
             line_num + 1,
             line
@@ -340,17 +340,17 @@ fn parse_auto_rule(line: &str, line_num: usize) -> Result<ClAutoRule, ClError> {
     let rest = parts[1].trim();
     let target_state = rest.strip_prefix("use ").unwrap_or(rest).trim().to_string();
 
-    Ok(ClAutoRule {
+    Ok(SmAutoRule {
         condition,
         target_state,
     })
 }
 
-fn parse_override(line: &str, line_num: usize) -> Result<ClOverride, ClError> {
+fn parse_override(line: &str, line_num: usize) -> Result<SmOverride, SmError> {
     let line = line.replace('→', "->");
     let parts: Vec<&str> = line.splitn(2, "->").collect();
     if parts.len() != 2 {
-        return Err(ClError::ParseError(format!(
+        return Err(SmError::ParseError(format!(
             "Line {}: Expected 'if condition -> key = value', got '{}'",
             line_num + 1,
             line
@@ -367,7 +367,7 @@ fn parse_override(line: &str, line_num: usize) -> Result<ClOverride, ClError> {
     let kv = parts[1].trim();
     let kv_parts: Vec<&str> = kv.splitn(2, '=').collect();
     if kv_parts.len() != 2 {
-        return Err(ClError::ParseError(format!(
+        return Err(SmError::ParseError(format!(
             "Line {}: Expected 'key = value' after ->, got '{}'",
             line_num + 1,
             kv
@@ -382,18 +382,18 @@ fn parse_override(line: &str, line_num: usize) -> Result<ClOverride, ClError> {
         value.to_string()
     };
 
-    Ok(ClOverride {
+    Ok(SmOverride {
         condition,
         key,
         value,
     })
 }
 
-fn parse_secret_override(line: &str, line_num: usize) -> Result<ClSecretOverride, ClError> {
+fn parse_secret_override(line: &str, line_num: usize) -> Result<SmSecretOverride, SmError> {
     let line = line.replace('→', "->");
     let parts: Vec<&str> = line.splitn(2, "->").collect();
     if parts.len() != 2 {
-        return Err(ClError::ParseError(format!(
+        return Err(SmError::ParseError(format!(
             "Line {}: Expected 'if condition -> key = value', got '{}'",
             line_num + 1,
             line
@@ -410,7 +410,7 @@ fn parse_secret_override(line: &str, line_num: usize) -> Result<ClSecretOverride
     let kv = parts[1].trim();
     let kv_parts: Vec<&str> = kv.splitn(2, '=').collect();
     if kv_parts.len() != 2 {
-        return Err(ClError::ParseError(format!(
+        return Err(SmError::ParseError(format!(
             "Line {}: Expected 'key = value' after ->, got '{}'",
             line_num + 1,
             kv
@@ -426,7 +426,7 @@ fn parse_secret_override(line: &str, line_num: usize) -> Result<ClSecretOverride
     };
 
     if !ALLOWED_SECRET_FIELDS.contains(&key.as_str()) {
-        return Err(ClError::ParseError(format!(
+        return Err(SmError::ParseError(format!(
             "Line {}: Secret field '{}' is not allowed. Allowed: {:?}",
             line_num + 1,
             key,
@@ -434,16 +434,16 @@ fn parse_secret_override(line: &str, line_num: usize) -> Result<ClSecretOverride
         )));
     }
 
-    Ok(ClSecretOverride {
+    Ok(SmSecretOverride {
         condition,
         key,
         value,
     })
 }
 
-/// Apply CL workflow to context. Returns secret overrides.
+/// Apply SM workflow to context. Returns secret overrides.
 pub fn apply_to_context(
-    cl: &ContextLang,
+    sm: &StateMachine,
     context: &mut serde_json::Value,
 ) -> Vec<(String, String)> {
     let active_state = context
@@ -453,7 +453,7 @@ pub fn apply_to_context(
         .to_string();
 
     // Apply default state variables first
-    if let Some(default_state) = cl.states.get("_default") {
+    if let Some(default_state) = sm.states.get("_default") {
         for (key, value) in &default_state.variables {
             if get_nested_value(context.as_object().unwrap_or(&serde_json::Map::new()), key).is_none() {
                 set_nested_value(context, key, serde_json::Value::String(value.clone()));
@@ -463,7 +463,7 @@ pub fn apply_to_context(
 
     // Apply current state variables before evaluating auto rules,
     // so auto conditions can reference state variables (e.g. regex patterns)
-    if let Some(state) = cl.states.get(&active_state) {
+    if let Some(state) = sm.states.get(&active_state) {
         for (key, value) in &state.variables {
             set_nested_value(context, key, serde_json::Value::String(value.clone()));
         }
@@ -475,11 +475,11 @@ pub fn apply_to_context(
     };
 
     // Auto-rules: always evaluate to allow automatic state transitions
-    let resolved_state = resolve_auto_state(cl, obj, &active_state);
+    let resolved_state = resolve_auto_state(sm, obj, &active_state);
 
     // Apply resolved state variables (may override current state if auto-rule triggered)
     if resolved_state != active_state {
-        if let Some(state) = cl.states.get(&resolved_state) {
+        if let Some(state) = sm.states.get(&resolved_state) {
             for (key, value) in &state.variables {
                 set_nested_value(context, key, serde_json::Value::String(value.clone()));
             }
@@ -493,7 +493,7 @@ pub fn apply_to_context(
     );
 
     // Apply overrides
-    for overr in &cl.overrides {
+    for overr in &sm.overrides {
         if evaluate_condition(&overr.condition, context.as_object().unwrap_or(&serde_json::Map::new())) {
             set_nested_value(context, &overr.key, serde_json::Value::String(overr.value.clone()));
         }
@@ -501,7 +501,7 @@ pub fn apply_to_context(
 
     // Collect secret overrides
     let mut secret_changes = Vec::new();
-    for secret_overr in &cl.secret_overrides {
+    for secret_overr in &sm.secret_overrides {
         if evaluate_condition(&secret_overr.condition, context.as_object().unwrap_or(&serde_json::Map::new())) {
             secret_changes.push((secret_overr.key.clone(), secret_overr.value.clone()));
         }
@@ -511,23 +511,23 @@ pub fn apply_to_context(
 }
 
 fn resolve_auto_state(
-    cl: &ContextLang,
+    sm: &StateMachine,
     context: &serde_json::Map<String, serde_json::Value>,
     current_state: &str,
 ) -> String {
-    for rule in &cl.auto_rules {
+    for rule in &sm.auto_rules {
         if evaluate_condition(&rule.condition, context) {
             return rule.target_state.clone();
         }
     }
     // Fall back to current state if set, otherwise first step or first state key
-    if !current_state.is_empty() && cl.states.contains_key(current_state) {
+    if !current_state.is_empty() && sm.states.contains_key(current_state) {
         return current_state.to_string();
     }
-    cl.steps
+    sm.steps
         .first()
         .cloned()
-        .or_else(|| cl.states.keys().filter(|name| name.as_str() != "_default").min().cloned())
+        .or_else(|| sm.states.keys().filter(|name| name.as_str() != "_default").min().cloned())
         .unwrap_or_default()
 }
 
@@ -676,23 +676,23 @@ where
 
 /// Resolve workflows under contexts/. A missing .sm permits legacy .cl;
 /// malformed or unreadable .sm files never fall through to a different file.
-pub fn load_file(path: &str) -> Result<ContextLang, ClError> {
+pub fn load_file(path: &str) -> Result<StateMachine, SmError> {
     load_file_in(std::path::Path::new("contexts"), path)
 }
 
-pub fn load_file_in(root: &std::path::Path, path: &str) -> Result<ContextLang, ClError> {
+pub fn load_file_in(root: &std::path::Path, path: &str) -> Result<StateMachine, SmError> {
     parse(&std::fs::read_to_string(resolve_file_in(root, path)?)?)
 }
 
-pub fn resolve_file_in(root: &std::path::Path, path: &str) -> Result<std::path::PathBuf, ClError> {
+pub fn resolve_file_in(root: &std::path::Path, path: &str) -> Result<std::path::PathBuf, SmError> {
     let name = path.strip_prefix("./contexts/").or_else(|| path.strip_prefix("contexts/")).unwrap_or(path);
     let stem = name.strip_suffix(".sm").or_else(|| name.strip_suffix(".cl")).unwrap_or(name);
     if !stem.split('/').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')) {
-        return Err(ClError::ParseError("SM name must be a relative workflow name inside contexts/".into()));
+        return Err(SmError::ParseError("SM name must be a relative workflow name inside contexts/".into()));
     }
     let display_root = if root.is_absolute() { root.to_path_buf() }
         else { std::env::current_dir().map(|cwd| cwd.join(root)).unwrap_or_else(|_| root.to_path_buf()) };
-    let root = root.canonicalize().map_err(|error| ClError::IoError(std::io::Error::new(
+    let root = root.canonicalize().map_err(|error| SmError::IoError(std::io::Error::new(
         error.kind(), format!("Workflow directory '{}' is unavailable while selecting '{path}': {error}. Check the installation working directory and restore missing bundled files with `praxis repair-assets --directory <installation-dir>`.", display_root.display())
     )))?;
     let candidates = if name.ends_with(".cl") { vec![format!("{stem}.cl")] }
@@ -705,11 +705,11 @@ pub fn resolve_file_in(root: &std::path::Path, path: &str) -> Result<std::path::
             Err(e) => return Err(e.into()),
         };
         if !file.starts_with(&root) {
-            return Err(ClError::ParseError("SM file escapes contexts/".into()));
+            return Err(SmError::ParseError("SM file escapes contexts/".into()));
         }
         return Ok(file);
     }
-    Err(ClError::IoError(std::io::Error::new(std::io::ErrorKind::NotFound, format!("No workflow found for '{path}' in '{}'. Restore the selected custom workflow, or restore bundled defaults with `praxis repair-assets --directory <installation-dir>`.", root.display()))))
+    Err(SmError::IoError(std::io::Error::new(std::io::ErrorKind::NotFound, format!("No workflow found for '{path}' in '{}'. Restore the selected custom workflow, or restore bundled defaults with `praxis repair-assets --directory <installation-dir>`.", root.display()))))
 }
 
 /// Dashboard saves use the runtime root, not a shadow data/contexts directory.
@@ -731,7 +731,7 @@ pub fn save_file_in(root: &std::path::Path, name: &str, content: &str) -> anyhow
 }
 
 /// Evaluate transitions and advance to next state if condition is met.
-pub fn advance_state(cl: &ContextLang, context: &serde_json::Value) -> Option<String> {
+pub fn advance_state(sm: &StateMachine, context: &serde_json::Value) -> Option<String> {
     let obj = match context.as_object() {
         Some(o) => o,
         None => return None,
@@ -742,7 +742,7 @@ pub fn advance_state(cl: &ContextLang, context: &serde_json::Value) -> Option<St
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    for transition in &cl.transitions {
+    for transition in &sm.transitions {
         if transition.from == current_state && (transition.condition.trim().is_empty() || evaluate_condition(&transition.condition, obj)) {
             return Some(transition.to.clone());
         }
@@ -753,7 +753,7 @@ pub fn advance_state(cl: &ContextLang, context: &serde_json::Value) -> Option<St
 
 /// Explicit transitions take precedence; @steps provides a queue only where
 /// the current state has no outgoing conditional transition to respect.
-pub fn advance_workflow(sm: &ContextLang, context: &serde_json::Value) -> Option<String> {
+pub fn advance_workflow(sm: &StateMachine, context: &serde_json::Value) -> Option<String> {
     if let Some(next) = advance_state(sm, context) { return Some(next); }
     let current = context.get("active_state").and_then(|v| v.as_str()).unwrap_or("");
     if sm.transitions.iter().any(|t| t.from == current) { return None; }
@@ -762,11 +762,19 @@ pub fn advance_workflow(sm: &ContextLang, context: &serde_json::Value) -> Option
 
 /// Force transition to a specific state.
 pub fn transition_to(
-    cl: &ContextLang,
+    sm: &StateMachine,
     context: &mut serde_json::Value,
     target_state: &str,
 ) -> bool {
-    if let Some(state) = cl.states.get(target_state) {
+    if let Some(state) = sm.states.get(target_state) {
+        // Persistent skill selection belongs to the user, not automated state
+        // transitions (including agent_next and tag-driven transitions).
+        let before = context.pointer("/settings/active_skill").cloned();
+        let mut candidate = context.clone();
+        for (key, value) in &state.variables {
+            set_nested_value(&mut candidate, key, serde_json::Value::String(value.clone()));
+        }
+        if candidate.pointer("/settings/active_skill").cloned() != before { return false; }
         for (key, value) in &state.variables {
             set_nested_value(context, key, serde_json::Value::String(value.clone()));
         }
@@ -822,7 +830,7 @@ fn get_nested_value<'a>(context: &'a serde_json::Map<String, serde_json::Value>,
 }
 
 /// Get the next state in the @steps sequence.
-pub fn next_step_state(cl: &ContextLang, context: &serde_json::Value) -> Option<String> {
+pub fn next_step_state(sm: &StateMachine, context: &serde_json::Value) -> Option<String> {
     let obj = match context.as_object() {
         Some(o) => o,
         None => return None,
@@ -833,15 +841,15 @@ pub fn next_step_state(cl: &ContextLang, context: &serde_json::Value) -> Option<
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let pos = cl.steps.iter().position(|s| s == current_state);
+    let pos = sm.steps.iter().position(|s| s == current_state);
     match pos {
-        Some(i) if i + 1 < cl.steps.len() => Some(cl.steps[i + 1].clone()),
+        Some(i) if i + 1 < sm.steps.len() => Some(sm.steps[i + 1].clone()),
         _ => None,
     }
 }
 
 #[cfg(test)]
-mod cl_tests {
+mod sm_tests {
     use super::*;
 
     #[test]
@@ -914,13 +922,13 @@ step == 2 -> use focused
 [overrides]
 if hour < 6 -> style = "whisper"
 "#;
-        let cl = parse(input).unwrap();
-        assert_eq!(cl.name, "Test Workflow");
-        assert_eq!(cl.version, "1.0");
-        assert_eq!(cl.steps, vec!["calm", "focused"]);
-        assert_eq!(cl.states.len(), 2);
-        assert_eq!(cl.auto_rules.len(), 2);
-        assert_eq!(cl.overrides.len(), 1);
+        let sm = parse(input).unwrap();
+        assert_eq!(sm.name, "Test Workflow");
+        assert_eq!(sm.version, "1.0");
+        assert_eq!(sm.steps, vec!["calm", "focused"]);
+        assert_eq!(sm.states.len(), 2);
+        assert_eq!(sm.auto_rules.len(), 2);
+        assert_eq!(sm.overrides.len(), 1);
     }
 
     #[test]
@@ -930,8 +938,8 @@ if hour < 6 -> style = "whisper"
 mode = "chat"
 voice = "calm.wav"
 "#;
-        let cl = parse(input).unwrap();
-        let state = cl.states.get("calm").unwrap();
+        let sm = parse(input).unwrap();
+        let state = sm.states.get("calm").unwrap();
         assert_eq!(state.variables.get("mode").unwrap(), "chat");
         assert_eq!(state.variables.get("voice").unwrap(), "calm.wav");
     }
@@ -943,11 +951,11 @@ voice = "calm.wav"
 calm -> focused : when step > 1
 focused -> calm : when reset
 "#;
-        let cl = parse(input).unwrap();
-        assert_eq!(cl.transitions.len(), 2);
-        assert_eq!(cl.transitions[0].from, "calm");
-        assert_eq!(cl.transitions[0].to, "focused");
-        assert_eq!(cl.transitions[0].condition, "step > 1");
+        let sm = parse(input).unwrap();
+        assert_eq!(sm.transitions.len(), 2);
+        assert_eq!(sm.transitions[0].from, "calm");
+        assert_eq!(sm.transitions[0].to, "focused");
+        assert_eq!(sm.transitions[0].condition, "step > 1");
     }
 
     #[test]
@@ -957,10 +965,10 @@ focused -> calm : when reset
 step == 1 -> use calm
 step == 2 -> use focused
 "#;
-        let cl = parse(input).unwrap();
-        assert_eq!(cl.auto_rules.len(), 2);
-        assert_eq!(cl.auto_rules[0].condition, "step == 1");
-        assert_eq!(cl.auto_rules[0].target_state, "calm");
+        let sm = parse(input).unwrap();
+        assert_eq!(sm.auto_rules.len(), 2);
+        assert_eq!(sm.auto_rules[0].condition, "step == 1");
+        assert_eq!(sm.auto_rules[0].target_state, "calm");
     }
 
     #[test]
@@ -970,11 +978,11 @@ step == 2 -> use focused
 if hour < 6 -> style = "whisper"
 if mode == "code" -> voice = "focused.wav"
 "#;
-        let cl = parse(input).unwrap();
-        assert_eq!(cl.overrides.len(), 2);
-        assert_eq!(cl.overrides[0].condition, "hour < 6");
-        assert_eq!(cl.overrides[0].key, "style");
-        assert_eq!(cl.overrides[0].value, "whisper");
+        let sm = parse(input).unwrap();
+        assert_eq!(sm.overrides.len(), 2);
+        assert_eq!(sm.overrides[0].condition, "hour < 6");
+        assert_eq!(sm.overrides[0].key, "style");
+        assert_eq!(sm.overrides[0].value, "whisper");
     }
 
     #[test]
@@ -983,9 +991,9 @@ if mode == "code" -> voice = "focused.wav"
 [secrets]
 if mode == "code" -> mimo_voice = "coder"
 "#;
-        let cl = parse(input).unwrap();
-        assert_eq!(cl.secret_overrides.len(), 1);
-        assert_eq!(cl.secret_overrides[0].key, "mimo_voice");
+        let sm = parse(input).unwrap();
+        assert_eq!(sm.secret_overrides.len(), 1);
+        assert_eq!(sm.secret_overrides[0].key, "mimo_voice");
     }
 
     #[test]
@@ -1067,9 +1075,9 @@ voice = "focused.wav"
 step == 1 -> use calm
 step == 2 -> use focused
 "#;
-        let cl = parse(input).unwrap();
+        let sm = parse(input).unwrap();
         let mut ctx = serde_json::json!({"step": 1});
-        apply_to_context(&cl, &mut ctx);
+        apply_to_context(&sm, &mut ctx);
 
         assert_eq!(ctx["mode"], "chat");
         assert_eq!(ctx["voice"], "calm.wav");
@@ -1085,9 +1093,9 @@ mode = "chat"
 [overrides]
 if hour < 6 -> mode = "whisper"
 "#;
-        let cl = parse(input).unwrap();
+        let sm = parse(input).unwrap();
         let mut ctx = serde_json::json!({"step": 1, "hour": 3});
-        apply_to_context(&cl, &mut ctx);
+        apply_to_context(&sm, &mut ctx);
 
         assert_eq!(ctx["mode"], "whisper");
     }
@@ -1106,10 +1114,10 @@ mode = "code"
 [transitions]
 calm -> focused : when step > 1
 "#;
-        let cl = parse(input).unwrap();
+        let sm = parse(input).unwrap();
         let ctx = serde_json::json!({"active_state": "calm", "step": 2});
 
-        let new_state = advance_state(&cl, &ctx);
+        let new_state = advance_state(&sm, &ctx);
         assert_eq!(new_state, Some("focused".to_string()));
     }
 
@@ -1122,10 +1130,10 @@ mode = "chat"
 [transitions]
 calm -> focused : when step > 1
 "#;
-        let cl = parse(input).unwrap();
+        let sm = parse(input).unwrap();
         let ctx = serde_json::json!({"active_state": "calm", "step": 1});
 
-        let new_state = advance_state(&cl, &ctx);
+        let new_state = advance_state(&sm, &ctx);
         assert!(new_state.is_none());
     }
 
@@ -1138,10 +1146,10 @@ mode = "chat"
 [state focused]
 mode = "code"
 "#;
-        let cl = parse(input).unwrap();
+        let sm = parse(input).unwrap();
         let mut ctx = serde_json::json!({"active_state": "calm"});
 
-        let success = transition_to(&cl, &mut ctx, "focused");
+        let success = transition_to(&sm, &mut ctx, "focused");
         assert!(success);
         assert_eq!(ctx["mode"], "code");
         assert_eq!(ctx["active_state"], "focused");
@@ -1153,10 +1161,10 @@ mode = "code"
 [state calm]
 mode = "chat"
 "#;
-        let cl = parse(input).unwrap();
+        let sm = parse(input).unwrap();
         let mut ctx = serde_json::json!({"active_state": "calm"});
 
-        let success = transition_to(&cl, &mut ctx, "nonexistent");
+        let success = transition_to(&sm, &mut ctx, "nonexistent");
         assert!(!success);
     }
 
@@ -1169,10 +1177,10 @@ mode = "chat"
 [state focused]
 [state review]
 "#;
-        let cl = parse(input).unwrap();
+        let sm = parse(input).unwrap();
         let ctx = serde_json::json!({"active_state": "calm"});
 
-        let next = next_step_state(&cl, &ctx);
+        let next = next_step_state(&sm, &ctx);
         assert_eq!(next, Some("focused".to_string()));
     }
 
@@ -1184,17 +1192,17 @@ mode = "chat"
 [state calm]
 [state focused]
 "#;
-        let cl = parse(input).unwrap();
+        let sm = parse(input).unwrap();
         let ctx = serde_json::json!({"active_state": "focused"});
 
-        let next = next_step_state(&cl, &ctx);
+        let next = next_step_state(&sm, &ctx);
         assert!(next.is_none());
     }
 
     #[test]
     fn test_parse_empty() {
-        let cl = parse("").unwrap();
-        assert!(cl.states.is_empty());
+        let sm = parse("").unwrap();
+        assert!(sm.states.is_empty());
     }
 
     #[test]
@@ -1235,12 +1243,12 @@ code -> review : when done
 [auto]
 turn > 10 -> use plan
 "#;
-        let cl = parse(input).unwrap();
-        assert_eq!(cl.name, "default");
-        assert_eq!(cl.steps.len(), 4);
-        assert_eq!(cl.states.len(), 4);
-        assert_eq!(cl.transitions.len(), 3);
-        assert_eq!(cl.auto_rules.len(), 1);
+        let sm = parse(input).unwrap();
+        assert_eq!(sm.name, "default");
+        assert_eq!(sm.steps.len(), 4);
+        assert_eq!(sm.states.len(), 4);
+        assert_eq!(sm.transitions.len(), 3);
+        assert_eq!(sm.auto_rules.len(), 1);
     }
 
     #[test]
@@ -1283,7 +1291,7 @@ settings.system_template = "installing"
 [auto]
 used_tools.last_result =~ "partition.*created" -> use installing
 "#;
-        let cl = parse(input).unwrap();
+        let sm = parse(input).unwrap();
         let mut ctx = serde_json::json!({
             "active_state": "partitioning",
             "used_tools": {
@@ -1292,7 +1300,7 @@ used_tools.last_result =~ "partition.*created" -> use installing
                 "count": 1
             }
         });
-        let secrets = apply_to_context(&cl, &mut ctx);
+        let secrets = apply_to_context(&sm, &mut ctx);
         assert!(secrets.is_empty());
         assert_eq!(ctx["active_state"], "installing");
     }
@@ -1370,7 +1378,7 @@ mode = "idle"
 [auto]
 used_tools.last_call =~ tool_regex && used_tools.last_args.action == "left" -> use done
 "#;
-        let cl = parse(input).unwrap();
+        let sm = parse(input).unwrap();
         let mut ctx = serde_json::json!({
             "active_state": "working",
             "used_tools": {
@@ -1378,7 +1386,7 @@ used_tools.last_call =~ tool_regex && used_tools.last_args.action == "left" -> u
                 "last_args": {"action": "left", "count": 3}
             }
         });
-        apply_to_context(&cl, &mut ctx);
+        apply_to_context(&sm, &mut ctx);
 
         assert_eq!(ctx["active_state"], "done");
         assert_eq!(ctx["mode"], "idle");

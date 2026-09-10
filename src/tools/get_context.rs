@@ -5,7 +5,8 @@ pub fn get_context(
 ) -> anyhow::Result<Option<String>> {
     let ctx = db.load_context(user_id)?;
 
-    let key = crate::db::contexts::canonical_context_key(key);
+    let canonical = crate::db::contexts::canonical_context_key(key);
+    let key = canonical.as_ref();
     if key.contains('.') {
         let value = serde_json::to_value(&ctx)?;
         let mut found = &value;
@@ -18,6 +19,7 @@ pub fn get_context(
         "mode" => Some(ctx.mode.clone()),
         "username" => ctx.username.clone(),
         "sm_file" => ctx.sm_file.clone(),
+        "sm_data" => Some(ctx.sm_data.to_string()),
         "system_template" => ctx.settings.system_template.clone(),
         "active_skill" => ctx.settings.active_skill.clone(),
         "active_state" => ctx.active_state.clone(),
