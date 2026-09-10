@@ -697,9 +697,15 @@ fn get_default_tools() -> Vec<Tool> {
             is_enabled: true,
         },
         Tool {
+            name: "use_skill".into(),
+            description: Some("Load a named skill's instructions with its required parameters. Follow the returned instructions using normal tools; this does not run scripts or complete the task. Available skills and required_parameters are listed in the system prompt.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"Registered skill name, e.g. code_review, debug, tmux, poml_templates"},"parameters":{"type":"object","description":"Inputs for the skill: code_review requires code; debug requires error; tmux and poml_templates require user_request. Required values are non-empty strings.","additionalProperties":true}},"required":["name","parameters"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
             name: "update_template".into(),
-            description: Some("Update or create a POML template file. The template is validated by rendering it with POML before saving. Templates control system prompts, roles, and task behaviors.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"Template name (use / for subdirectories, e.g. 'tasks/custom'). .poml extension is added automatically."},"content":{"type":"string","description":"Full POML template content as XML"}},"required":["name","content"]}),
+            description: Some("Update or create a POML template. Strictly renders a temporary file before replacing the destination; validation failure leaves existing content unchanged. Requires Node and POML_CLI.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"Template name without .poml, e.g. tasks/custom. Use letters, numbers, underscores, hyphens and / separators; no absolute paths or traversal."},"content":{"type":"string","description":"Full POML template content"},"context":{"type":"object","description":"Optional complete JSON context for validation; omitted uses synthetic system variables, never saved user data."}},"required":["name","content"]}),
             is_enabled: true,
         },
     ]
@@ -735,11 +741,25 @@ mod tool_tests {
     }
 
     #[test]
+    fn test_use_skill_registration_and_upgrade() {
+        let (db, _dir) = test_db();
+        save(&db, &get_default_tools()[0]).unwrap();
+        init_default_tools(&db).unwrap();
+        let tool = get(&db, "use_skill").unwrap();
+        assert!(tool.is_enabled);
+        assert_eq!(tool.parameters["properties"]["parameters"]["type"], "object");
+        disable(&db, "use_skill").unwrap();
+        init_default_tools(&db).unwrap();
+        assert!(!get(&db, "use_skill").unwrap().is_enabled);
+        assert!(!to_tool_definitions(&db).unwrap().iter().any(|t| t.function.name == "use_skill"));
+    }
+
+    #[test]
     fn test_init_default_tools() {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 55);
+        assert_eq!(tools.len(), get_default_tools().len());
     }
 
     #[test]
@@ -748,19 +768,21 @@ mod tool_tests {
         init_default_tools(&db).unwrap();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 55);
+        assert_eq!(tools.len(), get_default_tools().len());
     }
 
     #[test]
     fn test_list_enabled() {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
+        let expected = get_default_tools().iter().filter(|tool| tool.is_enabled).count();
         let enabled = list_enabled(&db).unwrap();
-        assert_eq!(enabled.len(), 29);
+        assert_eq!(enabled.len(), expected);
 
         disable(&db, "execute_terminal").unwrap();
         let enabled = list_enabled(&db).unwrap();
-        assert_eq!(enabled.len(), 28);
+        assert_eq!(enabled.len(), expected - 1);
+        assert!(enabled.iter().all(|tool| tool.name != "execute_terminal"));
     }
 
     #[test]
@@ -850,7 +872,8 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let defs = to_tool_definitions(&db).unwrap();
-        assert_eq!(defs.len(), 29);
+        let expected = get_default_tools().iter().filter(|tool| tool.is_enabled).count();
+        assert_eq!(defs.len(), expected);
         assert_eq!(defs[0].function.name, "execute_terminal");
     }
 
@@ -862,7 +885,8 @@ mod tool_tests {
         disable(&db, "write_file").unwrap();
 
         let defs = to_tool_definitions(&db).unwrap();
-        assert_eq!(defs.len(), 27);
+        let expected = get_default_tools().iter().filter(|tool| tool.is_enabled).count();
+        assert_eq!(defs.len(), expected - 2);
         assert!(defs.iter().all(|d| d.function.name != "execute_terminal"));
     }
 

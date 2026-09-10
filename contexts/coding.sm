@@ -1,27 +1,19 @@
-# Coding workflow - Focused on code generation
-name = coding
+# Explicit coding phases. Use agent_next to advance; turn counts are not completion evidence.
+@name "Coding workflow"
+@version "1.0"
+@steps [understand, code, test, review, done]
 
-[understand]
-task_template = tasks/plan
-role_template = roles/senior_dev
-transition -> code on next
+[state understand]
+settings.system_template = "tasks/plan"
 
-[code]
-task_template = tasks/code
-transition -> test on next
-auto_rule: turn > 10 -> next
-# Track tool call count for automatic progression
-override: used_tools.count > 15 -> cl_data.tool_calls_exhausted = "true"
+[state code]
+settings.system_template = "tasks/code"
 
-[test]
-task_template = tasks/test
-transition -> review on next
-# Auto-advance if too many tool calls without progress
-auto_rule: used_tools.count > 20 -> review
+[state test]
+settings.system_template = "tasks/test"
 
-[review]
-task_template = tasks/review
-transition -> done on done
+[state review]
+settings.system_template = "tasks/code_review"
 
-[done]
-task_template = tasks/done
+[state done]
+settings.system_template = "tasks/done"

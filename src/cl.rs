@@ -521,13 +521,13 @@ fn resolve_auto_state(
         }
     }
     // Fall back to current state if set, otherwise first step or first state key
-    if !current_state.is_empty() {
+    if !current_state.is_empty() && cl.states.contains_key(current_state) {
         return current_state.to_string();
     }
     cl.steps
         .first()
         .cloned()
-        .or_else(|| cl.states.keys().next().cloned())
+        .or_else(|| cl.states.keys().filter(|name| name.as_str() != "_default").min().cloned())
         .unwrap_or_default()
 }
 
@@ -674,44 +674,60 @@ where
     }
 }
 
-/// Load a .sm or .cl file from disk. Tries .sm first, then .cl for backwards compat.
+/// Resolve workflows under contexts/. A missing .sm permits legacy .cl;
+/// malformed or unreadable .sm files never fall through to a different file.
 pub fn load_file(path: &str) -> Result<ContextLang, ClError> {
-    // If the path already has an extension, load it directly
-    if path.ends_with(".sm") || path.ends_with(".cl") {
-        return load_file_direct(path);
-    }
-
-    // Try .sm first, then .cl
-    for ext in &[".sm", ".cl"] {
-        let with_ext = format!("{}{}", path, ext);
-        if let Ok(cl) = load_file_direct(&with_ext) {
-            return Ok(cl);
-        }
-    }
-
-    Err(ClError::IoError(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        format!("No .sm or .cl file found for '{}'", path),
-    )))
+    load_file_in(std::path::Path::new("contexts"), path)
 }
 
-fn load_file_direct(path: &str) -> Result<ContextLang, ClError> {
-    if let Ok(content) = std::fs::read_to_string(path) {
-        return parse(&content);
+pub fn load_file_in(root: &std::path::Path, path: &str) -> Result<ContextLang, ClError> {
+    parse(&std::fs::read_to_string(resolve_file_in(root, path)?)?)
+}
+
+pub fn resolve_file_in(root: &std::path::Path, path: &str) -> Result<std::path::PathBuf, ClError> {
+    let name = path.strip_prefix("./contexts/").or_else(|| path.strip_prefix("contexts/")).unwrap_or(path);
+    let stem = name.strip_suffix(".sm").or_else(|| name.strip_suffix(".cl")).unwrap_or(name);
+    if !stem.split('/').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')) {
+        return Err(ClError::ParseError("SM name must be a relative workflow name inside contexts/".into()));
     }
-    let cl_dir =
-        std::env::var("CONTEXTLANGUAGE_DIR").unwrap_or_else(|_| "contextlanguage".to_string());
-    let cl_path = format!("{}/{}", cl_dir, path);
-    if let Ok(content) = std::fs::read_to_string(&cl_path) {
-        return parse(&content);
+    let display_root = if root.is_absolute() { root.to_path_buf() }
+        else { std::env::current_dir().map(|cwd| cwd.join(root)).unwrap_or_else(|_| root.to_path_buf()) };
+    let root = root.canonicalize().map_err(|error| ClError::IoError(std::io::Error::new(
+        error.kind(), format!("Workflow directory '{}' is unavailable while selecting '{path}': {error}. Check the installation working directory and restore missing bundled files with `praxis repair-assets --directory <installation-dir>`.", display_root.display())
+    )))?;
+    let candidates = if name.ends_with(".cl") { vec![format!("{stem}.cl")] }
+        else if name.ends_with(".sm") { vec![format!("{stem}.sm")] }
+        else { vec![format!("{stem}.sm"), format!("{stem}.cl")] };
+    for candidate in candidates {
+        let file = match root.join(candidate).canonicalize() {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        if !file.starts_with(&root) {
+            return Err(ClError::ParseError("SM file escapes contexts/".into()));
+        }
+        return Ok(file);
     }
-    let contexts_path = format!("contexts/{}", path);
-    if let Ok(content) = std::fs::read_to_string(&contexts_path) {
-        return parse(&content);
+    Err(ClError::IoError(std::io::Error::new(std::io::ErrorKind::NotFound, format!("No workflow found for '{path}' in '{}'. Restore the selected custom workflow, or restore bundled defaults with `praxis repair-assets --directory <installation-dir>`.", root.display()))))
+}
+
+/// Dashboard saves use the runtime root, not a shadow data/contexts directory.
+/// A single file name is accepted here; nested workflow paths remain readable.
+pub fn save_file_in(root: &std::path::Path, name: &str, content: &str) -> anyhow::Result<()> {
+    let stem = name.strip_suffix(".sm").or_else(|| name.strip_suffix(".cl")).unwrap_or(name);
+    anyhow::ensure!(!stem.is_empty() && stem.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'), "Invalid SM file name");
+    parse(content).map_err(|e| anyhow::anyhow!("{e}"))?;
+    std::fs::create_dir_all(root)?;
+    let name = if name.ends_with(".sm") || name.ends_with(".cl") { name.to_string() } else { format!("{name}.sm") };
+    let destination = root.join(name);
+    if let Ok(meta) = std::fs::symlink_metadata(&destination) {
+        anyhow::ensure!(!meta.file_type().is_symlink(), "SM destination must not be a symlink");
     }
-    let data_contexts_path = format!("data/contexts/{}", path);
-    let content = std::fs::read_to_string(data_contexts_path)?;
-    parse(&content)
+    let temporary = tempfile::NamedTempFile::new_in(root)?;
+    std::fs::write(temporary.path(), content)?;
+    temporary.persist(destination).map_err(|e| e.error)?;
+    Ok(())
 }
 
 /// Evaluate transitions and advance to next state if condition is met.
@@ -727,12 +743,21 @@ pub fn advance_state(cl: &ContextLang, context: &serde_json::Value) -> Option<St
         .unwrap_or("");
 
     for transition in &cl.transitions {
-        if transition.from == current_state && evaluate_condition(&transition.condition, obj) {
+        if transition.from == current_state && (transition.condition.trim().is_empty() || evaluate_condition(&transition.condition, obj)) {
             return Some(transition.to.clone());
         }
     }
 
     None
+}
+
+/// Explicit transitions take precedence; @steps provides a queue only where
+/// the current state has no outgoing conditional transition to respect.
+pub fn advance_workflow(sm: &ContextLang, context: &serde_json::Value) -> Option<String> {
+    if let Some(next) = advance_state(sm, context) { return Some(next); }
+    let current = context.get("active_state").and_then(|v| v.as_str()).unwrap_or("");
+    if sm.transitions.iter().any(|t| t.from == current) { return None; }
+    next_step_state(sm, context)
 }
 
 /// Force transition to a specific state.
@@ -757,6 +782,7 @@ pub fn transition_to(
 }
 
 fn set_nested_value(context: &mut serde_json::Value, path: &str, value: serde_json::Value) {
+    let path = crate::db::contexts::canonical_context_key(path);
     let parts: Vec<&str> = path.split('.').collect();
     if parts.is_empty() {
         return;
@@ -782,6 +808,7 @@ fn set_nested_value(context: &mut serde_json::Value, path: &str, value: serde_js
 }
 
 fn get_nested_value<'a>(context: &'a serde_json::Map<String, serde_json::Value>, path: &str) -> Option<&'a serde_json::Value> {
+    let path = crate::db::contexts::canonical_context_key(path);
     let parts: Vec<&str> = path.split('.').collect();
     if parts.is_empty() {
         return None;
@@ -816,6 +843,54 @@ pub fn next_step_state(cl: &ContextLang, context: &serde_json::Value) -> Option<
 #[cfg(test)]
 mod cl_tests {
     use super::*;
+
+    #[test]
+    fn backend_step_queue_and_transition_guards() {
+        let sm = parse("@steps [one, two]\n[state one]\n[state two]\n").unwrap();
+        let context = serde_json::json!({"active_state":"one", "ready":false});
+        assert_eq!(advance_workflow(&sm, &context).as_deref(), Some("two"));
+        let guarded = parse("@steps [one, two]\n[state one]\n[state two]\n[transitions]\none -> two : when ready == true\n").unwrap();
+        assert!(advance_workflow(&guarded, &context).is_none());
+        let unguarded = parse("[state one]\n[state two]\n[transitions]\none -> two\n").unwrap();
+        assert_eq!(advance_workflow(&unguarded, &context).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn onboarding_missing_workflow_errors_identify_the_directory_and_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("contexts");
+        let error = load_file_in(&root, "standard").unwrap_err().to_string();
+        assert!(error.contains(root.to_str().unwrap()));
+        assert!(error.contains("standard") && error.contains("repair-assets"));
+        std::fs::create_dir(&root).unwrap();
+        let error = load_file_in(&root, "custom-selected").unwrap_err().to_string();
+        assert!(error.contains("custom-selected") && error.contains(root.to_str().unwrap()));
+    }
+
+    #[test]
+    fn backend_sm_save_validates_before_replacing() {
+        let root = tempfile::tempdir().unwrap();
+        save_file_in(root.path(), "standard", "@name old").unwrap();
+        assert!(save_file_in(root.path(), "standard", "[invalid]").is_err());
+        assert_eq!(load_file_in(root.path(), "standard").unwrap().name, "old");
+        assert!(save_file_in(root.path(), "../escape", "@name bad").is_err());
+        save_file_in(root.path(), "standard.sm", "@name new").unwrap();
+        assert_eq!(load_file_in(root.path(), "standard").unwrap().name, "new");
+    }
+
+    #[test]
+    fn backend_workflow_resolution_prefers_sm_without_masking_errors() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("standard.cl"), "@name legacy").unwrap();
+        assert_eq!(load_file_in(root.path(), "standard").unwrap().name, "legacy");
+        std::fs::write(root.path().join("standard.sm"), "@name canonical").unwrap();
+        assert_eq!(load_file_in(root.path(), "contexts/standard").unwrap().name, "canonical");
+        assert_eq!(load_file_in(root.path(), "standard.cl").unwrap().name, "legacy");
+        std::fs::write(root.path().join("standard.sm"), "[invalid]").unwrap();
+        assert!(load_file_in(root.path(), "standard").is_err());
+        assert!(load_file_in(root.path(), "../standard").is_err());
+    }
+
 
     #[test]
     fn test_parse_basic() {

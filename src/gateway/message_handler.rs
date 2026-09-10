@@ -8,7 +8,8 @@ pub async fn handle_message(
     content: &str,
     channel_id: Option<&str>,
 ) -> anyhow::Result<String> {
-    let ctx = state.db.load_context(user_id)?;
+    // Route before deciding the path and before either prompt is rendered.
+    let ctx = crate::gateway::prompt::prepare_runtime(state, user_id, content, None, channel_id)?;
     let max_turns = ctx.settings.max_llm_turns.unwrap_or(1);
 
     // Use agent loop when max_turns > 1
@@ -17,57 +18,11 @@ pub async fn handle_message(
             .await;
     }
 
-    // Legacy single-pass path (max_turns == 1)
+    // Single-pass and agent paths use the same routed input/context contract.
     let mut ctx = ctx;
-    let plugin_defaults = state.plugins.context_defaults();
-    if !plugin_defaults.is_empty() {
-        if ctx.custom_data.is_null() {
-            ctx.custom_data = serde_json::json!({});
-        }
-        if let Some(obj) = ctx.custom_data.as_object_mut() {
-            for (key, value) in &plugin_defaults {
-                obj.entry(key.clone()).or_insert_with(|| value.clone());
-            }
-        }
-    }
-
-    // Inject the only two runtime values that downstream code reads from
-    // `ctx.custom_data` (see agent_loop.rs for full rationale):
-    //   - `user_template`: name of the POML user-message template
-    //   - `channel_id`: default Discord channel for tools like `ask_questions`
-    {
-        if ctx.custom_data.is_null() {
-            ctx.custom_data = serde_json::json!({});
-        }
-        if let Some(obj) = ctx.custom_data.as_object_mut() {
-            let user_template = obj
-                .get("user_template")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!("user"));
-            obj.insert("user_template".to_string(), user_template);
-
-            // Default channel_id for Discord tools (can be overwritten via CL).
-            // Prefer channel_id from the incoming message, fall back to settings.
-            if !obj.contains_key("channel_id") {
-                let ch = channel_id
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| ctx.settings.feedback_channel_id.as_deref())
-                    .unwrap_or("");
-                if !ch.is_empty() {
-                    obj.insert("channel_id".to_string(), serde_json::json!(ch));
-                }
-            }
-        }
-    }
-
-    let _ = state.db.save_context(&ctx);
-
-    state.db.add_message(
-        user_id,
-        &crate::db::messages::Message::user(content.to_string()),
-    )?;
-
-    let system_prompt = build_system_prompt(state, &ctx).await;
+    let rendered_user = crate::gateway::prompt::render_user(state, &ctx, content).await?;
+    state.db.add_message(user_id, &crate::db::messages::Message::user(rendered_user))?;
+    let system_prompt = crate::gateway::prompt::render_system(state, &ctx, content).await?;
 
     let mut messages = Vec::new();
     messages.push(ChatMessage {
@@ -221,10 +176,13 @@ pub async fn handle_message(
             results.push((tc.id.clone(), final_result));
         }
 
+        // Context tools must affect the very next LLM request, not be overwritten
+        // by the pre-tool snapshot at the end of this handler.
+        ctx = crate::gateway::prompt::prepare_runtime(state, user_id, content, None, channel_id)?;
         let mut followup_messages = Vec::new();
         followup_messages.push(ChatMessage {
             role: "system".to_string(),
-            content: Some(build_system_prompt(state, &ctx).await),
+            content: Some(crate::gateway::prompt::render_system(state, &ctx, content).await?),
             content_parts: None,
             tool_calls: None,
             tool_call_id: None,
@@ -303,7 +261,7 @@ pub async fn handle_message(
             &crate::db::messages::Message::assistant(reply.clone()),
         )?;
 
-        let mut updated_ctx = ctx;
+        let mut updated_ctx = state.db.load_context(user_id)?;
         state.db.increment_turn(&mut updated_ctx);
         state.db.save_context(&updated_ctx)?;
 
@@ -326,7 +284,7 @@ pub async fn handle_message(
         &crate::db::messages::Message::assistant(reply.clone()),
     )?;
 
-    let mut updated_ctx = ctx;
+    let mut updated_ctx = state.db.load_context(user_id)?;
     state.db.increment_turn(&mut updated_ctx);
     state.db.save_context(&updated_ctx)?;
 
@@ -383,13 +341,13 @@ async fn handle_message_agent_loop(
             }
         }
     }
-    let _ = state.db.save_context(&ctx);
+    state.db.save_context(&ctx)?;
 
     let config = crate::gateway::agent_loop::AgentLoopConfig {
         max_turns,
         max_tool_calls: ctx.settings.max_tool_calls.unwrap_or(5),
         tags_enabled: ctx.settings.tags_enabled,
-        cl_file: ctx.settings.cl_file.clone().or(ctx.cl_file.clone()),
+        sm_file: ctx.settings.sm_file.clone().or(ctx.sm_file.clone()),
         feedback_enabled: !feedback_modes.is_empty(),
         message_on_toolcalling: ctx.settings.message_on_toolcalling,
         tool_history_limit: ctx.settings.tool_history_limit,
@@ -481,105 +439,6 @@ async fn handle_message_agent_loop(
     Ok(reply)
 }
 
-async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Context) -> String {
-    let template_name = ctx.settings.system_template.as_deref().unwrap_or("system");
-    let template_path = format!("templates/{}.poml", template_name);
-
-    // Load skills for context
-    let mut skills_registry = crate::skills::SkillRegistry::new();
-    let _ = skills_registry.load_from_dir(std::path::Path::new("skills"));
-    let skills = skills_registry.to_context_array();
-
-    // Load memory
-    let memory = crate::db::memory::load_memory(&state.db, &ctx.user_id);
-
-    // Calculate uptime
-    let uptime_secs = state.start_time.elapsed().as_secs();
-    let uptime = format_uptime(uptime_secs);
-
-    // Get paired users
-    let paired_users = state.db.list_all_pairings().unwrap_or_default();
-    let paired_count = paired_users.len();
-    let paired_list: Vec<serde_json::Value> = paired_users
-        .iter()
-        .map(|p| {
-            serde_json::json!({
-                "user_id": p.user_id,
-                "discord_user_id": p.discord_user_id,
-                "paired_at": p.paired_at,
-            })
-        })
-        .collect();
-
-    let context = serde_json::json!({
-        "username": ctx.username.as_deref().unwrap_or("User"),
-        "mode": ctx.mode,
-        "turn": ctx.turn,
-        "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
-        "skills": skills,
-        "uptime": uptime,
-        "uptime_secs": uptime_secs,
-        "paired_users_count": paired_count,
-        "paired_users": paired_list,
-        "path": std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/".to_string()),
-        "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-        "memory": serde_json::json!({
-            "facts": memory.learned_facts,
-            "topics": memory.last_topics,
-            "preferences": memory.user_preferences,
-            "variables": memory.custom_variables,
-        }),
-        "custom_data": if ctx.custom_data.is_null() {
-            serde_json::json!({})
-        } else {
-            ctx.custom_data.clone()
-        },
-        "used_tools_history_size": ctx.settings.tool_history_limit,
-        "cl_data": if ctx.cl_data.is_null() {
-            serde_json::json!({})
-        } else {
-            ctx.cl_data.clone()
-        },
-    });
-
-    match crate::gateway::poml::render(&template_path, &context).await {
-        Ok(rendered) => {
-            tracing::debug!(target: "message_handler", "Rendered system prompt (first 2000 chars): {}", crate::util::truncate_chars(&rendered, 2000));
-            rendered
-        },
-        Err(e) => {
-            tracing::warn!("Failed to render POML template: {}, using fallback", e);
-            format!(
-                "You are Praxis, an AI agent assistant. Current mode: {}. User: {}. Turn: {}. Uptime: {}. Paired users: {}.",
-                ctx.mode,
-                ctx.username.as_deref().unwrap_or("unknown"),
-                ctx.turn,
-                uptime,
-                paired_count,
-            )
-        }
-    }
-}
-
-fn format_uptime(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else if secs < 86400 {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-    } else {
-        format!(
-            "{}d {}h {}m",
-            secs / 86400,
-            (secs % 86400) / 3600,
-            (secs % 3600) / 60
-        )
-    }
-}
-
 async fn execute_tool_call(
     db: &crate::db::Database,
     user_id: &str,
@@ -607,6 +466,8 @@ async fn execute_tool_call(
         .collect();
 
     match tc.function.name.as_str() {
+        "use_skill" => crate::tools::use_skill::run(db, &args).await
+            .unwrap_or_else(|e| format!("Error: {}", e)),
         "execute_terminal" => {
             let command = args["command"].as_str().unwrap_or("");
             match crate::tools::execute_terminal::execute_terminal(command, None).await {
@@ -833,11 +694,10 @@ async fn execute_tool_call(
         }
         "learn_preference" => {
             let key = args["key"].as_str().unwrap_or("");
-            let value = args["value"].as_str().unwrap_or("");
-            match db.merge_context(
-                user_id,
-                serde_json::json!({"custom_data": {format!("pref_{}", key): value}}),
-            ) {
+            let value = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
+            match crate::db::memory::update_memory(db, user_id, |memory| {
+                crate::db::memory::update_preference(memory, key, &value);
+            }) {
                 Ok(_) => format!("Preference '{}' = '{}'", key, value),
                 Err(e) => format!("Error: {}", e),
             }
@@ -987,42 +847,8 @@ async fn execute_tool_call(
                 }
             }
         }
-        "update_template" => {
-            let name = args["name"].as_str().unwrap_or("");
-            let content = args["content"].as_str().unwrap_or("");
-            if name.is_empty() || content.is_empty() {
-                return "Error: name and content are required.".to_string();
-            }
-            let file_path = format!("templates/{}.poml", name);
-            if let Some(parent) = std::path::Path::new(&file_path).parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let ctx = db.load_context(user_id).unwrap_or_default();
-            let test_context = serde_json::json!({
-                "user_id": user_id,
-                "mode": ctx.mode,
-                "turn": 0,
-                "user_message": "Validation test",
-                "user_prompt": "Validation test",
-                "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            });
-            if let Err(e) = std::fs::write(&file_path, content) {
-                return format!("Error writing template file: {}", e);
-            }
-            match crate::gateway::poml::render(&file_path, &test_context).await {
-                Ok(rendered) if !rendered.trim().is_empty() => {
-                    let _ = db.save_template(name, content, None, false);
-                    let preview = crate::util::truncate_chars_ascii(&rendered, 500);
-                    format!("Template '{}' updated and validated. POML renders successfully. Preview: {}", name, preview)
-                }
-                Ok(_) => {
-                    format!("Template '{}' saved but POML render returned empty output.", name)
-                }
-                Err(e) => {
-                    format!("POML validation failed: {}. Template saved but may not render correctly.", e)
-                }
-            }
-        }
+        "update_template" => crate::tools::update_template::run(db, &args).await
+            .unwrap_or_else(|e| format!("Error: {}", e)),
         _ => match plugins
             .execute_tool(
                 &tc.function.name,
@@ -1236,6 +1062,14 @@ fn spawn_tts(
         crate::event_channel::broadcast_voice_tts(&user_id, final_audio);
     });
 }
+
+#[cfg(test)]
+#[path = "skill_dispatch_tests.rs"]
+mod skill_dispatch_tests;
+
+#[cfg(test)]
+#[path = "backend_dispatch_tests.rs"]
+mod backend_dispatch_tests;
 
 #[cfg(test)]
 mod gateway_tests {

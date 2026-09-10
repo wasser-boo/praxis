@@ -6,8 +6,44 @@ use std::path::Path;
 pub struct Skill {
     pub name: String,
     pub description: String,
+    /// Required non-empty string inputs, injected as top-level POML variables.
+    #[serde(default)]
+    pub required_parameters: Vec<String>,
     #[serde(skip)]
     pub folder: String,
+}
+
+impl Skill {
+    /// Automatic activation maps only the documented task-input aliases.
+    /// Other required inputs must already exist in the shared context.
+    pub fn parameters_for_task(&self, context: &serde_json::Value, task: &str) -> anyhow::Result<serde_json::Value> {
+        let mut parameters = context.clone();
+        anyhow::ensure!(parameters.is_object(), "Skill context must be an object");
+        for key in ["code", "error", "user_request"] {
+            parameters[key] = serde_json::json!(task);
+        }
+        self.validate_parameters(&parameters)?;
+        Ok(parameters)
+    }
+
+    pub fn validate_parameters(&self, parameters: &serde_json::Value) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            parameters.is_object(),
+            "Skill parameters must be a JSON object"
+        );
+        for key in &self.required_parameters {
+            anyhow::ensure!(
+                parameters
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.trim().is_empty()),
+                "Skill '{}' requires a non-empty string parameter '{}'",
+                self.name,
+                key
+            );
+        }
+        Ok(())
+    }
 }
 
 pub struct SkillRegistry {
@@ -35,10 +71,33 @@ impl SkillRegistry {
                 let skill_poml = path.join("skill.poml");
 
                 if skill_json.exists() && skill_poml.exists() {
-                    let content = std::fs::read_to_string(&skill_json)?;
-                    let mut skill: Skill = serde_json::from_str(&content)?;
-                    skill.folder = path.to_string_lossy().to_string();
-                    self.skills.insert(skill.name.clone(), skill);
+                    // A broken optional skill must not hide unrelated valid skills.
+                    let loaded = (|| -> anyhow::Result<Skill> {
+                        let content = std::fs::read_to_string(&skill_json)?;
+                        let mut skill: Skill = serde_json::from_str(&content)?;
+                        anyhow::ensure!(
+                            !skill.name.is_empty()
+                                && skill
+                                    .name
+                                    .bytes()
+                                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+                            "Invalid skill name"
+                        );
+                        anyhow::ensure!(
+                            !skill.description.trim().is_empty(),
+                            "Missing skill description"
+                        );
+                        skill.folder = path.to_string_lossy().to_string();
+                        Ok(skill)
+                    })();
+                    match loaded {
+                        Ok(skill) => {
+                            self.skills.insert(skill.name.clone(), skill);
+                        }
+                        Err(error) => {
+                            tracing::warn!(path = %skill_json.display(), %error, "Skipping invalid skill")
+                        }
+                    }
                 }
             }
         }
@@ -51,18 +110,21 @@ impl SkillRegistry {
     }
 
     pub fn list(&self) -> Vec<&Skill> {
-        self.skills.values().collect()
+        let mut skills: Vec<_> = self.skills.values().collect();
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        skills
     }
 
     /// Return skills as JSON array for POML context
     pub fn to_context_array(&self) -> serde_json::Value {
         let skills: Vec<serde_json::Value> = self
-            .skills
-            .values()
+            .list()
+            .into_iter()
             .map(|s| {
                 serde_json::json!({
                     "name": s.name,
-                    "description": s.description
+                    "description": s.description,
+                    "required_parameters": s.required_parameters
                 })
             })
             .collect();
@@ -71,9 +133,11 @@ impl SkillRegistry {
 }
 
 pub async fn execute_skill(skill: &Skill, context: &serde_json::Value) -> anyhow::Result<String> {
+    skill.validate_parameters(context)?;
     let poml_path = format!("{}/skill.poml", skill.folder);
-    tracing::info!("Executing skill: {} from {}", skill.name, poml_path);
-    crate::gateway::poml::render(&poml_path, context).await
+    tracing::info!("Rendering skill: {} from {}", skill.name, poml_path);
+    // Never present unrendered fallback markup as a successfully loaded skill.
+    crate::gateway::poml::render_strict(&poml_path, context).await
 }
 
 pub async fn execute_skill_by_name(
@@ -142,6 +206,55 @@ mod skill_tests {
         let arr = registry.to_context_array();
         assert!(arr.is_array());
         assert_eq!(arr.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_invalid_manifest_does_not_hide_valid_skills() {
+        let dir = TempDir::new().unwrap();
+        create_test_skill(dir.path(), "valid");
+        create_test_skill(dir.path(), "broken");
+        fs::write(dir.path().join("broken/skill.json"), "not JSON").unwrap();
+        let mut registry = SkillRegistry::new();
+        registry.load_from_dir(dir.path()).unwrap();
+        assert!(registry.get("valid").is_some());
+        assert!(registry.get("broken").is_none());
+    }
+
+    #[test]
+    fn test_required_parameters_are_advertised_and_checked() {
+        let skill: Skill = serde_json::from_value(serde_json::json!({
+            "name": "debug", "description": "Debug errors", "required_parameters": ["error"]
+        }))
+        .unwrap();
+        for context in [
+            serde_json::json!({}),
+            serde_json::json!([]),
+            serde_json::json!({"error": null}),
+            serde_json::json!({"error": " "}),
+            serde_json::json!({"error": 42}),
+        ] {
+            assert!(skill.validate_parameters(&context).is_err());
+        }
+        assert!(skill
+            .validate_parameters(&serde_json::json!({"error": "test"}))
+            .is_ok());
+        let mut registry = SkillRegistry::new();
+        registry.skills.insert(skill.name.clone(), skill);
+        assert_eq!(
+            registry.to_context_array()[0]["required_parameters"],
+            serde_json::json!(["error"])
+        );
+    }
+
+    #[test]
+    fn backend_active_skill_maps_task_aliases_without_inventing_inputs() {
+        for key in ["code", "error", "user_request"] {
+            let skill: Skill = serde_json::from_value(serde_json::json!({"name":"test", "description":"Test", "required_parameters":[key]})).unwrap();
+            let parameters = skill.parameters_for_task(&serde_json::json!({"user_prompt":"old"}), "current task").unwrap();
+            assert_eq!(parameters[key], "current task");
+        }
+        let skill: Skill = serde_json::from_value(serde_json::json!({"name":"test", "description":"Test", "required_parameters":["unprovided"]})).unwrap();
+        assert!(skill.parameters_for_task(&serde_json::json!({}), "task").is_err());
     }
 
     #[test]

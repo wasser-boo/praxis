@@ -1,3 +1,4 @@
+pub mod assets;
 pub mod cl;
 pub mod config;
 pub mod context_cmd;

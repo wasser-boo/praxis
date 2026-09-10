@@ -1,23 +1,19 @@
-# Self-learning workflow - Learn from interactions
-name = self_learning
+# Memory is explicit, user-scoped and evidence-based, not an automatic coding task.
+@name "Reflect and remember"
+@version "1.0"
+@steps [observe, learn, apply, reflect, done]
 
-[observe]
-task_template = tasks/plan
-role_template = roles/researcher
-transition -> learn on next
+[state observe]
+settings.system_template = "researcher"
 
-[learn]
-task_template = tasks/code
-transition -> apply on next
+[state learn]
+settings.system_template = "standard"
 
-[apply]
-task_template = tasks/test
-transition -> reflect on next
+[state apply]
+settings.system_template = "standard"
 
-[reflect]
-task_template = tasks/review
-transition -> done on done
-auto_rule: turn > 5 -> done
+[state reflect]
+settings.system_template = "tasks/feedback"
 
-[done]
-task_template = tasks/done
+[state done]
+settings.system_template = "tasks/done"

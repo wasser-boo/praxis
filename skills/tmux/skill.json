@@ -1,4 +1,5 @@
 {
     "name": "tmux",
+    "required_parameters": ["user_request"],
     "description": "Manage tmux sessions, windows, and panes. Use this skill when the user wants to work with terminal multiplexer."
 }

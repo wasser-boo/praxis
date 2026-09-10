@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Praxis Dashboard</title>
-    <link rel="icon" type="image/svg+xml" href="/logo.svg">
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -12,7 +13,7 @@
         <div id="login-screen" class="screen active">
             <div class="login-container">
                 <div class="logo">
-                    <img src="/logo.svg" alt="Praxis" class="logo-img">
+                    <img src="/logo.png" alt="Praxis" class="logo-img">
                     <p>AI Agent Platform</p>
                 </div>
                 <form id="login-form">
@@ -47,7 +48,7 @@
                     <button id="theme-toggle" class="btn btn-sm btn-secondary" style="width:100%;margin-bottom:0.5rem" onclick="toggleTheme()">🌙 Dark</button>
                     <button id="logout-btn" class="btn btn-secondary">Logout</button>
                 </div>
-                <button id="sidebar-toggle" class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">&#9776;</button>
+                <button id="sidebar-toggle" type="button" class="sidebar-toggle" onclick="toggleSidebar()" title="Dashboard menu" aria-label="Dashboard menu" aria-controls="sidebar" aria-expanded="true">&#9776;</button>
             </nav>
 
             <main class="content">
@@ -67,7 +68,7 @@
                 </div>
 
                 <div id="tab-chat" class="tab">
-                    <button id="chat-sidebar-toggle" class="chat-sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">&#9776;</button>
+                    <button id="chat-sidebar-toggle" type="button" class="chat-sidebar-toggle" onclick="toggleChatConversations()" title="Toggle conversations" aria-label="Open conversations" aria-controls="chat-session-list" aria-expanded="false">☰ Chats</button>
                     <div class="chat-app">
                         <div class="chat-sidebar">
                             <div class="chat-sidebar-header">
@@ -81,6 +82,7 @@
                                 <span id="cl-status-file" class="cl-badge">-</span>
                                 <span id="cl-status-state" class="cl-badge">-</span>
                                 <span id="cl-status-temps" class="cl-badge">-</span>
+                                <span id="cl-status-skill" class="cl-badge" style="display:none"></span>
                                 <span id="cl-status-vars" class="cl-badge" title="Variables changed in this state">-</span>
                             </div>
                             <div id="chat-agent-banner" class="agent-banner" style="display:none">
@@ -90,7 +92,7 @@
                                 <div style="margin-left:auto;display:flex;align-items:center;gap:0.75rem">
                                     <div style="display:flex;flex-direction:column;align-items:center;gap:0.5rem">
                                         <div style="display:flex;flex-direction:column;align-items:center;gap:0.15rem">
-                                            <img id="chat-bot-avatar" class="avatar-sm" src="/logo.svg" alt="Bot" title="Bot avatar" onclick="showAvatarModal('bot')" style="cursor:pointer">
+                                            <img id="chat-bot-avatar" class="avatar-sm" src="/logo.png" alt="Bot" title="Bot avatar" onclick="showAvatarModal('bot')" style="cursor:pointer">
                                             <span id="chat-bot-name" class="avatar-label">Praxis</span>
                                         </div>
                                         <div style="display:flex;flex-direction:column;align-items:center;gap:0.15rem">

@@ -39,35 +39,15 @@ pub async fn run(
             }
             ctx.settings.llm_turn += 1;
 
-            // Advance CL state if a CL file is configured
-            let cl_path = ctx.settings.cl_file.clone().or(ctx.cl_file.clone());
-            if let Some(ref path) = cl_path {
-                match crate::cl::load_file(path) {
-                    Ok(cl) => {
-                        let mut ctx_val = serde_json::to_value(&ctx)
-                            .map_err(|e| format!("Failed to serialize context: {}", e))?;
-                        let current_state = ctx_val.get("active_state").and_then(|v| v.as_str()).unwrap_or("");
-                        // Check all possible locations for state_key
-                        let state_key = ctx_val.get("state_key").and_then(|v| v.as_str())
-                            .or_else(|| ctx_val.pointer("/settings/state_key").and_then(|v| v.as_str()))
-                            .unwrap_or("");
-                        tracing::info!(user_id = %user_id, path = %path, current_state = %current_state, state_key = %state_key, 
-                            context_keys = ?ctx_val.as_object().map(|o| o.keys().collect::<Vec<_>>()), 
-                            "CL workflow loaded");
-                        if let Some(new_state) = crate::cl::advance_state(&cl, &ctx_val) {
-                            crate::cl::transition_to(&cl, &mut ctx_val, &new_state);
-                            if let Ok(updated_ctx) = serde_json::from_value::<crate::db::contexts::Context>(ctx_val) {
-                                ctx = updated_ctx;
-                            }
-                            tracing::info!(user_id = %user_id, new_state = %new_state, "CL state advanced via agent_next");
-                        } else {
-                            tracing::info!(user_id = %user_id, "CL no transition matched");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(user_id = %user_id, path = %path, error = %e, "Failed to load CL file");
-                    }
+            let path = crate::gateway::prompt::workflow_name(&ctx).to_string();
+            let sm = crate::cl::load_file(&path).map_err(|e| format!("Failed to load SM workflow: {e}"))?;
+            let mut value = serde_json::to_value(&ctx).map_err(|e| e.to_string())?;
+            if let Some(next) = crate::cl::advance_workflow(&sm, &value) {
+                if !crate::cl::transition_to(&sm, &mut value, &next) {
+                    return Err(format!("SM target state does not exist: {next}"));
                 }
+                ctx = serde_json::from_value(value).map_err(|e| e.to_string())?;
+                ctx.settings.active_state = ctx.active_state.clone();
             }
         }
         AgentControlSignal::Complete => {

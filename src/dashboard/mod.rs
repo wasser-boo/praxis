@@ -21,10 +21,9 @@ impl DashboardServer {
         let addr = format!("0.0.0.0:{}", self.port);
 
         if self.tls {
-            rustls::crypto::CryptoProvider::install_default(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            )
-            .expect("Failed to install TLS crypto provider");
+            // main installs this before starting services. Library callers may
+            // still need it; an already installed provider is not an error.
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
             let cert_path = ensure_cert(&self.data_dir)?;
             tracing::info!("Dashboard starting on https://{}", addr);

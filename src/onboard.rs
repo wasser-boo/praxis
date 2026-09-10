@@ -660,75 +660,16 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
 
     std::fs::write(env_path, content)?;
 
-    println!("\nOnboarding complete! Run: ./praxis run");
-
     println!("Configuration saved to {}", env_path);
 
-    // Create directories
-    std::fs::create_dir_all("templates/roles")?;
-    std::fs::create_dir_all("templates/tasks")?;
-    std::fs::create_dir_all("contextlanguage")?;
     std::fs::create_dir_all("data")?;
-    std::fs::create_dir_all("skills")?;
     std::fs::create_dir_all("plugins")?;
-    std::fs::create_dir_all("static")?;
-    println!(
-        "Created directories: templates/roles/, templates/tasks/, contextlanguage/, data/, skills/, plugins/, static/"
-    );
-
-    // Create default templates
-    std::fs::write(
-        "templates/system.poml",
-        include_str!("../templates/system.poml"),
-    )?;
-    std::fs::write(
-        "templates/roles/senior_dev.poml",
-        include_str!("../templates/roles/senior_dev.poml"),
-    )?;
-    std::fs::write(
-        "templates/roles/technical_writer.poml",
-        include_str!("../templates/roles/technical_writer.poml"),
-    )?;
-    std::fs::write(
-        "templates/roles/researcher.poml",
-        include_str!("../templates/roles/researcher.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/plan.poml",
-        include_str!("../templates/tasks/plan.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/test.poml",
-        include_str!("../templates/tasks/test.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/review.poml",
-        include_str!("../templates/tasks/review.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/done.poml",
-        include_str!("../templates/tasks/done.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/code.poml",
-        include_str!("../templates/tasks/code.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/code_review.poml",
-        include_str!("../templates/tasks/code_review.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/feedback.poml",
-        include_str!("../templates/tasks/feedback.poml"),
-    )?;
-    println!("Created default templates");
-
-    // Create static dashboard files
-    std::fs::write("static/index.html", include_str!("../static/index.html"))?;
-    std::fs::write("static/style.css", include_str!("../static/style.css"))?;
-    std::fs::write("static/app.js", include_str!("../static/app.js"))?;
-    std::fs::write("static/logo.svg", include_str!("../static/logo.svg"))?;
-    println!("Created dashboard files: static/index.html, static/style.css, static/app.js, static/logo.svg");
+    // One complete bundle for onboarding and repair, including all relative
+    // POML imports, canonical contexts/*.sm, native skills and bitmap branding.
+    // Preserve existing user customizations instead of overwriting prompts.
+    let assets = crate::assets::install(std::path::Path::new("."), false)?;
+    println!("Installed {} runtime assets; preserved {} existing files.", assets.created.len(), assets.preserved.len());
+    println!("For dashboard upgrades without reconfiguring: ./praxis repair-assets --update-dashboard");
 
     // Ask about MiniMax image plugin
     if provider_name == "minimax" || provider_name == "mimo" {

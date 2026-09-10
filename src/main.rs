@@ -28,6 +28,15 @@ enum Cli {
         #[arg(long)]
         interactive: bool,
     },
+    /// Restore missing bundled assets without reading/changing configuration or databases
+    RepairAssets {
+        /// Installation working directory (the directory used by praxis run)
+        #[arg(long, default_value = ".")]
+        directory: std::path::PathBuf,
+        /// Also update bundled dashboard files, backing up changed files first
+        #[arg(long)]
+        update_dashboard: bool,
+    },
     /// Manage the Praxis system service
     Service {
         #[command(subcommand)]
@@ -239,8 +248,18 @@ enum DiskAction {
     },
 }
 
+fn initialize_tls_provider() {
+    // Dependencies enable both ring and aws-lc-rs, making Rustls autodetection
+    // ambiguous. Select the backend declared in Cargo.toml before creating any
+    // TLS clients or servers. Err only means a provider is already installed;
+    // leave that existing process-wide choice intact.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 #[tokio::main]
 async fn main() {
+    initialize_tls_provider();
+
     if let Err(e) = run().await {
         eprintln!("Error: {:#}", e);
         std::process::exit(1);
@@ -261,9 +280,17 @@ fn load_dotenv() {
 }
 
 async fn run() -> anyhow::Result<()> {
-    load_dotenv();
-
     let cli = Cli::parse();
+    // Offline repair must not load .env, unlock secrets, initialize a database
+    // or start services. It only touches the explicit public-asset allow-list.
+    if let Cli::RepairAssets { directory, update_dashboard } = &cli {
+        let report = praxis::assets::install(directory, *update_dashboard)?;
+        println!("Assets in {}: {} created, {} preserved, {} dashboard files updated.", directory.display(), report.created.len(), report.preserved.len(), report.updated.len());
+        if let Some(backup) = &report.backup_dir { println!("Previous dashboard files: {}", backup.display()); }
+        println!("Configuration, secrets, databases and service state were not changed.");
+        return Ok(());
+    }
+    load_dotenv();
 
     // Service and Plugin commands don't need logging setup
     if let Cli::Service { action } = &cli {
@@ -340,6 +367,7 @@ async fn run() -> anyhow::Result<()> {
         } => return handle_backup(output, no_disks, no_isos).await,
         Cli::Restore { file, yes } => return handle_restore(&file, yes).await,
         Cli::Chat => unreachable!(),
+        Cli::RepairAssets { .. } => unreachable!(),
         Cli::Service { .. } => unreachable!(),
         Cli::Plugin { .. } => unreachable!(),
     }
@@ -1383,6 +1411,46 @@ async fn handle_restore(file: &str, yes: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tls_provider_initialization_for_clients_and_servers() {
+        initialize_tls_provider();
+
+        // Construct TLS configurations only: no sockets, credentials or API calls.
+        let _client = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        let _server = rustls::ServerConfig::builder().with_no_client_auth();
+        reqwest::Client::builder()
+            .use_rustls_tls()
+            .build()
+            .expect("HTTPS client construction should not panic with Discord voice enabled");
+    }
+
+    #[test]
+    fn test_tls_provider_initialization_is_idempotent() {
+        initialize_tls_provider();
+        let original = rustls::crypto::CryptoProvider::get_default()
+            .expect("startup must select a TLS provider")
+            .clone();
+
+        initialize_tls_provider();
+        let current = rustls::crypto::CryptoProvider::get_default().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&original, current));
+    }
+
+    #[test]
+    fn test_cli_parsing_repair_assets() {
+        let cli = Cli::try_parse_from(["praxis", "repair-assets", "--directory", "/synthetic/install", "--update-dashboard"]).unwrap();
+        match cli {
+            Cli::RepairAssets { directory, update_dashboard } => {
+                assert_eq!(directory, std::path::PathBuf::from("/synthetic/install"));
+                assert!(update_dashboard);
+            }
+            _ => panic!("Expected RepairAssets"),
+        }
+        assert!(matches!(Cli::try_parse_from(["praxis", "repair-assets"]).unwrap(), Cli::RepairAssets { update_dashboard: false, .. }));
+    }
 
     #[test]
     fn test_cli_parsing_run() {

@@ -5,6 +5,7 @@ pub mod http_handler;
 pub mod llm;
 pub mod message_handler;
 pub mod poml;
+pub mod prompt;
 pub mod rate_limiter;
 pub mod templates;
 pub mod ws_handler;

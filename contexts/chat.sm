@@ -1,7 +1,7 @@
-# Chat workflow - Simple conversational mode
-name = chat
+@name "Conversational mode"
+@version "1.0"
+@steps [chat]
 
-[chat]
-task_template = tasks/done
-mode = chat
-transition -> chat on next
+[state chat]
+mode = "chat"
+settings.system_template = "standard"

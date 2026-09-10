@@ -87,25 +87,43 @@ function showTab(tabId) {
 
     const content = document.querySelector('.content');
     const sidebar = document.getElementById('sidebar');
-    if (tabId === 'chat') {
-        content.classList.add('chat-expanded');
-        sidebar.classList.add('collapsed');
-        if (sidebarCollapsed) sidebar.classList.add('collapsed');
-    } else {
-        content.classList.remove('chat-expanded');
-        if (!sidebarCollapsed) sidebar.classList.remove('collapsed');
-    }
+    document.body.classList.toggle('chat-tab-active', tabId === 'chat');
+    document.body.classList.remove('chat-conversations-open');
+    content.classList.toggle('chat-expanded', tabId === 'chat');
+    sidebar.classList.toggle('collapsed', tabId === 'chat' || sidebarCollapsed);
+    updateNavigationButtons();
     loadTabData(tabId);
 }
 
 function toggleSidebar() {
-    sidebarCollapsed = !sidebarCollapsed;
     const sidebar = document.getElementById('sidebar');
-    sidebar.classList.toggle('collapsed', sidebarCollapsed);
     const isChat = document.getElementById('tab-chat').classList.contains('active');
-    if (!isChat) {
-        document.querySelector('.content').classList.toggle('chat-expanded', sidebarCollapsed);
+    if (isChat) {
+        const open = sidebar.classList.contains('collapsed');
+        sidebar.classList.toggle('collapsed', !open);
+        document.body.classList.remove('chat-conversations-open');
+    } else {
+        sidebarCollapsed = !sidebarCollapsed;
+        sidebar.classList.toggle('collapsed', sidebarCollapsed);
     }
+    updateNavigationButtons();
+}
+
+function toggleChatConversations() {
+    document.body.classList.toggle('chat-conversations-open');
+    updateNavigationButtons();
+}
+
+function updateNavigationButtons() {
+    const expanded = !document.getElementById('sidebar').classList.contains('collapsed');
+    const menu = document.getElementById('sidebar-toggle');
+    menu.setAttribute('aria-expanded', String(expanded));
+    menu.setAttribute('aria-label', expanded ? 'Close dashboard menu' : 'Open dashboard menu');
+    menu.title = expanded ? 'Close dashboard menu' : 'Open dashboard menu';
+    const conversations = document.getElementById('chat-sidebar-toggle');
+    const chatsExpanded = document.body.classList.contains('chat-conversations-open');
+    conversations.setAttribute('aria-expanded', String(chatsExpanded));
+    conversations.setAttribute('aria-label', chatsExpanded ? 'Close conversations' : 'Open conversations');
 }
 
 async function loadTabData(tab) {
@@ -423,7 +441,7 @@ function loadAvatar() {
     const key = (chatUsername && chatUsername !== 'User') ? chatUsername : chatUserId;
     img.src = `/api/avatar/${encodeURIComponent(key)}?t=${Date.now()}`;
     img.style.display = '';
-    img.onerror = () => { img.src = '/logo.svg'; };
+    img.onerror = () => { img.src = '/logo.png'; };
 }
 
 async function chatStartAgent() {
@@ -515,7 +533,7 @@ function addChatQuestionCard(questionId, text, suggestions) {
 
     card.innerHTML = `<div class="msg-row">
         <div class="msg-col">
-            <img class="msg-avatar" src="/logo.svg" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.svg'">
+            <img class="msg-avatar" src="/logo.png" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.png'">
             <span class="msg-label">Question</span>
         </div>
         <div class="msg-content">
@@ -681,7 +699,7 @@ function startChatStream() {
                     const botName = chatBotName || 'Praxis';
                     streamMsg.innerHTML = `<div class="msg-row">
                         <div class="msg-col">
-                            <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.svg'" onclick="showAvatarModal('bot')">
+                            <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.png'" onclick="showAvatarModal('bot')">
                             <span class="msg-label">${escapeHtml(botName)}</span>
                         </div>
                         <div class="msg-content markdown stream-live"></div>
@@ -898,7 +916,7 @@ function addChatMessage(type, content, extra = null) {
     if (type === 'user') {
         div.innerHTML = `<div class="msg-row">
             <div class="msg-col">
-                <img class="msg-avatar" src="${userAvatar}" alt="" onerror="this.src='/logo.svg'" onclick="showAvatarModal('user')">
+                <img class="msg-avatar" src="${userAvatar}" alt="" onerror="this.src='/logo.png'" onclick="showAvatarModal('user')">
                 <span class="msg-label">${escapeHtml(userName)}</span>
             </div>
             <div class="msg-content">${escapeHtml(content)}</div>
@@ -906,7 +924,7 @@ function addChatMessage(type, content, extra = null) {
     } else if (type === 'assistant') {
         div.innerHTML = `<div class="msg-row">
             <div class="msg-col">
-                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.svg'" onclick="showAvatarModal('bot')">
+                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.png'" onclick="showAvatarModal('bot')">
                 <span class="msg-label">${escapeHtml(botName)}</span>
             </div>
             <div class="msg-content markdown">${renderMarkdown(content)}</div>
@@ -915,7 +933,7 @@ function addChatMessage(type, content, extra = null) {
         const args = extra || '';
         div.innerHTML = `<div class="msg-row">
             <div class="msg-col">
-                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-cyan)" onerror="this.src='/logo.svg'" onclick="showAvatarModal('bot')">
+                <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-cyan)" onerror="this.src='/logo.png'" onclick="showAvatarModal('bot')">
                 <span class="msg-label">Tool</span>
             </div>
             <div class="msg-content">${content}${args ? `<div class="tool-out">${escapeHtml(args)}</div>` : ''}</div>
@@ -942,7 +960,7 @@ function addChatImage(path, caption) {
     const botName = chatBotName || 'Praxis';
     div.innerHTML = `<div class="msg-row">
         <div class="msg-col">
-            <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.svg'" onclick="showAvatarModal('bot')">
+            <img class="msg-avatar" src="${botAvatar}" alt="" style="border-color:var(--accent-purple)" onerror="this.src='/logo.png'" onclick="showAvatarModal('bot')">
             <span class="msg-label">${escapeHtml(botName)}</span>
         </div>
         <div class="msg-content">
@@ -1079,6 +1097,7 @@ async function chatNewSession() {
 }
 
 async function switchChatSession(id) {
+    document.body.classList.remove('chat-conversations-open');
     console.log('[SESSION] switching to session:', id, '(from', chatUserId, ')');
     stopChatPolling();
     chatPollGen++;
@@ -1207,22 +1226,37 @@ async function chatUploadAvatar() {
 
 // ═══ CL Status ════════════════════════════════════════════════════════════════
 
+function contextSmFile(ctx) {
+    return ctx?.sm_file || ctx?.cl_file || '';
+}
+
 async function loadCLStatus() {
     try {
-        const res = await apiGet(`/api/cl/${encodeURIComponent(chatUserId)}`);
+        const encodedUser = encodeURIComponent(chatUserId);
+        let res = await apiGet(`/api/sm/${encodedUser}`);
+        if (!res.ok && res.status === 404) {
+            // Legacy route retained while backend route names converge.
+            res = await apiGet(`/api/cl/${encodedUser}`);
+        }
         const data = await res.json();
         const bar = document.getElementById('chat-cl-status');
-        if (data.cl_file || data.active_state || (data.sm_data && Object.keys(data.sm_data).length > 0)) {
+        const smFile = contextSmFile(data);
+        const vars = data.cl_data || data.sm_data || {};
+        if (smFile || data.system_template || data.active_state || Object.keys(vars).length > 0) {
             bar.style.display = 'flex';
-            document.getElementById('cl-status-file').textContent = data.cl_file ? `SM: ${data.cl_file}` : '-';
+            document.getElementById('cl-status-file').textContent = smFile ? `Statemachine: ${smFile}` : '-';
             document.getElementById('cl-status-state').textContent = data.active_state ? `State: ${data.active_state}` : '-';
             const temps = data.active_templates || [];
-            document.getElementById('cl-status-temps').textContent = temps.length
-                ? `Templates: ${temps.join(', ')}`
-                : '-';
-            document.getElementById('cl-status-temps').className = temps.length ? 'cl-badge template' : 'cl-badge';
-            // Show SM variables
-            const vars = data.sm_data || {};
+            const templateBadge = document.getElementById('cl-status-temps');
+            templateBadge.textContent = data.system_template
+                ? `System: ${data.system_template}`
+                : (temps.length ? `Templates: ${temps.join(', ')}` : '-');
+            templateBadge.title = temps.length ? `Template stack: ${temps.join(', ')}` : 'Effective system template';
+            templateBadge.className = data.system_template || temps.length ? 'cl-badge template' : 'cl-badge';
+            const skillBadge = document.getElementById('cl-status-skill');
+            skillBadge.textContent = data.active_skill ? `Skill: ${data.active_skill}` : '';
+            skillBadge.style.display = data.active_skill ? '' : 'none';
+            // cl_data is still the canonical workflow namespace.
             const varKeys = Object.keys(vars).filter(k => k !== 'active_state' && k !== 'active_templates');
             const varsEl = document.getElementById('cl-status-vars');
             if (varKeys.length > 0) {
@@ -1270,7 +1304,7 @@ async function viewContext(userId) {
 
         const redundantKeys = new Set([
             'mimo_api_key', 'minimax_api_key', 'voice_elevenlabs_api_key', 'voice_elevenlabs_stt_api_key',
-            'cl_file', 'active_state', 'active_templates', 'llm_turn', 'compaction_summary', 'download'
+            'sm_file', 'cl_file', 'active_state', 'active_templates', 'llm_turn', 'compaction_summary', 'download'
         ]);
 
         const filteredSettings = ctx.settings ? Object.entries(ctx.settings).filter(([k]) => !redundantKeys.has(k)) : [];
@@ -1293,7 +1327,7 @@ async function viewContext(userId) {
                     <div class="data-item"><span class="name">User ID</span><span class="meta">${escapeHtml(ctx.user_id || '')}</span></div>
                     <div class="data-item"><span class="name">Turn</span><span class="meta">${ctx.turn ?? 0}</span></div>
                     <div class="data-item"><span class="name">Mode</span><span class="meta">${escapeHtml(ctx.mode || '')}</span></div>
-                    <div class="data-item"><span class="name">SM File</span><span class="meta">${escapeHtml(ctx.cl_file || '-')}</span></div>
+                    <div class="data-item"><span class="name">Statemachine</span><span class="meta">${escapeHtml(contextSmFile(ctx) || '-')}</span></div>
                     <div class="data-item"><span class="name">Active State</span><span class="meta">${escapeHtml(ctx.active_state || '-')}</span></div>
                     <div class="data-item"><span class="name">Active Templates</span><span class="meta">${(ctx.active_templates || []).join(', ') || '-'}</span></div>
                 </div>
@@ -1457,10 +1491,14 @@ async function loadTools() {
         if (!data.tools || data.tools.length === 0) {
             list.innerHTML = '<div class="data-item"><span class="name">No tools found</span></div>'; return;
         }
-        list.innerHTML = data.tools.map(t => `<div class="data-item">
-            <div><span class="name">${escapeHtml(t.name)}</span><span class="meta">${escapeHtml(t.description || '')}</span></div>
-            <div class="toggle ${t.is_enabled ? 'active' : ''}" onclick="toggleTool('${escapeHtml(t.name)}', ${!t.is_enabled})"></div>
-        </div>`).join('');
+        list.innerHTML = data.tools.map(t => {
+            const safeName = escapeHtml(t.name);
+            const nameArg = JSON.stringify(String(t.name || ''));
+            return `<div class="data-item tool-item">
+                <div class="tool-copy"><span class="name">${safeName}</span><span class="meta">${escapeHtml(t.description || '')}</span></div>
+                <button type="button" class="toggle ${t.is_enabled ? 'active' : ''}" aria-label="${t.is_enabled ? 'Disable' : 'Enable'} ${safeName}" aria-pressed="${t.is_enabled ? 'true' : 'false'}" onclick='toggleTool(${nameArg}, ${!t.is_enabled})'></button>
+            </div>`;
+        }).join('');
     } catch (err) { console.error('Tools error:', err); }
 }
 
@@ -2243,7 +2281,7 @@ function showAvatarModal(which) {
     overlay.innerHTML = `
         <div class="modal avatar-modal">
             <h3>${escapeHtml(name)} Avatar</h3>
-            <img id="avatar-current-preview" class="avatar-preview" src="${imgUrl}" alt="" onerror="this.src='/logo.svg'">
+            <img id="avatar-current-preview" class="avatar-preview" src="${imgUrl}" alt="" onerror="this.src='/logo.png'">
             <img id="avatar-new-preview" class="avatar-preview" src="" alt="New avatar" style="display:none;margin-top:0.5rem">
             <input type="file" id="avatar-upload-input" accept="image/*" style="display:none" onchange="handleAvatarFileSelect(this, '${which}')">
             <button class="btn btn-primary" style="margin-top:1rem" onclick="document.getElementById('avatar-upload-input').click()">Upload Photo</button>

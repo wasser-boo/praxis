@@ -1,0 +1,4 @@
+<poml>
+  <!-- Compatibility name; existing tutor selections keep working. -->
+  <include src="language_instructor.poml" />
+</poml>

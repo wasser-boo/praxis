@@ -60,7 +60,7 @@ pub struct AgentLoopConfig {
     pub max_turns: i32,
     pub max_tool_calls: i32,
     pub tags_enabled: bool,
-    pub cl_file: Option<String>,
+    pub sm_file: Option<String>,
     pub feedback_enabled: bool,
     pub message_on_toolcalling: bool,
     pub tool_history_limit: usize,
@@ -72,7 +72,7 @@ impl Default for AgentLoopConfig {
             max_turns: 10,
             max_tool_calls: 5,
             tags_enabled: true,
-            cl_file: None,
+            sm_file: None,
             feedback_enabled: false,
             message_on_toolcalling: false,
             tool_history_limit: 50,
@@ -119,6 +119,21 @@ pub async fn run_agent_loop(
     config: AgentLoopConfig,
     feedback_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> anyhow::Result<AgentLoopResult> {
+    let result = run_agent_loop_inner(state, user_id, user_message_input, config, feedback_tx).await;
+    // Strict rendering/DB errors must not leave a ghost active loop behind.
+    unregister_active_loop(user_id).await;
+    STOP_SIGNALS.write().await.remove(user_id);
+    crate::dashboard::stream::send(user_id, "agent_stop", "{}");
+    result
+}
+
+async fn run_agent_loop_inner(
+    state: &GatewayState,
+    user_id: &str,
+    user_message_input: &str,
+    config: AgentLoopConfig,
+    feedback_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> anyhow::Result<AgentLoopResult> {
     let mut turn = 0;
     let mut completed = false;
     let mut advanced = false;
@@ -133,75 +148,15 @@ pub async fn run_agent_loop(
     // frontend can render a visually distinct "loop running" banner.
     crate::dashboard::stream::send(user_id, "agent_start", "{}");
 
-    // Load context
     let mut ctx = state.db.load_context(user_id)?;
-
-    // Merge plugin context defaults into custom_data
-    let plugin_defaults = state.plugins.context_defaults();
-    if !plugin_defaults.is_empty() {
-        if ctx.custom_data.is_null() {
-            ctx.custom_data = serde_json::json!({});
-        }
-        if let Some(obj) = ctx.custom_data.as_object_mut() {
-            for (key, value) in &plugin_defaults {
-                obj.entry(key.clone()).or_insert_with(|| value.clone());
-            }
-        }
+    // Config supplies only an initial default. Subsequent tool changes/clears
+    // are loaded from DB, never shadowed by a frozen loop configuration.
+    if ctx.settings.sm_file.is_none() && ctx.sm_file.is_none() {
+        ctx.sm_file = config.sm_file.clone();
     }
-
-    // Inject the only two runtime values that downstream code actually reads
-    // from `ctx.custom_data`:
-    //   - `user_template`: name of the POML user-message template
-    //   - `channel_id`: default Discord channel for tools like `ask_questions`
-    //
-    // Everything else (user_prompt, path, time, memory, tools, tokens_*, vm_*,
-    // installation_disks, running_vms, message_count, ...) used to be injected
-    // here too, but those values are either:
-    //   1. re-built fresh by `build_system_prompt` at the top level of the
-    //      template context, OR
-    //   2. read directly from settings / disk / DB by the consumer, OR
-    //   3. dead — never read by any template or code path.
-    // Injecting them here was pure noise that cluttered the persisted context.
-    {
-        if ctx.custom_data.is_null() {
-            ctx.custom_data = serde_json::json!({});
-        }
-        if let Some(obj) = ctx.custom_data.as_object_mut() {
-            let user_template = obj
-                .get("user_template")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!("user"));
-            obj.insert("user_template".to_string(), user_template);
-
-            // Default channel_id for Discord tools (can be overwritten via CL).
-            if !obj.contains_key("channel_id") {
-                let fallback_ch = ctx.settings.feedback_channel_id.clone().unwrap_or_default();
-                if !fallback_ch.is_empty() {
-                    obj.insert("channel_id".to_string(), serde_json::json!(fallback_ch));
-                }
-            }
-        }
-    }
-
-    // Apply user template
-    let user_template_name = ctx
-        .custom_data
-        .get("user_template")
-        .and_then(|v| v.as_str())
-        .unwrap_or("user");
-    let user_template_path = format!("templates/{}.poml", user_template_name);
-    tracing::info!(user_id = %ctx.user_id, user_template = %user_template_name, "Using user template");
-    let rendered_user_message = if std::path::Path::new(&user_template_path).exists() {
-        let tmpl_ctx = serde_json::json!({
-            "user_prompt": user_message,
-            "custom_data": ctx.custom_data,
-        });
-        crate::gateway::poml::render(&user_template_path, &tmpl_ctx)
-            .await
-            .unwrap_or_else(|_| user_message.to_string())
-    } else {
-        user_message.to_string()
-    };
+    crate::gateway::prompt::route_context(std::path::Path::new("."), &mut ctx, &user_message, &state.plugins, None)?;
+    state.db.save_context(&ctx)?;
+    let rendered_user_message = crate::gateway::prompt::render_user(state, &ctx, &user_message).await?;
 
     // Store user message
     state.db.add_message(
@@ -221,10 +176,7 @@ pub async fn run_agent_loop(
         if !injected.is_empty() {
             tracing::info!(user_id = %user_id, injected_count = injected.len(), "Injecting {} user messages into conversation", injected.len());
             for msg in &injected {
-                state.db.add_message(
-                    user_id,
-                    &crate::db::messages::Message::user(msg.clone()),
-                )?;
+                crate::gateway::prompt::append_injected_message(state, user_id, msg).await?;
             }
             // Use last injected message, reset turn for more turns
             user_message = injected.last().cloned().unwrap_or(user_message);
@@ -232,7 +184,8 @@ pub async fn run_agent_loop(
             continue;
         }
 
-        if turn >= config.max_turns {
+        let current_limits = state.db.load_context(user_id)?;
+        if turn >= current_limits.settings.max_llm_turns.unwrap_or(config.max_turns) {
             tracing::warn!(user_id = %user_id, turn = turn, "Max turns reached");
             break;
         }
@@ -240,38 +193,9 @@ pub async fn run_agent_loop(
         turn += 1;
         ctx.turn = turn;
 
-        // Reload context from DB to pick up changes from set_context
-        // (e.g. screen transitions that change the system_template)
-        if let Ok(fresh_ctx) = state.db.load_context(user_id) {
-            ctx = fresh_ctx;
-            ctx.turn = turn;
-        }
-
-        // Apply CL workflow (auto rules only, transitions are on agent_next)
-        if let Some(ref cl_path) = config.cl_file {
-            match cl::load_file(cl_path) {
-                Ok(cl) => {
-                    let mut ctx_val = serde_json::to_value(&ctx)?;
-                    let old_template = ctx_val.pointer("/settings/system_template").and_then(|v| v.as_str()).unwrap_or("system").to_string();
-                    let _secret_changes = cl::apply_to_context(&cl, &mut ctx_val);
-                    let new_template = ctx_val.pointer("/settings/system_template").and_then(|v| v.as_str()).unwrap_or("system").to_string();
-                    let current_state = ctx_val.get("active_state").and_then(|v| v.as_str()).unwrap_or("");
-                    tracing::info!(cl_path = %cl_path, active_state = %current_state, old_template = %old_template, new_template = %new_template, "CL workflow applied");
-                    if let Ok(updated_ctx) = serde_json::from_value::<crate::db::contexts::Context>(ctx_val)
-                    {
-                        ctx = updated_ctx;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(cl_path = %cl_path, error = %e, "Failed to load CL file");
-                }
-            }
-        }
-
-        let _ = state.db.save_context(&ctx);
-
-        // Build messages - always use current user_message
-        let system_prompt = build_system_prompt(state, &ctx, &user_message).await;
+        // Refresh after tools and injected inputs; route BEFORE rendering.
+        ctx = crate::gateway::prompt::prepare_runtime(state, user_id, &user_message, Some(turn), None)?;
+        let system_prompt = crate::gateway::prompt::render_system(state, &ctx, &user_message).await?;
         let mut messages = vec![ChatMessage {
             role: "system".to_string(),
             content: Some(system_prompt),
@@ -526,7 +450,7 @@ pub async fn run_agent_loop(
 
             let mut tool_call_count = 0;
             for tc in tool_calls {
-                if tool_call_count >= config.max_tool_calls {
+                if tool_call_count >= ctx.settings.max_tool_calls.unwrap_or(config.max_tool_calls) {
                     tracing::warn!(user_id = %user_id, "Max tool calls reached");
                     break;
                 }
@@ -582,6 +506,9 @@ pub async fn run_agent_loop(
 
                 let tool_start_time = chrono::Local::now();
                 let result = execute_tool_call(&state.db, user_id, tc, &state.plugins).await;
+                // The tool may have changed settings, state, or custom_data.
+                // Start history/screenshot updates from that fresh snapshot.
+                ctx = state.db.load_context(user_id)?;
                 let tool_duration = chrono::Local::now().signed_duration_since(tool_start_time);
                 let mut final_result = result.clone();
                 let mut image_content_parts: Option<Vec<serde_json::Value>> = None;
@@ -607,8 +534,8 @@ pub async fn run_agent_loop(
                                 "timestamp": tool_start_time.format("%Y-%m-%d %H:%M:%S").to_string(),
                                 "duration_ms": tool_duration.num_milliseconds()
                             }));
-                            // Trim history to configured limit
-                            let limit = config.tool_history_limit;
+                            // Respect context-tool changes made during this loop.
+                            let limit = ctx.settings.tool_history_limit;
                             if history.len() > limit {
                                 let drain_count = history.len() - limit;
                                 history.drain(0..drain_count);
@@ -720,19 +647,19 @@ pub async fn run_agent_loop(
                 let mut msg = msg;
                 msg.tool_name = Some(tc.function.name.clone());
                 state.db.add_message(user_id, &msg)?;
+                state.db.save_context(&ctx)?;
                 tool_call_count += 1;
             }
-            // Continue loop for next LLM turn
-            // Save context (with used_tools) before reloading from DB
-            let _ = state.db.save_context(&ctx);
-            // Reload context to check if agent_complete set done=true
             ctx = state.db.load_context(user_id)?;
             if ctx.settings.done {
                 completed = true;
+                break;
             }
             continue;
         }
 
+        // Preserve context/skill commands received while the provider was busy.
+        ctx = state.db.load_context(user_id)?;
         // No tool calls — process response (final answer)
         let raw_response = response.content.unwrap_or_default();
         tracing::info!(
@@ -808,17 +735,17 @@ pub async fn run_agent_loop(
                 || !tag_exec.learned_preferences.is_empty()
                 || !tag_exec.learned_topics.is_empty()
             {
-                let mut memory = crate::db::memory::load_memory(&state.db, user_id);
-                for fact in &tag_exec.learned_facts {
-                    crate::db::memory::add_learned_fact(&mut memory, fact);
-                }
-                for (key, val) in &tag_exec.learned_preferences {
-                    crate::db::memory::update_preference(&mut memory, key, val);
-                }
-                for topic in &tag_exec.learned_topics {
-                    crate::db::memory::add_topic(&mut memory, topic);
-                }
-                let _ = crate::db::memory::save_memory(&state.db, user_id, &memory);
+                crate::db::memory::update_memory(&state.db, user_id, |memory| {
+                    for fact in &tag_exec.learned_facts {
+                        crate::db::memory::add_learned_fact(memory, fact);
+                    }
+                    for (key, val) in &tag_exec.learned_preferences {
+                        crate::db::memory::update_preference(memory, key, val);
+                    }
+                    for topic in &tag_exec.learned_topics {
+                        crate::db::memory::add_topic(memory, topic);
+                    }
+                })?;
             }
 
             last_tag_execution = Some(tag_exec);
@@ -836,21 +763,18 @@ pub async fn run_agent_loop(
             )?;
         }
 
-        // Advance CL state if needed
         if advanced {
-            if let Some(ref cl_path) = config.cl_file {
-                if let Ok(cl) = cl::load_file(cl_path) {
-                    let ctx_val = serde_json::to_value(&ctx)?;
-                    if let Some(new_state) = cl::advance_state(&cl, &ctx_val) {
-                        ctx.settings.active_state = Some(new_state.clone());
-                        tracing::info!(user_id = %user_id, new_state = %new_state, "CL state advanced");
-                    }
-                }
+            let sm = cl::load_file(crate::gateway::prompt::workflow_name(&ctx)).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut value = serde_json::to_value(&ctx)?;
+            if let Some(next) = cl::advance_workflow(&sm, &value) {
+                anyhow::ensure!(cl::transition_to(&sm, &mut value, &next), "SM target state does not exist: {next}");
+                ctx = serde_json::from_value(value)?;
+                ctx.settings.active_state = ctx.active_state.clone();
             }
             advanced = false;
         }
 
-        let _ = state.db.save_context(&ctx);
+        state.db.save_context(&ctx)?;
 
         // Auto-compact if enabled and total history tokens exceed limit
         if ctx.settings.compaction_enabled {
@@ -941,10 +865,7 @@ pub async fn run_agent_loop(
         if !injected.is_empty() {
             tracing::info!(user_id = %user_id, injected_count = injected.len(), "Injecting {} user messages into conversation", injected.len());
             for msg in &injected {
-                state.db.add_message(
-                    user_id,
-                    &crate::db::messages::Message::user(msg.clone()),
-                )?;
+                crate::gateway::prompt::append_injected_message(state, user_id, msg).await?;
             }
             // Use last injected message as current user_message, reset turn for more turns
             user_message = injected.last().cloned().unwrap_or(user_message);
@@ -955,13 +876,6 @@ pub async fn run_agent_loop(
         // If no tool calls and not completed, we're done with this message
         break;
     }
-
-    // Unregister this loop and clean up stop signal
-    unregister_active_loop(user_id).await;
-    STOP_SIGNALS.write().await.remove(user_id);
-
-    // Notify the dashboard chat that the agent loop has stopped.
-    crate::dashboard::stream::send(user_id, "agent_stop", "{}");
 
     // Find the last assistant message with actual content
     let all_msgs = state.db.get_messages(user_id, 50)?;
@@ -1049,101 +963,6 @@ pub async fn generate_compaction_summary(
     Ok(summary)
 }
 
-async fn build_system_prompt(
-    _state: &GatewayState,
-    ctx: &crate::db::contexts::Context,
-    user_message: &str,
-) -> String {
-    tracing::info!(user_id = %ctx.user_id, "build_system_prompt called with user_message: {}", user_message);
-    let mut context_json = serde_json::json!({
-        "user_id": ctx.user_id,
-        "turn": ctx.turn,
-        "mode": ctx.mode,
-        "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
-        "user_message": user_message,
-        "user_prompt": user_message,
-        "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-    });
-    
-    tracing::info!(user_id = %ctx.user_id, "context_json user_prompt: {}", context_json["user_prompt"]);
-
-    context_json["username"] = serde_json::json!(ctx.username.as_deref().unwrap_or("User"));
-
-    let effective_path = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "/".to_string());
-    context_json["path"] = serde_json::json!(effective_path);
-
-    if let Some(ref state) = ctx.settings.active_state {
-        context_json["active_state"] = serde_json::json!(state);
-    }
-
-    // Add tag instructions if enabled
-    if ctx.settings.tags_enabled {
-        context_json["tag_instructions"] = serde_json::json!(crate::tags::get_tag_instructions());
-    }
-
-    // Load skills for context
-    let mut skills_registry = crate::skills::SkillRegistry::new();
-    let _ = skills_registry.load_from_dir(std::path::Path::new("skills"));
-    context_json["skills"] = skills_registry.to_context_array();
-
-    // Load memory
-    let memory = crate::db::memory::load_memory(&_state.db, &ctx.user_id);
-    context_json["memory"] = serde_json::json!({
-        "facts": memory.learned_facts,
-        "topics": memory.last_topics,
-        "preferences": memory.user_preferences,
-        "variables": memory.custom_variables,
-    });
-
-    // Load tools for context (so system prompt can list them)
-    let tools = crate::db::tools::to_tool_definitions(&_state.db).unwrap_or_default();
-    tracing::debug!(target: "agent_loop", "Loaded {} tool definitions", tools.len());
-    let tools_context: Vec<serde_json::Value> = tools.iter().map(|t| {
-        serde_json::json!({
-            "name": t.function.name,
-            "description": t.function.description,
-            "parameters": t.function.parameters
-        })
-    }).collect();
-    tracing::debug!(target: "agent_loop", "Tools context: {}", serde_json::to_string(&tools_context).unwrap_or_default());
-    context_json["tools"] = serde_json::json!(tools_context);
-
-    context_json["custom_data"] = if ctx.custom_data.is_null() {
-        serde_json::json!({})
-    } else {
-        ctx.custom_data.clone()
-    };
-
-    context_json["used_tools_history_size"] = serde_json::json!(ctx.settings.tool_history_limit);
-
-    context_json["cl_data"] = if ctx.cl_data.is_null() {
-        serde_json::json!({})
-    } else {
-        ctx.cl_data.clone()
-    };
-
-        let template_name = ctx.settings.system_template.as_deref().unwrap_or("system");
-        let template_path = format!("templates/{}.poml", template_name);
-        tracing::info!(user_id = %ctx.user_id, template_name = %template_name, template_path = %template_path, "Building system prompt");
-        match crate::gateway::poml::render(&template_path, &context_json).await {
-            Ok(rendered) => {
-                tracing::info!(user_id = %ctx.user_id, "Rendered system prompt (first 500 chars): {}", crate::util::truncate_chars(&rendered, 500));
-                rendered
-            },
-        Err(e) => {
-            tracing::warn!("Failed to render POML: {}, using fallback", e);
-            format!(
-                "You are Praxis, an AI agent. Mode: {}. User: {}. Turn: {}.",
-                ctx.mode,
-                ctx.username.as_deref().unwrap_or("unknown"),
-                ctx.turn
-            )
-        }
-    }
-}
-
 async fn execute_tool_call(
     db: &crate::db::Database,
     user_id: &str,
@@ -1171,6 +990,8 @@ async fn execute_tool_call(
         .collect();
 
     match tc.function.name.as_str() {
+        "use_skill" => crate::tools::use_skill::run(db, &args).await
+            .unwrap_or_else(|e| format!("Error: {}", e)),
         "execute_terminal" => {
             // If VM_MODE=vm, redirect to VM
             let vm_mode = std::env::var("VM_MODE").unwrap_or_else(|_| "shared".to_string());
@@ -1482,11 +1303,10 @@ async fn execute_tool_call(
         }
         "learn_preference" => {
             let key = args["key"].as_str().unwrap_or("");
-            let value = args["value"].as_str().unwrap_or("");
-            match db.merge_context(
-                user_id,
-                serde_json::json!({"custom_data": {format!("pref_{}", key): value}}),
-            ) {
+            let value = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
+            match crate::db::memory::update_memory(db, user_id, |memory| {
+                crate::db::memory::update_preference(memory, key, &value);
+            }) {
                 Ok(_) => format!("Preference '{}' = '{}'", key, value),
                 Err(e) => format!("Error: {}", e),
             }
@@ -1800,45 +1620,8 @@ async fn execute_tool_call(
                 Err(e) => format!("Error fetching cron job: {}", e),
             }
         }
-        "update_template" => {
-            let name = args["name"].as_str().unwrap_or("");
-            let content = args["content"].as_str().unwrap_or("");
-            if name.is_empty() || content.is_empty() {
-                return "Error: name and content are required.".to_string();
-            }
-            let file_path = format!("templates/{}.poml", name);
-            if let Some(parent) = std::path::Path::new(&file_path).parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            // Validate by rendering with POML
-            let ctx = db.load_context(user_id).unwrap_or_default();
-            let test_context = serde_json::json!({
-                "user_id": user_id,
-                "mode": ctx.mode,
-                "turn": 0,
-                "user_message": "Validation test",
-                "user_prompt": "Validation test",
-                "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            });
-            // Write temp file first for validation
-            if let Err(e) = std::fs::write(&file_path, content) {
-                return format!("Error writing template file: {}", e);
-            }
-            match crate::gateway::poml::render(&file_path, &test_context).await {
-                Ok(rendered) if !rendered.trim().is_empty() => {
-                    // POML compiled successfully - persist to DB
-                    let _ = db.save_template(name, content, None, false);
-                    let preview = crate::util::truncate_chars_ascii(&rendered, 500);
-                    format!("Template '{}' updated and validated. POML renders successfully. Preview: {}", name, preview)
-                }
-                Ok(_) => {
-                    format!("Template '{}' saved but POML render returned empty output. Template may be invalid.", name)
-                }
-                Err(e) => {
-                    format!("POML validation failed: {}. Template saved to disk but may not render correctly.", e)
-                }
-            }
-        }
+        "update_template" => crate::tools::update_template::run(db, &args).await
+            .unwrap_or_else(|e| format!("Error: {}", e)),
         _ => {
             // Check VM tools first
             if tc.function.name.starts_with("vm_") {
@@ -1894,6 +1677,14 @@ pub fn validate_tool_params(
 }
 
 #[cfg(test)]
+#[path = "skill_dispatch_tests.rs"]
+mod skill_dispatch_tests;
+
+#[cfg(test)]
+#[path = "backend_dispatch_tests.rs"]
+mod backend_dispatch_tests;
+
+#[cfg(test)]
 mod agent_tests {
     use super::*;
 
@@ -1903,7 +1694,7 @@ mod agent_tests {
         assert_eq!(config.max_turns, 10);
         assert_eq!(config.max_tool_calls, 5);
         assert!(config.tags_enabled);
-        assert!(config.cl_file.is_none());
+        assert!(config.sm_file.is_none());
         assert!(!config.feedback_enabled);
     }
 

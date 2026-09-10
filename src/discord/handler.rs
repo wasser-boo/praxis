@@ -8,6 +8,16 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 
+#[cfg(feature = "songbird")]
+async fn request_voice_response(client: &WsClient, payload: OutgoingMessage) -> anyhow::Result<String> {
+    // The gateway always sends "Thinking..." before the final reply. Consume
+    // progress/events as well, or the next utterance receives the previous reply.
+    client
+        .send_and_recv_until_response(payload, |_| {})
+        .await?
+        .map_err(anyhow::Error::msg)
+}
+
 fn generate_silent_wav(duration_ms: u32) -> Vec<u8> {
     let spec = hound::WavSpec {
         channels: 1,
@@ -70,17 +80,7 @@ impl DiscordHandler {
                 let guild_id = msg.guild_id.map(|g| g.to_string());
                 let channel_id = msg.channel_id.to_string();
 
-                let guild_allowed = guild_id
-                    .as_ref()
-                    .map(|g| {
-                        ctx.settings.allowed_guilds.contains(g)
-                            || ctx.settings.allowed_guilds.contains(&"*".to_string())
-                    })
-                    .unwrap_or(true);
-                let channel_allowed = ctx.settings.allowed_channels.contains(&channel_id)
-                    || ctx.settings.allowed_channels.contains(&"*".to_string());
-
-                guild_allowed && channel_allowed
+                crate::discord::commands::channel_allowed(&ctx.settings, guild_id.as_deref(), &channel_id)
             }
             Err(_) => false,
         }
@@ -390,6 +390,11 @@ impl EventHandler for DiscordHandler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Interaction::Command(command) = interaction {
             match command.data.name.as_str() {
+                "skill" => {
+                    if let Err(error) = crate::discord::commands::handle_skill_command(&self.db, &ctx, &command).await {
+                        tracing::error!(%error, "Skill command response failed");
+                    }
+                }
                 "pair" => {
                     if let Err(e) =
                         crate::discord::commands::handle_pair_command(&self.db, &ctx, &command)
@@ -850,44 +855,22 @@ impl EventHandler for DiscordHandler {
                                                 channel_id: format!("voice:{}", guild_id),
                                             };
 
-                                            // Acquire request lock to prevent race with text handler
-                                            let _req_guard = req_lock.lock().await;
-
-                                            {
+                                            // Serialize complete requests, not just the first
+                                            // feedback frame, then release locks before Discord HTTP.
+                                            let response_text = {
+                                                let _req_guard = req_lock.lock().await;
                                                 let ws = ws_client.lock().await;
-                                                if let Err(e) = ws.send(payload).await {
-                                                    tracing::error!(
-                                                        "VOICE_PIPELINE: Failed to send to gateway: {}",
-                                                        e
-                                                    );
-                                                    continue;
-                                                }
-                                            }
-
-                                            // Consume the response and send text to Discord
-                                            let response_text;
-                                            {
-                                                let ws = ws_client.lock().await;
-                                                match ws.recv().await {
-                                                    Ok(crate::discord::ws_client::IncomingMessage::Response { content, .. }) => {
+                                                match request_voice_response(&ws, payload).await {
+                                                    Ok(content) => {
                                                         tracing::info!("VOICE_PIPELINE: Got response ({} chars)", content.len());
-                                                        response_text = Some(content);
+                                                        Some(content)
                                                     }
-                                                    Ok(crate::discord::ws_client::IncomingMessage::Feedback { .. }) => {
-                                                        response_text = None;
-                                                    }
-                                                    Ok(crate::discord::ws_client::IncomingMessage::Error { message }) => {
-                                                        tracing::warn!("VOICE_PIPELINE: Gateway error: {}", message);
-                                                        response_text = None;
-                                                    }
-                                                    Ok(_) => { response_text = None; }
                                                     Err(e) => {
-                                                        tracing::warn!("VOICE_PIPELINE: Failed to receive response: {}", e);
-                                                        response_text = None;
+                                                        tracing::warn!("VOICE_PIPELINE: Gateway request failed: {}", e);
+                                                        None
                                                     }
                                                 }
-                                            }
-                                            // _req_guard dropped here, releasing lock
+                                            };
 
                                             // Send text response to Discord channel
                                             if let Some(text) = response_text {
@@ -1361,6 +1344,47 @@ pub async fn send_message_split(
 #[cfg(test)]
 mod discord_tests {
     use super::*;
+
+    #[cfg(feature = "songbird")]
+    #[tokio::test]
+    async fn test_voice_gateway_waits_for_final_reply_without_lagging_one_turn() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as Frame;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for expected in ["first", "second", "error"] {
+                let frame = socket.next().await.unwrap().unwrap();
+                let request: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                assert_eq!(request["content"], expected);
+                assert_eq!(request["channel_id"], "voice:123");
+                let progress = serde_json::json!({"type": "feedback", "user_id": "test-user", "content": "Thinking..."});
+                socket.send(Frame::Text(progress.to_string())).await.unwrap();
+                socket.send(Frame::Text(serde_json::json!({"type": "event", "event": "progress", "payload": {}}).to_string())).await.unwrap();
+                let response = if expected == "error" {
+                    serde_json::json!({"type": "error", "message": "mock gateway error"})
+                } else {
+                    serde_json::json!({"type": "response", "user_id": "test-user", "content": format!("reply to {expected}")})
+                };
+                socket.send(Frame::Text(response.to_string())).await.unwrap();
+            }
+        });
+        let client = WsClient::connect(&url).await.unwrap();
+        for input in ["first", "second", "error"] {
+            let payload = OutgoingMessage::Message {
+                user_id: "test-user".into(), content: input.into(), channel_id: "voice:123".into(),
+            };
+            let reply = tokio::time::timeout(Duration::from_secs(3), request_voice_response(&client, payload)).await.unwrap();
+            if input == "error" {
+                assert!(reply.unwrap_err().to_string().contains("mock gateway error"));
+            } else {
+                assert_eq!(reply.unwrap(), format!("reply to {input}"));
+            }
+        }
+        server.await.unwrap();
+    }
 
     #[test]
     fn test_handler_types_exist() {

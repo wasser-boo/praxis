@@ -226,6 +226,7 @@ pub fn apply(db: &Database, user_id: &str, op: &ContextOp) -> String {
 
 /// Look up a (possibly dotted) path inside a JSON value.
 fn lookup(val: &Value, path: &str) -> Option<Value> {
+    let path = crate::db::contexts::canonical_context_key(path);
     let mut current = val;
     for part in path.split('.') {
         current = current.get(part)?;

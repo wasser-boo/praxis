@@ -4,7 +4,7 @@
 use crate::tui::app::{App, BannerKind, Bubble, Popup, SLASH_COMMANDS};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
     Frame,
@@ -25,21 +25,27 @@ const BG_BUBBLE_TOOL: Color = Color::Rgb(0x12, 0x24, 0x2c);
 
 pub fn draw(f: &mut Frame, app: &App) {
     let size = f.area();
+    if size.width == 0 || size.height == 0 {
+        return;
+    }
 
-    // Outer split: optional sidebar + main column.
-    let main_chunks = if app.show_sidebar {
+    // Outer split: optional sidebar + main column. On narrow terminals the
+    // sidebar used to consume the whole frame, leaving the transcript/input at
+    // width 0. Collapse it automatically below a practical breakpoint.
+    let sidebar_visible = app.show_sidebar && size.width >= 72;
+    let main_chunks = if sidebar_visible {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(28), Constraint::Min(40)])
+            .constraints([Constraint::Length(28), Constraint::Min(1)])
             .split(size)
     } else {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(0), Constraint::Min(40)])
+            .constraints([Constraint::Length(0), Constraint::Min(1)])
             .split(size)
     };
 
-    if app.show_sidebar {
+    if sidebar_visible {
         draw_sidebar(f, app, main_chunks[0]);
     }
     draw_main(f, app, main_chunks[1]);
@@ -51,7 +57,9 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(ACCENT_PURPLE))
         .title(Span::styled(
             " Sessions ",
-            Style::default().fg(ACCENT_PURPLE).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(ACCENT_PURPLE)
+                .add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(BG_PANEL));
 
@@ -78,7 +86,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(marker, Style::default().fg(ACCENT_CYAN)),
                 Span::raw(" "),
-                Span::styled(format!("{:<18}", truncate(&s.name, 18)), style),
+                Span::styled(pad_to_width(&truncate(&s.name, 18), 18), style),
                 Span::styled(format!(" {}", key_hint), Style::default().fg(TEXT_DIM)),
             ]);
             ListItem::new(line)
@@ -110,13 +118,21 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_main(f: &mut Frame, app: &App, area: Rect) {
+    // Reserve the composer before allocating transcript space. An unsatisfiable
+    // Min(5) transcript constraint used to squeeze the input down to its borders.
+    let header_height = if area.height >= 12 { 3 } else { 0 };
+    let footer_height = if area.height >= 6 { 1 } else { 0 };
+    let available = area.height.saturating_sub(header_height + footer_height);
+    let transcript_min = u16::from(available >= 4);
+    let composer_height =
+        input_height(app, area.width).min(available.saturating_sub(transcript_min));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // header
-            Constraint::Min(5),    // transcript
-            Constraint::Length(input_height(app)), // input
-            Constraint::Length(1), // footer hint
+            Constraint::Length(header_height),
+            Constraint::Length(available.saturating_sub(composer_height)),
+            Constraint::Length(composer_height),
+            Constraint::Length(footer_height),
         ])
         .split(area);
 
@@ -130,9 +146,9 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
         Popup::Slash { matches, selected } => {
             draw_slash_popup(f, app, chunks[2], matches, *selected)
         }
-        Popup::File { matches, selected, .. } => {
-            draw_file_popup(f, app, chunks[2], matches, *selected)
-        }
+        Popup::File {
+            matches, selected, ..
+        } => draw_file_popup(f, app, chunks[2], matches, *selected),
         Popup::None => {}
     }
 }
@@ -152,16 +168,26 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::styled(
-            " ○ Idle ",
-            Style::default().fg(TEXT_DIM),
-        )
+        Span::styled(" ○ Idle ", Style::default().fg(TEXT_DIM))
     };
     let title = Line::from(vec![
-        Span::styled("  Praxis ", Style::default().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD)),
-        Span::styled("Chat", Style::default().fg(ACCENT_PURPLE).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "  Praxis ",
+            Style::default()
+                .fg(ACCENT_CYAN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Chat",
+            Style::default()
+                .fg(ACCENT_PURPLE)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("   "),
-        Span::styled(format!("» {} ", session_name), Style::default().fg(TEXT_PRIMARY)),
+        Span::styled(
+            format!("» {} ", session_name),
+            Style::default().fg(TEXT_PRIMARY),
+        ),
         Span::raw("  "),
         agent,
     ]);
@@ -173,8 +199,11 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_transcript(f: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let inner_width = area.width.saturating_sub(2) as usize;
-    let bubble_max = inner_width.saturating_sub(8).max(20);
+    let bubble_max = inner_width.saturating_sub(2).max(1);
 
     // Build all lines, top-to-bottom.
     let mut lines: Vec<Line> = Vec::new();
@@ -276,57 +305,63 @@ fn bubble_block(
     bg: Color,
     max_width: usize,
 ) -> Vec<Line<'static>> {
-    let inner_width = max_width.saturating_sub(4).max(10);
-    let wrapped = wrap_text(content, inner_width);
-    let body_width = wrapped.iter().map(|l| display_width(l)).max().unwrap_or(0);
-    let body_width = body_width.max(label.chars().count() + 2);
-    let body_width = body_width.min(inner_width);
+    if max_width < 12 {
+        return compact_bubble(label, content, accent, max_width.max(1));
+    }
+
+    // `max_width` is a terminal column budget. Keep every rendered line within
+    // that budget, including borders, padding and wide glyphs.
+    let max_inner = max_width.saturating_sub(2).max(1);
+    let max_content = max_inner.saturating_sub(2).max(1);
+    let wrapped = wrap_text(content, max_content);
+    let widest_content = wrapped.iter().map(|l| display_width(l)).max().unwrap_or(0);
+    let raw_label = format!(" {label} ");
+    let label_budget = max_inner.saturating_sub(1).max(1);
+    let label_text = truncate(&raw_label, label_budget);
+    let label_width = display_width(&label_text);
+    let inner_width = (widest_content + 2)
+        .max(label_width + 1)
+        .clamp(1, max_inner);
+    let content_width = inner_width.saturating_sub(2).max(1);
+    let wrapped = if content_width == max_content {
+        wrapped
+    } else {
+        wrap_text(content, content_width)
+    };
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Top border:  ╭─ label ────────╮
-    let label_text = format!(" {label} ");
-    let label_chars = label_text.chars().count();
-    let dashes_after = body_width.saturating_sub(label_chars).max(1) + 1;
-    let top_inner = format!("─{label_text}{}", "─".repeat(dashes_after));
-    let top = format!("╭{top_inner}╮");
+    // Top border width: 1 + inner_width + 1.
+    let top_fill = inner_width.saturating_sub(1 + label_width);
+    let top = format!("╭─{label_text}{}╮", "─".repeat(top_fill));
     lines.push(align_line(
         top,
         align,
         max_width,
-        Style::default().fg(accent).bg(bg).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(accent)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD),
     ));
 
-    // Body lines: │ content padded │
+    // Body width: border + (space + content + pad + space) + border.
     let style_body = Style::default().fg(TEXT_PRIMARY).bg(bg);
     let style_border = Style::default().fg(accent).bg(bg);
     for content_line in wrapped {
-        let pad_to = body_width + 2;
-        let mut line = String::new();
-        line.push('│');
-        line.push(' ');
         let cw = display_width(&content_line);
-        line.push_str(&content_line);
-        if cw < pad_to.saturating_sub(1) {
-            line.push_str(&" ".repeat(pad_to.saturating_sub(1).saturating_sub(cw)));
-        }
-        line.push('│');
-        // Style the borders separately from the content for a coloured frame.
-        let mid_text = content_line.clone();
-        let pad = pad_to.saturating_sub(1).saturating_sub(cw);
+        let pad = content_width.saturating_sub(cw);
         let row = Line::from(vec![
             Span::styled("│".to_string(), style_border),
             Span::styled(" ".to_string(), style_body),
-            Span::styled(mid_text, style_body),
+            Span::styled(content_line, style_body),
             Span::styled(" ".repeat(pad), style_body),
+            Span::styled(" ".to_string(), style_body),
             Span::styled("│".to_string(), style_border),
         ]);
         lines.push(align_line_spans(row, align, max_width));
     }
 
-    // Bottom border: ╰────────────────╯
-    let bot_inner = "─".repeat(body_width + 2);
-    let bot = format!("╰{bot_inner}╯");
+    let bot = format!("╰{}╯", "─".repeat(inner_width));
     lines.push(align_line(
         bot,
         align,
@@ -338,27 +373,15 @@ fn bubble_block(
 }
 
 fn align_line(text: String, align: BubbleAlign, max_width: usize, style: Style) -> Line<'static> {
-    let w = text.chars().count();
-    let pad = max_width.saturating_sub(w);
-    match align {
-        BubbleAlign::Left => Line::from(vec![Span::styled(text, style), Span::raw(" ".repeat(pad))]),
-        BubbleAlign::Right => {
-            Line::from(vec![Span::raw(" ".repeat(pad)), Span::styled(text, style)])
-        }
-    }
+    align_line_spans(Line::from(Span::styled(text, style)), align, max_width)
 }
 
 fn align_line_spans(line: Line<'static>, align: BubbleAlign, max_width: usize) -> Line<'static> {
-    let w: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-    let pad = max_width.saturating_sub(w);
+    let pad = max_width.saturating_sub(line.width());
     let mut spans: Vec<Span<'static>> = line.spans.into_iter().collect();
     match align {
-        BubbleAlign::Left => {
-            spans.push(Span::raw(" ".repeat(pad)));
-        }
-        BubbleAlign::Right => {
-            spans.insert(0, Span::raw(" ".repeat(pad)));
-        }
+        BubbleAlign::Left => spans.push(Span::raw(" ".repeat(pad))),
+        BubbleAlign::Right => spans.insert(0, Span::raw(" ".repeat(pad))),
     }
     Line::from(spans)
 }
@@ -376,9 +399,32 @@ fn banner_line(content: &str, color: Color, icon: &str) -> Vec<Line<'static>> {
     out
 }
 
-/// Soft-wrap `text` to `width` columns, preserving explicit `\n` line breaks.
-/// Returns owned `String`s so the caller can produce `Span<'static>`s safely.
+fn compact_bubble(
+    label: &str,
+    content: &str,
+    accent: Color,
+    max_width: usize,
+) -> Vec<Line<'static>> {
+    let width = max_width.max(1);
+    let mut out = Vec::new();
+    out.push(Line::from(Span::styled(
+        truncate(label, width),
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    )));
+    for line in wrap_text(content, width) {
+        out.push(Line::from(Span::styled(
+            truncate(&line, width),
+            Style::default().fg(TEXT_PRIMARY),
+        )));
+    }
+    out
+}
+
+/// Soft-wrap `text` to `width` terminal columns, preserving explicit `\n` line
+/// breaks. Wide CJK/emoji glyphs use Ratatui's width implementation via
+/// `Line::width`; combining marks (width 0) stay attached to their base.
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
     let mut out = Vec::new();
     for raw_line in text.split('\n') {
         if raw_line.is_empty() {
@@ -386,33 +432,23 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
             continue;
         }
         let mut current = String::new();
-        let mut current_w = 0;
         for word in split_words(raw_line) {
-            let ww = word.chars().count();
-            if current_w == 0 {
+            let ww = display_width(&word);
+            if current.is_empty() {
                 if ww > width {
-                    // Hard split very long words.
-                    for chunk in chunks_of(&word, width) {
-                        out.push(chunk);
-                    }
-                    continue;
+                    out.extend(chunks_of(&word, width));
+                } else {
+                    current.push_str(&word);
                 }
-                current.push_str(&word);
-                current_w = ww;
-            } else if current_w + 1 + ww <= width {
+            } else if display_width(&current) + 1 + ww <= width {
                 current.push(' ');
                 current.push_str(&word);
-                current_w += 1 + ww;
             } else {
                 out.push(std::mem::take(&mut current));
                 if ww > width {
-                    for chunk in chunks_of(&word, width) {
-                        out.push(chunk);
-                    }
-                    current_w = 0;
+                    out.extend(chunks_of(&word, width));
                 } else {
                     current.push_str(&word);
-                    current_w = ww;
                 }
             }
         }
@@ -428,21 +464,60 @@ fn split_words(s: &str) -> Vec<String> {
 }
 
 fn chunks_of(s: &str, n: usize) -> Vec<String> {
-    let chars: Vec<char> = s.chars().collect();
-    chars.chunks(n).map(|c| c.iter().collect()).collect()
+    let width = n.max(1);
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for ch in s.chars() {
+        let ch_s = ch.to_string();
+        let ch_width = display_width(&ch_s);
+        if current.is_empty() && ch_width > width {
+            chunks.push(truncate(&ch_s, width));
+            continue;
+        }
+        if !current.is_empty() && ch_width > 0 && display_width(&current) + ch_width > width {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push(ch);
+        if display_width(&current) >= width {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 fn display_width(s: &str) -> usize {
-    s.chars().count()
+    Line::from(s.to_string()).width()
 }
 
-fn input_height(app: &App) -> u16 {
-    let lines = app.input.lines().count().max(1) as u16;
-    let attachments = if app.attachments.is_empty() { 0 } else { 1 };
-    (lines + 2 + attachments).clamp(3, 12)
+fn input_height(app: &App, frame_width: u16) -> u16 {
+    let inner_width = frame_width.saturating_sub(4).max(1) as usize;
+    let mut lines = input_visual_lines(app, inner_width).0.len().min(10) as u16;
+    if !app.attachments.is_empty() {
+        lines += 1;
+    }
+    (lines + 2).clamp(3, 12)
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    if area.height < 3 || area.width < 5 {
+        let (visual, cursor_row) = input_visual_lines(app, area.width as usize);
+        let rows = area.height as usize;
+        let start = cursor_row.saturating_sub(rows.saturating_sub(1));
+        let lines: Vec<Line> = visual
+            .into_iter()
+            .skip(start)
+            .take(rows)
+            .map(|text| Line::from(Span::styled(text, Style::default().fg(TEXT_PRIMARY))))
+            .collect();
+        f.render_widget(Paragraph::new(lines), area);
+        return;
+    }
     let title_str = if app.attachments.is_empty() {
         " Message ".to_string()
     } else {
@@ -453,18 +528,18 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(ACCENT_CYAN))
         .title(Span::styled(
             title_str,
-            Style::default().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(ACCENT_CYAN)
+                .add_modifier(Modifier::BOLD),
         ))
         .padding(Padding::horizontal(1));
 
-    // Build the content with a visible cursor indicator.
-    let chars: Vec<char> = app.input.chars().collect();
-    let cursor_pos = app.cursor.min(chars.len());
-    let before: String = chars[..cursor_pos].iter().collect();
-    let after: String = chars[cursor_pos..].iter().collect();
-
+    let inner = block.inner(area);
+    let inner_width = inner.width.max(1) as usize;
+    let visible_rows = inner.height.max(1) as usize;
+    let show_attachments = !app.attachments.is_empty() && visible_rows > 1;
     let mut lines: Vec<Line> = Vec::new();
-    if !app.attachments.is_empty() {
+    if show_attachments {
         let span_text = app
             .attachments
             .iter()
@@ -478,30 +553,38 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             .collect::<Vec<_>>()
             .join("   ");
         lines.push(Line::from(Span::styled(
-            span_text,
+            truncate(&span_text, inner_width),
             Style::default().fg(ACCENT_AMBER),
         )));
     }
 
-    // Render input. Multi-line inputs split on '\n'. Cursor is the █ char
-    // injected at position.
-    let input_with_cursor = format!("{before}\u{2588}{after}");
-    if input_with_cursor.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "Type a message…  (try /help, @path, Shift+Enter for newline)",
-            Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
-        )));
+    let input_style = Style::default().fg(TEXT_PRIMARY);
+    if app.input.is_empty() {
+        let mut spans = vec![Span::styled("█", Style::default().fg(ACCENT_CYAN))];
+        if inner_width > 1 {
+            spans.push(Span::styled(
+                truncate(
+                    " Type a message…  (try /help, @path, Shift+Enter for newline)",
+                    inner_width - 1,
+                ),
+                Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
+            ));
+        }
+        lines.push(Line::from(spans));
     } else {
-        for l in input_with_cursor.lines() {
-            lines.push(Line::from(Span::styled(
-                l.to_string(),
-                Style::default().fg(TEXT_PRIMARY),
-            )));
+        let input_rows = visible_rows
+            .saturating_sub(usize::from(show_attachments))
+            .max(1);
+        let (visual, cursor_row) = input_visual_lines(app, inner_width);
+        let start = cursor_row.saturating_sub(input_rows - 1);
+        for l in visual.into_iter().skip(start).take(input_rows) {
+            lines.push(Line::from(Span::styled(l, input_style)));
         }
     }
 
-    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
-    f.render_widget(para, area);
+    // Input is already hard-wrapped without discarding spaces. Re-wrapping it
+    // would invalidate the cursor row and can hide it again.
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
@@ -524,7 +607,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::raw("  ·  "));
         spans.push(Span::styled(
             msg.clone(),
-            Style::default().fg(ACCENT_AMBER).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(ACCENT_AMBER)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     let para = Paragraph::new(Line::from(spans))
@@ -569,7 +654,10 @@ fn draw_slash_popup(
                 Style::default().fg(TEXT_PRIMARY)
             };
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {:<12}", cmd.name), style.add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    pad_to_width(&format!(" {}", cmd.name), 13),
+                    style.add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     format!("  {}", cmd.desc),
                     if is_sel {
@@ -587,7 +675,9 @@ fn draw_slash_popup(
         .border_style(Style::default().fg(ACCENT_PURPLE))
         .title(Span::styled(
             " / commands ",
-            Style::default().fg(ACCENT_PURPLE).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(ACCENT_PURPLE)
+                .add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(BG_PANEL));
     let list = List::new(items).block(block);
@@ -626,9 +716,10 @@ fn draw_file_popup(
             } else {
                 Style::default().fg(TEXT_PRIMARY)
             };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!(" {icon} {display}"), style),
-            ]))
+            ListItem::new(Line::from(vec![Span::styled(
+                format!(" {icon} {display}"),
+                style,
+            )]))
         })
         .collect();
 
@@ -637,27 +728,90 @@ fn draw_file_popup(
         .border_style(Style::default().fg(ACCENT_CYAN))
         .title(Span::styled(
             " @ files ",
-            Style::default().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(ACCENT_CYAN)
+                .add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(BG_PANEL));
     let list = List::new(items).block(block);
     f.render_widget(list, popup_area);
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else if max <= 1 {
-        "…".to_string()
-    } else {
-        let head: String = s.chars().take(max - 1).collect();
-        format!("{head}…")
+fn pad_to_width(s: &str, width: usize) -> String {
+    let mut out = truncate(s, width);
+    let pad = width.saturating_sub(display_width(&out));
+    out.push_str(&" ".repeat(pad));
+    out
+}
+
+fn input_visual_lines(app: &App, width: usize) -> (Vec<String>, usize) {
+    let width = width.max(1);
+    let chars: Vec<char> = app.input.chars().collect();
+    let cursor_pos = app.cursor.min(chars.len());
+    let before: String = chars[..cursor_pos].iter().collect();
+    let after: String = chars[cursor_pos..].iter().collect();
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut cursor_row = 0;
+    for (index, ch) in format!("{before}█{after}").chars().enumerate() {
+        if ch == '\n' {
+            lines.push(std::mem::take(&mut current));
+            continue;
+        }
+        let piece = truncate(&ch.to_string(), width);
+        if !current.is_empty() && display_width(&format!("{current}{piece}")) > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if index == cursor_pos {
+            cursor_row = lines.len();
+        }
+        current.push_str(&piece);
     }
+    lines.push(current);
+    (lines, cursor_row)
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max {
+        return s.to_string();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+    let mut out = String::new();
+    let budget = max - 1;
+    for ch in s.chars() {
+        let next = format!("{out}{ch}");
+        if display_width(&next) > budget {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line_width(line: &Line<'_>) -> usize {
+        line.width()
+    }
+
+    fn assert_lines_fit(lines: &[Line<'_>], width: usize) {
+        for line in lines {
+            assert!(
+                line_width(line) <= width,
+                "line width {} > {width}: {:?}",
+                line_width(line),
+                line
+            );
+        }
+    }
 
     #[test]
     fn wrap_basic() {
@@ -672,8 +826,118 @@ mod tests {
     }
 
     #[test]
-    fn truncate_works() {
+    fn column_width_helpers_handle_wide_and_combining_text() {
+        assert_eq!(Line::from("日本").width(), 4);
+        assert_eq!(display_width("é"), Line::from("é").width());
+        assert_eq!(display_width("e\u{301}"), Line::from("e\u{301}").width());
+        assert_eq!(display_width("🌵"), Line::from("🌵").width());
+        for width in [1, 8, 12, 24, 40] {
+            for chunk in chunks_of("日本語🌵e\u{301}abcdef", width) {
+                assert!(display_width(&chunk) <= width, "{chunk:?} exceeds {width}");
+            }
+            for line in wrap_text("日本語 🌵🌵🌵 e\u{301}e\u{301} supercalifragilistic", width)
+            {
+                assert!(display_width(&line) <= width, "{line:?} exceeds {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_works_by_columns() {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 5), "hell…");
+        assert!(Line::from(truncate("日本語🌵", 5)).width() <= 5);
+        assert!(Line::from(truncate("e\u{301}e\u{301}e\u{301}", 3)).width() <= 3);
+    }
+
+    #[test]
+    fn bubbles_fit_all_small_widths_with_wide_text_and_long_labels() {
+        for width in [1, 8, 12, 24, 40] {
+            for align in [BubbleAlign::Left, BubbleAlign::Right] {
+                let lines = bubble_block(
+                    "praxis-日本語🌵-very-long-label",
+                    "日本語🌵 e\u{301} accents supercalifragilisticexpialidocious",
+                    align,
+                    ACCENT_PURPLE,
+                    BG_BUBBLE_BOT,
+                    width,
+                );
+                assert_lines_fit(&lines, width);
+            }
+        }
+    }
+
+    fn dummy_app() -> (App, tempfile::TempDir) {
+        use crate::db::Database;
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Database::new(dir.path()).unwrap();
+        let app = App::new(
+            db,
+            "http://127.0.0.1:0".into(),
+            "x".into(),
+            dir.path().to_string_lossy().into_owned(),
+        );
+        (app, dir)
+    }
+
+    fn buffer_contains_cursor(terminal: &Terminal<TestBackend>) -> bool {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "█")
+    }
+
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn input_height_accounts_for_soft_wraps_and_cursor_stays_visible() {
+        for (width, height, input) in [
+            (1, 1, "abc"),
+            (8, 4, "日本語🌵"),
+            (24, 10, ""),
+            (24, 10, "日本語🌵"),
+            (24, 10, "long-input-"),
+            (40, 12, "first line\nsecond 日本語 line\nthird line"),
+        ] {
+            let (mut app, _dir) = dummy_app();
+            app.show_sidebar = false;
+            app.input = if input == "long-input-" {
+                format!("{}", "日本語🌵abcdef".repeat(10))
+            } else {
+                input.to_string()
+            };
+            app.attachments
+                .push("/synthetic/very-long-attachment-name.txt".into());
+            assert!(input_height(&app, width) >= 3);
+            for cursor in [0, app.input.chars().count() / 2, app.input.chars().count()] {
+                app.cursor = cursor;
+                let backend = TestBackend::new(width, height);
+                let mut terminal = Terminal::new(backend).unwrap();
+                terminal.draw(|f| draw(f, &app)).unwrap();
+                assert!(
+                    buffer_contains_cursor(&terminal),
+                    "cursor missing for width={width} input={input:?} cursor={cursor}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn draw_regression_narrow_and_wide_terminals() {
+        let (mut app, _dir) = dummy_app();
+        app.transcript.push(Bubble::Assistant {
+            content: "日本語🌵 A very long line_that_must_wrap_without_panicking_or_painting_past_the_terminal_width".into(),
+        });
+        app.input = "hello from a narrow terminal 日本語🌵".into();
+        app.cursor = app.input.chars().count();
+
+        for (w, h) in [(24, 10), (40, 8), (100, 30)] {
+            let backend = TestBackend::new(w, h);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            assert!(buffer_contains_cursor(&terminal));
+        }
     }
 }

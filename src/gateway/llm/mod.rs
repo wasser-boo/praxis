@@ -337,6 +337,10 @@ impl LLMRouter {
 
                 // Handle agent control signals specially
                 let result_str = match tool_call.function.name.as_str() {
+                    "use_skill" => crate::tools::use_skill::run(db, &args).await
+                        .unwrap_or_else(|e| format!("Error: {}", e)),
+                    "update_template" => crate::tools::update_template::run(db, &args).await
+                        .unwrap_or_else(|e| format!("Error: {}", e)),
                     "agent_complete" => {
                         agent_signal = AgentSignalFromTool::Done;
                         crate::tools::agent_control::run(
@@ -443,25 +447,27 @@ impl LLMRouter {
                     }
                     "learn_fact" => {
                         let fact = args["fact"].as_str().unwrap_or("");
-                        let mut memory = crate::db::memory::load_memory(db, user_id);
-                        crate::db::memory::add_learned_fact(&mut memory, fact);
-                        let _ = crate::db::memory::save_memory(db, user_id, &memory);
-                        format!("Learned: {}", fact)
+                        match db.add_memory(user_id, fact, Some("fact")) {
+                            Ok(_) => format!("Learned: {}", fact),
+                            Err(e) => format!("Error: {e}"),
+                        }
                     }
                     "learn_preference" => {
                         let key = args["key"].as_str().unwrap_or("");
                         let value = args.get("value").cloned().unwrap_or(serde_json::json!(""));
-                        let mut memory = crate::db::memory::load_memory(db, user_id);
-                        crate::db::memory::update_preference(&mut memory, key, &value);
-                        let _ = crate::db::memory::save_memory(db, user_id, &memory);
-                        format!("Preference saved: {}", key)
+                        match crate::db::memory::update_memory(db, user_id, |memory| {
+                            crate::db::memory::update_preference(memory, key, &value);
+                        }) {
+                            Ok(_) => format!("Preference saved: {}", key),
+                            Err(e) => format!("Error: {e}"),
+                        }
                     }
                     "learn_topic" => {
                         let topic = args["topic"].as_str().unwrap_or("");
-                        let mut memory = crate::db::memory::load_memory(db, user_id);
-                        crate::db::memory::add_topic(&mut memory, topic);
-                        let _ = crate::db::memory::save_memory(db, user_id, &memory);
-                        format!("Topic tracked: {}", topic)
+                        match db.add_memory(user_id, topic, Some("topic")) {
+                            Ok(_) => format!("Topic tracked: {}", topic),
+                            Err(e) => format!("Error: {e}"),
+                        }
                     }
                     "ask_questions" => {
                         // Get timeout from args, then context, then default to 120
@@ -720,6 +726,9 @@ pub struct ChatWithToolsResult {
     pub feedback_messages: Vec<String>,
     pub agent_signal: AgentSignalFromTool,
 }
+
+#[cfg(test)]
+mod skill_tool_loop_tests;
 
 #[cfg(test)]
 mod gateway_tests {

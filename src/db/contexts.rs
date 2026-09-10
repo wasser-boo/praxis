@@ -13,8 +13,8 @@ pub struct Context {
     /// share a `username` while having different `user_id`s.
     #[serde(default)]
     pub username: Option<String>,
-    #[serde(default)]
-    pub cl_file: Option<String>,
+    #[serde(default, alias = "cl_file")]
+    pub sm_file: Option<String>,
     #[serde(default)]
     pub active_state: Option<String>,
     #[serde(default)]
@@ -39,7 +39,7 @@ impl Default for Context {
             turn: 0,
             mode: default_mode(),
             username: None,
-            cl_file: None,
+            sm_file: None,
             active_state: None,
             active_templates: Vec::new(),
             settings: ContextSettings::default(),
@@ -166,8 +166,8 @@ pub struct ContextSettings {
     pub done: bool,
     #[serde(default)]
     pub path: String,
-    #[serde(default)]
-    pub cl_file: Option<String>,
+    #[serde(default, alias = "cl_file")]
+    pub sm_file: Option<String>,
     #[serde(default)]
     pub active_state: Option<String>,
     #[serde(default)]
@@ -188,6 +188,8 @@ pub struct ContextSettings {
     pub compaction_template: Option<String>,
     #[serde(default)]
     pub system_template: Option<String>,
+    #[serde(default)]
+    pub active_skill: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
     #[serde(default)]
@@ -333,7 +335,7 @@ impl Default for ContextSettings {
             active_templates: Vec::new(),
             done: false,
             path: String::new(),
-            cl_file: None,
+            sm_file: None,
             active_state: None,
             current_template: String::new(),
             tags_enabled: false,
@@ -344,6 +346,7 @@ impl Default for ContextSettings {
             compaction_token_limit: None,
             compaction_template: None,
             system_template: None,
+            active_skill: None,
             provider: None,
             model: None,
             vision_provider: None,
@@ -373,7 +376,7 @@ impl Database {
         );
 
         let mut base_ctx = match result {
-            Ok(data) => serde_json::from_str::<Context>(&data)?,
+            Ok(data) => decode_context(&data)?,
             Err(rusqlite::Error::QueryReturnedNoRows) => Context {
                 user_id: user_id.to_string(),
                 ..Default::default()
@@ -381,18 +384,25 @@ impl Database {
             Err(e) => return Err(e.into()),
         };
 
+        // The lookup key, never a stale/edited JSON field, defines ownership.
+        base_ctx.user_id = user_id.to_string();
+
         // If a non-default session is active, load the session-specific context
         if !base_ctx.session_id.is_empty() && base_ctx.session_id != "default" {
             let key = format!("{}:::{}", user_id, base_ctx.session_id);
-            if let Ok(data) = conn.query_row(
+            match conn.query_row(
                 "SELECT data FROM contexts WHERE user_id = ?1",
                 rusqlite::params![key],
                 |row| row.get::<_, String>(0),
             ) {
-                if let Ok(mut session_ctx) = serde_json::from_str::<Context>(&data) {
+                Ok(data) => {
+                    let mut session_ctx = decode_context(&data)?;
                     session_ctx.user_id = user_id.to_string();
+                    session_ctx.session_id = base_ctx.session_id.clone();
                     return Ok(session_ctx);
                 }
+                Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                Err(e) => return Err(e.into()),
             }
             // Session context doesn't exist yet; FORK from base
             let forked = base_ctx.clone();
@@ -425,6 +435,7 @@ impl Database {
             ) {
                 Ok(base_data) => {
                     let mut j = serde_json::from_str::<serde_json::Value>(&base_data)?;
+                    normalize_legacy_keys(&mut j);
                     j["session_id"] = serde_json::json!(ctx.session_id);
                     serde_json::to_string(&j)?
                 }
@@ -452,38 +463,61 @@ impl Database {
         user_id: &str,
         updates: serde_json::Value,
     ) -> anyhow::Result<Context> {
+        anyhow::ensure!(updates.is_object(), "Context updates must be an object");
         let mut ctx = self.load_context(user_id)?;
+        let previous_template = ctx.settings.system_template.clone();
+        let previous_skill = ctx.settings.active_skill.clone();
         let mut data: serde_json::Value = serde_json::to_value(&ctx)?;
-
-        if let (Some(obj), Some(updates_obj)) = (data.as_object_mut(), updates.as_object()) {
-            for (key, value) in updates_obj {
-                if key.contains('.') {
-                    set_nested_value(obj, key, value.clone());
-                } else {
-                    obj.insert(key.clone(), value.clone());
-                }
+        let mut updates = updates;
+        normalize_legacy_keys(&mut updates);
+        let obj = data.as_object_mut().unwrap();
+        for (key, value) in updates.as_object().unwrap() {
+            if key.contains('.') {
+                set_nested_value(obj, key, value.clone());
+            } else {
+                merge_value(obj.entry(key.clone()).or_insert(serde_json::Value::Null), value);
             }
         }
 
+        // Both historical state locations are accepted; keep the runtime's
+        // canonical top-level state and the settings mirror in sync.
+        if let Some(active) = updates.get("active_state")
+            .or_else(|| updates.get("settings.active_state"))
+            .or_else(|| updates.pointer("/settings/active_state"))
+        {
+            data["active_state"] = active.clone();
+            if data["settings"].is_object() { data["settings"]["active_state"] = active.clone(); }
+        }
         ctx = serde_json::from_value(data)?;
+        anyhow::ensure!(ctx.user_id == user_id, "Context user_id cannot be changed");
+        if ctx.settings.system_template != previous_template {
+            if let Some(name) = &ctx.settings.system_template {
+                crate::gateway::templates::resolve_template(std::path::Path::new("templates"), name)?;
+            }
+        }
+        if ctx.settings.active_skill != previous_skill {
+            if let Some(name) = &ctx.settings.active_skill {
+                let mut registry = crate::skills::SkillRegistry::new();
+                registry.load_from_dir(std::path::Path::new("skills"))?;
+                anyhow::ensure!(registry.get(name).is_some(), "Unknown skill: {name}");
+            }
+        }
         self.save_context(&ctx)?;
         Ok(ctx)
     }
 
     pub fn delete_context(&self, user_id: &str) -> anyhow::Result<()> {
-        let conn = self.conn();
-        conn.execute(
-            "DELETE FROM messages WHERE user_id = ?1 OR user_id LIKE ?2",
-            rusqlite::params![user_id, format!("{}:::%", user_id)],
-        )?;
-        conn.execute(
-            "DELETE FROM memory WHERE user_id = ?1 OR user_id LIKE ?2",
-            rusqlite::params![user_id, format!("{}:::%", user_id)],
-        )?;
-        conn.execute(
-            "DELETE FROM contexts WHERE user_id = ?1 OR user_id LIKE ?2",
-            rusqlite::params![user_id, format!("{}:::%", user_id)],
-        )?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        // '%' and '_' in user IDs are literal, never SQL wildcard selectors.
+        let prefix = format!("{user_id}:::");
+        for table in ["messages", "memory", "contexts"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE user_id = ?1 OR substr(user_id, 1, length(?2)) = ?2"),
+                rusqlite::params![user_id, prefix],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -529,38 +563,60 @@ impl Database {
         }
     }
 
+    /// Read the explicitly requested row, not the base user's active session.
+    /// Missing sessions fork the base row without activating or changing it.
     pub fn load_session_context(
         &self,
         user_id: &str,
         session_id: &str,
     ) -> anyhow::Result<Context> {
+        use rusqlite::OptionalExtension;
+
         let key = Self::context_key(user_id, session_id);
-        let mut ctx = match self.load_context(&key) {
-            Ok(c) => c,
-            Err(_) => {
-                // Fork from base context
-                let mut base = self.load_context(user_id)?;
-                base.session_id = session_id.to_string();
-                // Save forked context under session key
-                let data = serde_json::to_string(&base)?;
-                let conn = self.conn();
-                conn.execute(
-                    "INSERT OR REPLACE INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
-                    rusqlite::params![key, data],
-                )?;
-                base
-            }
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let stored: Option<String> = tx.query_row(
+            "SELECT data FROM contexts WHERE user_id = ?1",
+            rusqlite::params![key],
+            |row| row.get(0),
+        ).optional()?;
+        let missing = stored.is_none();
+        let source = match stored {
+            Some(data) => Some(data),
+            None if key != user_id => tx.query_row(
+                "SELECT data FROM contexts WHERE user_id = ?1",
+                rusqlite::params![user_id],
+                |row| row.get::<_, String>(0),
+            ).optional()?,
+            None => None,
+        };
+        let mut ctx = match source {
+            Some(data) => decode_context(&data)?,
+            None => Context::default(),
         };
         ctx.user_id = user_id.to_string();
         ctx.session_id = session_id.to_string();
+        if missing {
+            tx.execute(
+                "INSERT INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
+                rusqlite::params![key, serde_json::to_string(&ctx)?],
+            )?;
+        }
+        tx.commit()?;
         Ok(ctx)
     }
 
+    /// Save only this explicit session. Activation remains save_context's job;
+    /// never feed an already-composed key into its session resolver.
     pub fn save_session_context(&self, ctx: &Context) -> anyhow::Result<()> {
         let key = Self::context_key(&ctx.user_id, &ctx.session_id);
-        let mut persisted = ctx.clone();
-        persisted.user_id = key.clone();
-        self.save_context(&persisted)
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO contexts (user_id, data, updated_at) VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(user_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+            rusqlite::params![key, serde_json::to_string(ctx)?],
+        )?;
+        Ok(())
     }
 
     pub fn create_session(
@@ -636,6 +692,49 @@ impl Database {
     }
 }
 
+fn decode_context(data: &str) -> anyhow::Result<Context> {
+    let mut value = serde_json::from_str(data)?;
+    normalize_legacy_keys(&mut value);
+    Ok(serde_json::from_value(value)?)
+}
+
+/// Canonicalize legacy update paths, without renaming application-owned cl_data.
+pub fn canonical_context_key(key: &str) -> &str {
+    match key {
+        "cl_file" => "sm_file",
+        "settings.cl_file" => "settings.sm_file",
+        _ => key,
+    }
+}
+
+pub fn normalize_legacy_keys(value: &mut serde_json::Value) {
+    if let Some(obj) = value.as_object_mut() {
+        let nested_canonical = obj.get("settings").and_then(|v| v.as_object()).is_some_and(|s| s.contains_key("sm_file"));
+        for (old, new) in [("cl_file", "sm_file"), ("settings.cl_file", "settings.sm_file")] {
+            if let Some(legacy) = obj.remove(old) {
+                if old != "settings.cl_file" || !nested_canonical {
+                    obj.entry(new.to_string()).or_insert(legacy);
+                }
+            }
+        }
+        if let Some(settings) = obj.get_mut("settings").and_then(|v| v.as_object_mut()) {
+            if let Some(legacy) = settings.remove("cl_file") {
+                settings.entry("sm_file".to_string()).or_insert(legacy);
+            }
+        }
+    }
+}
+
+fn merge_value(target: &mut serde_json::Value, update: &serde_json::Value) {
+    if let (Some(target), Some(update)) = (target.as_object_mut(), update.as_object()) {
+        for (key, value) in update {
+            merge_value(target.entry(key.clone()).or_insert(serde_json::Value::Null), value);
+        }
+    } else {
+        *target = update.clone();
+    }
+}
+
 /// Set a nested value in a JSON object using dot-notation (e.g., "custom_data.device")
 /// Creates intermediate objects as needed.
 fn set_nested_value(obj: &mut serde_json::Map<String, serde_json::Value>, path: &str, value: serde_json::Value) {
@@ -663,6 +762,152 @@ fn set_nested_value(obj: &mut serde_json::Map<String, serde_json::Value>, path: 
 mod db_tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn stored_session_row(db: &Database, key: &str) -> String {
+        db.conn().query_row(
+            "SELECT data FROM contexts WHERE user_id = ?1",
+            [key],
+            |row| row.get(0),
+        ).unwrap()
+    }
+
+    #[test]
+    fn backend_explicit_session_roundtrip_has_one_scoped_key() {
+        let (db, _dir) = test_db();
+        let base = Context {
+            user_id: "alice".into(),
+            username: Some("Alice".into()),
+            custom_data: serde_json::json!({"origin":"base"}),
+            ..Default::default()
+        };
+        db.save_context(&base).unwrap();
+        let mut other = base.clone();
+        other.session_id = "t".into();
+        other.custom_data = serde_json::json!({"origin":"other session"});
+        db.save_context(&other).unwrap(); // t is active, but helpers request s.
+        db.save_context(&Context { user_id: "bob".into(), ..Default::default() }).unwrap();
+        let base_before = stored_session_row(&db, "alice");
+        let other_before = stored_session_row(&db, "alice:::t");
+        let bob_before = stored_session_row(&db, "bob");
+
+        let mut session = base.clone();
+        session.session_id = "s".into();
+        session.turn = 7;
+        session.custom_data = serde_json::json!({"origin":"session s", "revision":1});
+        db.save_session_context(&session).unwrap();
+        let mut loaded = db.load_session_context("alice", "s").unwrap();
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&session).unwrap());
+        loaded.custom_data["revision"] = serde_json::json!(2);
+        db.save_session_context(&loaded).unwrap();
+        assert_eq!(db.load_session_context("alice", "s").unwrap().custom_data["revision"], 2);
+
+        let keys: Vec<String> = {
+            let conn = db.conn();
+            let mut stmt = conn.prepare("SELECT user_id FROM contexts ORDER BY user_id").unwrap();
+            let keys = stmt.query_map([], |row| row.get(0)).unwrap()
+                .collect::<Result<Vec<_>, _>>().unwrap();
+            keys
+        };
+        assert_eq!(keys, vec!["alice", "alice:::s", "alice:::t", "bob"]);
+        let stored: Context = decode_context(&stored_session_row(&db, "alice:::s")).unwrap();
+        assert_eq!(stored.user_id, "alice");
+        assert_eq!(stored.session_id, "s");
+        assert_eq!(stored_session_row(&db, "alice"), base_before);
+        assert_eq!(stored_session_row(&db, "alice:::t"), other_before);
+        assert_eq!(stored_session_row(&db, "bob"), bob_before);
+        assert_eq!(db.load_context("alice").unwrap().custom_data["origin"], "other session");
+        for default in ["", "default"] {
+            let loaded = db.load_session_context("alice", default).unwrap();
+            assert_eq!(loaded.custom_data["origin"], "base");
+            assert_eq!(loaded.session_id, default);
+        }
+        assert_eq!(stored_session_row(&db, "alice"), base_before);
+    }
+
+    #[test]
+    fn backend_missing_session_forks_base_not_active_session() {
+        let (db, _dir) = test_db();
+        let mut base = Context {
+            user_id: "alice".into(),
+            username: Some("Alice".into()),
+            custom_data: serde_json::json!({"origin":"base", "keep":true}),
+            cl_data: serde_json::json!({"project":"base project"}),
+            ..Default::default()
+        };
+        base.settings.model = Some("base-model".into());
+        db.save_context(&base).unwrap();
+        let mut active = base.clone();
+        active.session_id = "t".into();
+        active.custom_data = serde_json::json!({"origin":"active session"});
+        active.settings.model = Some("active-model".into());
+        db.save_context(&active).unwrap();
+        let base_before = stored_session_row(&db, "alice");
+        let active_before = stored_session_row(&db, "alice:::t");
+
+        let fork = db.load_session_context("alice", "s").unwrap();
+        let mut expected = decode_context(&base_before).unwrap();
+        expected.user_id = "alice".into();
+        expected.session_id = "s".into();
+        assert_eq!(serde_json::to_value(&fork).unwrap(), serde_json::to_value(&expected).unwrap());
+        assert_eq!(fork.settings.model.as_deref(), Some("base-model"));
+        assert_eq!(stored_session_row(&db, "alice:::s"), serde_json::to_string(&fork).unwrap());
+        assert_eq!(serde_json::to_value(db.load_session_context("alice", "s").unwrap()).unwrap(), serde_json::to_value(&fork).unwrap());
+        assert_eq!(stored_session_row(&db, "alice"), base_before);
+        assert_eq!(stored_session_row(&db, "alice:::t"), active_before);
+        let count: i64 = db.conn().query_row(
+            "SELECT count(*) FROM contexts WHERE user_id IN ('alice:::s', 'alice:::s:::s')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+
+        let fresh = db.load_session_context("new-user", "s").unwrap();
+        assert_eq!(fresh.user_id, "new-user");
+        assert_eq!(fresh.session_id, "s");
+        assert_eq!(fresh.mode, Context::default().mode);
+        assert_eq!(stored_session_row(&db, "new-user:::s"), serde_json::to_string(&fresh).unwrap());
+    }
+
+    #[test]
+    fn backend_delete_context_treats_user_wildcards_literally() {
+        let (db, _dir) = test_db();
+        for uid in ["a_%", "a_%:::work", "alice:::work", "a_X:::work"] {
+            db.add_memory(uid, "keep scoped", Some("fact")).unwrap();
+        }
+        db.delete_context("a_%").unwrap();
+        assert!(db.get_memories("a_%", 10).unwrap().is_empty());
+        assert!(db.get_memories("a_%:::work", 10).unwrap().is_empty());
+        assert_eq!(db.get_memories("alice:::work", 10).unwrap().len(), 1);
+        assert_eq!(db.get_memories("a_X:::work", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn backend_sm_aliases_emit_only_canonical_schema() {
+        let ctx: Context = serde_json::from_value(serde_json::json!({
+            "user_id": "alice", "cl_file": "old", "settings": {"cl_file": "legacy"}, "cl_data": {"keep": true}
+        })).unwrap();
+        assert_eq!(ctx.sm_file.as_deref(), Some("old"));
+        assert_eq!(ctx.settings.sm_file.as_deref(), Some("legacy"));
+        let json = serde_json::to_value(ctx).unwrap();
+        assert!(json.get("cl_file").is_none());
+        assert!(json["settings"].get("cl_file").is_none());
+        assert_eq!(json["cl_data"]["keep"], true);
+    }
+
+    #[test]
+    fn backend_legacy_context_updates_merge_without_resetting_settings() {
+        let (db, _dir) = test_db();
+        db.merge_context("alice", serde_json::json!({"settings.max_llm_turns": 17, "sm_file": "first"})).unwrap();
+        let ctx = db.merge_context("alice", serde_json::json!({"cl_file": "next", "settings": {"cl_file": "legacy"}})).unwrap();
+        assert_eq!(ctx.sm_file.as_deref(), Some("next"));
+        assert_eq!(ctx.settings.sm_file.as_deref(), Some("legacy"));
+        assert_eq!(ctx.settings.max_llm_turns, Some(17));
+        let ctx = db.merge_context("alice", serde_json::json!({"settings.cl_file": "old", "settings.sm_file": "new"})).unwrap();
+        assert_eq!(ctx.settings.sm_file.as_deref(), Some("new"));
+        let ctx = db.merge_context("alice", serde_json::json!({"settings.active_state": "next"})).unwrap();
+        assert_eq!(ctx.active_state.as_deref(), Some("next"));
+        assert_eq!(ctx.settings.active_state, ctx.active_state);
+        assert!(db.merge_context("alice", serde_json::json!({"user_id": "bob"})).is_err());
+    }
 
     fn test_db() -> (Database, TempDir) {
         let dir = TempDir::new().unwrap();
