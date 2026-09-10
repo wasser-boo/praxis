@@ -143,6 +143,9 @@ async fn run_agent_loop_inner(
     let mut advanced = false;
     let mut last_tag_execution = None;
     let mut user_message = user_message_input.to_string();
+    let mut final_response: Option<String> = None;
+    let mut turn_limit_reached = false;
+    let mut current_tool_ids = std::collections::HashSet::new();
 
     // Create user input channel and register sender globally
     let mut user_input = UserInputChannel::new();
@@ -191,6 +194,7 @@ async fn run_agent_loop_inner(
         let current_limits = state.db.load_context(user_id)?;
         if turn >= current_limits.settings.max_llm_turns.unwrap_or(config.max_turns) {
             tracing::warn!(user_id = %user_id, turn = turn, "Max turns reached");
+            turn_limit_reached = true;
             break;
         }
 
@@ -272,8 +276,12 @@ async fn run_agent_loop_inner(
         }
 
         for (msg_idx, msg) in history.iter().enumerate() {
-            // Skip tool-call messages if setting is disabled
+            // The history preference may hide OLD tool conversations, but not
+            // this task's pending tool chain (including loaded skill bodies).
+            let current_tool_message = msg.tool_call_id.as_ref().is_some_and(|id| current_tool_ids.contains(id))
+                || msg.tool_calls.as_ref().is_some_and(|calls| calls.iter().any(|call| current_tool_ids.contains(&call.id)));
             if !ctx.settings.history_with_toolcalls
+                && !current_tool_message
                 && (msg.role == "tool" || msg.tool_calls.is_some())
             {
                 continue;
@@ -418,6 +426,7 @@ async fn run_agent_loop_inner(
 
         // Handle tool calls
         if let Some(tool_calls) = &response.tool_calls {
+            current_tool_ids.extend(tool_calls.iter().map(|call| call.id.clone()));
             // Persist the assistant message with tool_calls
             let db_tool_calls: Vec<crate::db::messages::ToolCallData> = tool_calls
                 .iter()
@@ -734,13 +743,15 @@ async fn run_agent_loop_inner(
 
             last_tag_execution = Some(tag_exec);
 
-            // Store cleaned response
-            state.db.add_message(
-                user_id,
-                &crate::db::messages::Message::assistant(tag_result.cleaned_response.clone()),
-            )?;
-        } else {
-            // Store raw response
+            if !tag_result.cleaned_response.trim().is_empty() {
+                final_response = Some(tag_result.cleaned_response.clone());
+                state.db.add_message(
+                    user_id,
+                    &crate::db::messages::Message::assistant(tag_result.cleaned_response.clone()),
+                )?;
+            }
+        } else if !response_text.trim().is_empty() {
+            final_response = Some(response_text.clone());
             state.db.add_message(
                 user_id,
                 &crate::db::messages::Message::assistant(response_text.clone()),
@@ -861,17 +872,21 @@ async fn run_agent_loop_inner(
         break;
     }
 
-    // Find the last assistant message with actual content
-    let all_msgs = state.db.get_messages(user_id, 50)?;
-    let final_response = all_msgs
-        .iter()
-        .rev()
-        .find(|m| m.role == "assistant" && !m.content.is_empty() && m.tool_calls.is_none())
-        .map(|m| m.content.clone())
-        .unwrap_or_else(|| {
-            tracing::warn!(user_id = %user_id, "No assistant response found after agent loop");
-            "I processed your request but have no text response to share.".to_string()
-        });
+    // Never substitute an older task's answer after a tool-only turn, limit or
+    // cancellation. Only a text response from THIS invocation is a final reply.
+    if should_stop(user_id).await {
+        return Err(crate::gateway::llm::error::ProviderError::new(
+            crate::gateway::llm::error::ErrorKind::Cancelled,
+        ).into());
+    }
+    if turn_limit_reached {
+        anyhow::bail!("Agent turn limit reached after {turn} LLM turns before a final answer. Tool results are saved; increase settings.max_llm_turns to allow a longer task.");
+    }
+    let final_response = match final_response {
+        Some(text) => text,
+        None if completed => "The agent marked the task complete without a text reply.".to_string(),
+        None => anyhow::bail!("Agent stopped without a final text reply. Tool results are saved."),
+    };
 
     Ok(AgentLoopResult {
         response: final_response,

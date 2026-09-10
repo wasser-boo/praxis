@@ -33,6 +33,14 @@ Wurden bereits Textdeltas an das Dashboard ausgegeben, wird ein unterbrochener S
 
 Es gibt keine Garantie für Exactly-once-Ausführung über Prozessabstürze hinweg: Ein Absturz zwischen externem Tool-Effekt und DB-Speicherung bleibt ein Sonderfall. Die öffentliche ältere `chat_with_tools`-API hält ihre übergebene Unterhaltung weiterhin im Speicher; sie ist kein dauerhafter Job-Checkpoint. Nach ausgeschöpftem Retry-Budget erfolgt **kein automatischer Neustart der ganzen Aufgabe**.
 
+### Tool-only-Antworten sind keine leeren Endantworten
+
+Ein Modell kann ausschließlich `tool_calls` zurückgeben, ohne Text. Das ist eine gültige Fortsetzung, kein Abschluss und kein Grund für TTS. Die Logs zeigen deshalb Textbytes **und** Tool-Anzahl. Eine Antwort ohne Text **und ohne Tools** bleibt ein expliziter `InvalidResponse`-Fehler; sie wird nicht blind wiederholt.
+
+Der Chat-Pfad (`settings.max_llm_turns` null/≤1) führt auch mehrere aufeinanderfolgende Tool-Runden aus, etwa `use_skill` → `read_file` → Dateioperation → Textantwort. Tool-Definitionen und Kontext werden für jede Fortsetzung aktualisiert, die Ergebnisse dauerhaft gespeichert. `settings.max_tool_calls` begrenzt dabei die gesamten angeforderten Calls pro Nachricht (Standard 5, ≤0 deaktiviert Ausführung); ungültige Calls verbrauchen ebenfalls Budget. Die Obergrenze wird am Nachrichtenbeginn festgehalten und kann nicht durch ein Tool für die laufende Nachricht erhöht werden. Nach Budgetverbrauch ist höchstens eine textuelle Abschlussanfrage ohne Tools erlaubt. Fordert das Modell dennoch weitere Tools an, erhalten diese gespeicherte Ablehnungen und der Nutzer einen Limitfehler statt einer leeren Erfolgsmeldung.
+
+Für längere Aufgaben bleibt der explizite Multi-Turn-Modus verfügbar: dort begrenzt `max_llm_turns` die LLM-Runden und `max_tool_calls` die Ausführungen je Runde. Tool-Historie der **laufenden** Aufgabe bleibt auch bei deaktivierter älterer Tool-Historie erhalten. Ein Turn-Limit ohne Endantwort wird gemeldet; frühere Antworten anderer Aufgaben werden nicht als Ergebnis ausgegeben. Kein automatisches Erhöhen der gespeicherten Limits oder Wiederanlaufen einer abgebrochenen Aufgabe. Leere/Whitespace-Texte starten keine automatische TTS-Aufgabe.
+
 ### Fortschritt und Abbrechen
 
 Dashboard/SSE und Gateway-WebSocket zeigen Queue-/Cooldown-/Retry-Meldungen. WebSocket-Pings und `agent_input` bleiben während einer Aufgabe bedienbar; `{"type":"stop","user_id":"…"}` bricht LLM-Aufrufe und Wartezeiten ab. Die bisherigen Dashboard-/Discord-Stop-Aktionen verwenden dieselbe Cancellation.
@@ -88,6 +96,8 @@ Keys werden beim Start in den Router übernommen. Dashboard-Secret-Änderungen e
 cargo test --locked --lib resilience_ -- --test-threads=1
 POML_CLI=/path/to/Microsoft/POML/cli.js \
   cargo test --locked --lib resilience_ -- --include-ignored --test-threads=1
+POML_CLI=/path/to/Microsoft/POML/cli.js \
+  cargo test --locked --lib message_tool_loop_tests -- --include-ignored --test-threads=1
 node scripts/test_llm_stream.js
 node scripts/test_ui_static.js
 python3 scripts/check_context_docs.py

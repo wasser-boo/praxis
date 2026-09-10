@@ -236,11 +236,11 @@ impl LLMRouter {
                         }
                         stream.committed = true;
                         if let (Some(user), Some(text)) =
-                            (user, response.content.as_deref().filter(|s| !s.is_empty()))
+                            (user, response.content.as_deref().filter(|s| !s.trim().is_empty()))
                         {
                             crate::dashboard::stream::send(user, "assistant", text);
                         }
-                        tracing::info!(provider = %label(name), attempt = attempts, elapsed_ms = attempt_start.elapsed().as_millis() as u64, "LLM attempt succeeded");
+                        tracing::info!(provider = %label(name), attempt = attempts, elapsed_ms = attempt_start.elapsed().as_millis() as u64, content_bytes = response.content.as_ref().map_or(0, String::len), tool_call_count = response.tool_calls.as_ref().map_or(0, Vec::len), "LLM attempt succeeded");
                         return Ok(response);
                     }
                     Err(mut error) => {

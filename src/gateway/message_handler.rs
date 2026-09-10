@@ -28,7 +28,12 @@ pub(crate) async fn handle_message_inner(
             .await;
     }
 
-    // Single-pass and agent paths use the same routed input/context contract.
+    // One user-facing turn can require several tool-only LLM responses. Keep
+    // this chat path bounded without mistaking a tool response for completion.
+    // Snapshot the budget: a tool cannot grow its own budget during this task.
+    let tool_limit = ctx.settings.max_tool_calls.unwrap_or(5).max(0) as usize;
+    let mut tool_calls_used = 0usize;
+    let mut finalizing = tool_limit == 0;
     let mut ctx = ctx;
     let rendered_user = crate::gateway::prompt::render_user(state, &ctx, content).await?;
     state.db.add_message(user_id, &crate::db::messages::Message::user(rendered_user))?;
@@ -78,12 +83,12 @@ pub(crate) async fn handle_message_inner(
     tool_defs.extend(state.plugins.tool_definitions());
 
     // Clone tool names and definitions for validation before moving tool_defs into request
-    let tool_names: Vec<String> = tool_defs.iter().map(|t| t.function.name.clone()).collect();
-    let tools_for_validation = tool_defs.clone();
+    let mut tool_names: Vec<String> = tool_defs.iter().map(|t| t.function.name.clone()).collect();
+    let mut tools_for_validation = tool_defs.clone();
 
     let request = ChatRequest {
         messages,
-        tools: if tool_defs.is_empty() {
+        tools: if finalizing || tool_defs.is_empty() {
             None
         } else {
             Some(tool_defs)
@@ -95,12 +100,12 @@ pub(crate) async fn handle_message_inner(
         vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
     };
 
-    let response = state
+    let mut response = state
         .llm
         .streaming_chat(request, ctx.settings.provider.as_deref(), user_id)
         .await?;
 
-    if let Some(tool_calls) = &response.tool_calls {
+    while let Some(tool_calls) = &response.tool_calls {
         // Persist the assistant message with tool_calls
         let db_tool_calls: Vec<crate::db::messages::ToolCallData> = tool_calls
             .iter()
@@ -128,6 +133,18 @@ pub(crate) async fn handle_message_inner(
                 state.db.add_message(user_id, &msg)?;
                 continue;
             }
+            if tool_calls_used >= tool_limit {
+                let mut msg = crate::db::messages::Message::tool(
+                    "Error: Maximum tool-call limit reached; tool not executed".into(),
+                    tc.id.clone(),
+                );
+                msg.tool_name = Some(tc.function.name.clone());
+                state.db.add_message(user_id, &msg)?;
+                continue;
+            }
+            // Invalid calls also consume budget; otherwise malformed/unknown
+            // calls could keep a recovery loop running indefinitely.
+            tool_calls_used += 1;
             // Validate tool exists before executing
             if !tool_names.contains(&tc.function.name) {
                 let result = format!("Error: Unknown tool '{}'. Check the tool name and try again.", tc.function.name);
@@ -192,6 +209,15 @@ pub(crate) async fn handle_message_inner(
             results.push((tc.id.clone(), final_result));
         }
 
+        if crate::gateway::task_control::cancellation(user_id).is_some_and(|token| token.is_cancelled()) {
+            return Err(crate::gateway::llm::error::ProviderError::new(
+                crate::gateway::llm::error::ErrorKind::Cancelled,
+            ).into());
+        }
+        if finalizing {
+            anyhow::bail!("Maximum tool-call limit reached ({tool_limit}); provider requested more tools instead of a final answer. Tool results are saved; the task was not silently completed.");
+        }
+
         // Context tools must affect the very next LLM request, not be overwritten
         // by the pre-tool snapshot at the end of this handler.
         ctx = crate::gateway::prompt::prepare_runtime(state, user_id, content, None, channel_id)?;
@@ -206,7 +232,7 @@ pub(crate) async fn handle_message_inner(
         });
         let (history, _tokens) = state
             .db
-            .get_messages_with_token_budget(user_id, token_budget)?;
+            .get_messages_with_token_budget(user_id, ctx.settings.history_token_limit.unwrap_or(500000))?;
 
         // Only include image data for the last 2 messages with content_parts
         let mut image_msg_indices: std::collections::HashSet<usize> =
@@ -257,9 +283,26 @@ pub(crate) async fn handle_message_inner(
             });
         }
 
+        // Keep tools available after use_skill/read_file/etc. Refresh definitions
+        // as well as context, so newly disabled tools cannot run next round.
+        let mut tool_defs = crate::db::tools::to_tool_definitions(&state.db)?;
+        tool_defs.extend(state.plugins.tool_definitions());
+        tool_names = tool_defs.iter().map(|t| t.function.name.clone()).collect();
+        tools_for_validation = tool_defs.clone();
+        finalizing = tool_calls_used >= tool_limit;
+        if finalizing {
+            followup_messages.push(ChatMessage {
+                role: "system".into(),
+                content: Some("The tool-call budget for this request is exhausted. No more tools may run. Give an honest final status using the saved tool results, explicitly stating any unfinished work. Do not claim unexecuted actions succeeded.".into()),
+                content_parts: None,
+                tool_calls: None,
+                tool_call_id: None,
+                tool_name: None,
+            });
+        }
         let followup_request = ChatRequest {
             messages: followup_messages,
-            tools: None,
+            tools: if finalizing || tool_defs.is_empty() { None } else { Some(tool_defs) },
             temperature: Some(0.7),
             max_tokens: Some(4096),
             model: ctx.settings.model.clone(),
@@ -267,30 +310,10 @@ pub(crate) async fn handle_message_inner(
             vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
         };
 
-        let followup_response = state
+        response = state
             .llm
             .streaming_chat(followup_request, ctx.settings.provider.as_deref(), user_id)
             .await?;
-        let reply = followup_response.content.unwrap_or_default();
-        state.db.add_message(
-            user_id,
-            &crate::db::messages::Message::assistant(reply.clone()),
-        )?;
-
-        let mut updated_ctx = state.db.load_context(user_id)?;
-        state.db.increment_turn(&mut updated_ctx);
-        state.db.save_context(&updated_ctx)?;
-
-        if updated_ctx.settings.use_tts {
-            spawn_tts(
-                reply.clone(),
-                &updated_ctx.settings,
-                &state.secrets,
-                user_id,
-            );
-        }
-
-        return Ok(reply);
     }
 
     let reply = response.content.unwrap_or_default();
@@ -884,6 +907,11 @@ fn spawn_tts(
     secrets: &crate::db::secrets::Secrets,
     user_id: &str,
 ) {
+    // Tool-only turns, empty tag output and whitespace are not speech. Return
+    // before spawning a task or constructing/contacting any TTS provider.
+    if text.trim().is_empty() {
+        return;
+    }
     let tts_type = settings.voice_tts_type.clone();
     let rvc_on = settings.rvc_on;
     let rvc_server = settings.rvc_server.clone();
@@ -1084,6 +1112,10 @@ mod skill_dispatch_tests;
 #[cfg(test)]
 #[path = "backend_dispatch_tests.rs"]
 mod backend_dispatch_tests;
+
+#[cfg(test)]
+#[path = "message_tool_loop_tests.rs"]
+mod message_tool_loop_tests;
 
 #[cfg(test)]
 mod gateway_tests {

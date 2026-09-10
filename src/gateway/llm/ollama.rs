@@ -62,7 +62,7 @@ impl OllamaProvider {
         }
         state.finish(&on_token)?;
 
-        tracing::info!(total_len = state.content.len(), "[STREAM] Ollama full content collected");
+        tracing::info!(content_bytes = state.content.len(), tool_call_count = state.tool_calls.len(), "[STREAM] Ollama response collected");
         let has_tools = !state.tool_calls.is_empty();
         Ok(ChatResponse {
             content: if state.content.is_empty() { None } else { Some(state.content) },
@@ -300,7 +300,7 @@ fn parse_tool_calls_from_message(message: &serde_json::Value) -> Option<Vec<Tool
             let func = tc.get("function")?;
             let name = func.get("name")?.as_str()?.to_string();
             let args = func.get("arguments")?.clone();
-            tracing::debug!(target: "ollama", "Tool call: {} with args: {}", name, args);
+            tracing::debug!(target: "ollama", tool = %name, args_bytes = args.to_string().len(), "Ollama tool call parsed");
             Some(ToolCall {
                 id: format!("call_{}", uuid::Uuid::new_v4()),
                 function: FunctionCall {
