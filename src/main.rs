@@ -444,7 +444,7 @@ async fn run_services(
     let plugins_dir = std::env::var("PLUGINS_DIR").unwrap_or_else(|_| "./plugins".to_string());
     let plugin_registry = praxis::plugins::load_all_plugins(std::path::Path::new(&plugins_dir));
     for key in plugin_registry.collect_secrets() {
-        if !secrets.custom.contains_key(&key) {
+        if !secrets.custom.contains_key(&key) && secrets.plugin_secret(&key).is_none() {
             tracing::info!(key = %key, "Creating placeholder secret for plugin");
             secrets.custom.insert(key, "CHANGE_ME".to_string());
         }

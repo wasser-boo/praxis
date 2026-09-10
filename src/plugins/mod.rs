@@ -1,5 +1,8 @@
 pub mod minimax_image;
 
+#[cfg(test)]
+mod media_tests;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -114,6 +117,16 @@ impl PluginRegistry {
         secrets
     }
 
+    /// Only credentials declared by the plugin owning this enabled tool.
+    pub fn secrets_for_tool(&self, tool_name: &str, secrets: &crate::db::secrets::Secrets) -> HashMap<String, String> {
+        self.plugins.values()
+            .find(|plugin| plugin.enabled && plugin.tools.iter().any(|tool| tool.name == tool_name))
+            .map(|plugin| plugin.secrets.iter()
+                .filter_map(|key| secrets.plugin_secret(key).map(|value| (key.clone(), value.to_owned())))
+                .collect())
+            .unwrap_or_default()
+    }
+
     pub async fn execute_tool(
         &self,
         tool_name: &str,
@@ -135,7 +148,10 @@ impl PluginRegistry {
                             execute_http_tool(url, method, args).await
                         }
                         PluginHandler::Script { path, interpreter } => {
-                            execute_script(path, interpreter, args, context, secrets).await
+                            let scoped: HashMap<String, String> = plugin.secrets.iter()
+                                .filter_map(|key| secrets.and_then(|values| values.get(key)).map(|value| (key.clone(), value.clone())))
+                                .collect();
+                            execute_script(path, interpreter, args, context, Some(&scoped)).await
                         }
                     };
                 }
@@ -189,21 +205,10 @@ async fn execute_script(
         .stderr(std::process::Stdio::piped())
         .env("PLUGIN_ARGS", &input);
 
-    if let Some(ctx) = context {
-        cmd.env(
-            "PLUGIN_CONTEXT",
-            serde_json::to_string(ctx).unwrap_or_default(),
-        );
-    }
-
-    if let Some(sec) = secrets {
-        if !sec.is_empty() {
-            cmd.env(
-                "PLUGIN_SECRETS",
-                serde_json::to_string(sec).unwrap_or_default(),
-            );
-        }
-    }
+    // Always replace these envelopes, even when empty: never inherit another
+    // plugin invocation's PLUGIN_CONTEXT / PLUGIN_SECRETS from the process env.
+    cmd.env("PLUGIN_CONTEXT", serde_json::to_string(context.unwrap_or(&serde_json::json!({})))?);
+    cmd.env("PLUGIN_SECRETS", serde_json::to_string(&secrets.cloned().unwrap_or_default())?);
 
     let output = cmd
         .output()

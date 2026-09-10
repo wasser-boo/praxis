@@ -322,6 +322,13 @@ Plugin manifest (`plugin.json`):
 }
 ```
 
+### Media plugins
+
+- `plugins/elevenlabs_tts/`: `elevenlabs_tts` generates downloadable MP3 speech.
+- `plugins/openrouter_image/`: `openrouter_image_generate` generates PNG/JPEG/WebP via OpenRouter's dedicated Image API.
+
+Both are standalone Python 3 plugins with encrypted-secret/environment support and local file output. They make paid API calls only when invoked, without automatic retries. See [setup, parameters and offline tests](docs/MEDIA_PLUGINS.md).
+
 ## Service (systemd)
 
 ```bash

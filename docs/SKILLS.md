@@ -17,7 +17,9 @@ For your paired Praxis context, use `/skill` with the **skillname** option:
 
 Omitting the option (or using `list`) lists registered skills and the current selection. A valid selection persists as `settings.active_skill` for **subsequent tasks**, until changed or switched off. Subsequent raw input is mapped to required `user_request`, `code` or `error` parameters. Loading instructions does not itself execute scripts, spend on a provider or enable tools. Pairing, guild/channel restrictions and disabled `use_skill` remain enforced; unavailable/invalid skills return errors. Custom templates cannot accidentally omit the active skill: the runtime appends its rendered instructions separately.
 
-The Discord command appears after the updated bot binary registers commands at startup. The source changes do not update a currently running bot.
+**Access rule:** every Discord `/skill` operation (including omitted argument, `list`, `off` and unknown names) requires a completed pairing for the interaction's Discord user ID. A pending `/pair` code or knowledge of an internal user/context ID is insufficient. Pairing and guild/channel checks happen before reading skill files and are repeated before returning skill data or saving the selection. Revoked pairings are denied on subsequent calls; failures do not change another user's context. Replies remain ephemeral. This rule is for the Discord command; the separate authenticated Gateway `use_skill` tool is unchanged.
+
+The Discord command appears after the updated bot binary registers commands at startup. It can remain visible to unpaired users, but execution is rejected with a pairing hint. The source changes do not update a currently running bot.
 
 ### Per-task tool loading
 

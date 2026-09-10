@@ -479,12 +479,12 @@ async fn run_agent_loop_inner(
                     }
                 }
 
-                // Log tool call start with full details
+                // Keep invocation diagnostics without logging speech/image prompts.
                 tracing::info!(
                     user_id = %user_id,
                     tool = %tc.function.name,
                     call_id = %tc.id,
-                    arguments = %tc.function.arguments,
+                    args_bytes = tc.function.arguments.len(),
                     "=== TOOL CALL START ==="
                 );
 
@@ -954,7 +954,7 @@ async fn execute_tool_call(
     tc: &ToolCall,
     plugins: &crate::plugins::PluginRegistry,
 ) -> String {
-    tracing::info!(tool = %tc.function.name, args = %tc.function.arguments, "execute_tool_call: dispatching");
+    tracing::info!(tool = %tc.function.name, args_bytes = tc.function.arguments.len(), "execute_tool_call: dispatching");
 
     let args: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
         Ok(v) => v,
@@ -967,12 +967,8 @@ async fn execute_tool_call(
         .map(|ctx| ctx.custom_data)
         .filter(|v| !v.is_null());
 
-    let plugin_secret_keys = plugins.collect_secrets();
     let all_secrets = crate::db::secrets::get_secrets();
-    let plugin_secrets: std::collections::HashMap<String, String> = plugin_secret_keys
-        .iter()
-        .filter_map(|k| all_secrets.custom.get(k).map(|v| (k.clone(), v.clone())))
-        .collect();
+    let plugin_secrets = plugins.secrets_for_tool(&tc.function.name, &all_secrets);
 
     match tc.function.name.as_str() {
         "use_skill" => crate::tools::use_skill::run(db, &args).await
@@ -1626,7 +1622,7 @@ async fn execute_tool_call(
                 .await
             {
                 Ok(result) => result,
-                Err(e) => format!("Unknown tool: {} ({})", tc.function.name, e),
+                Err(e) => format!("Plugin tool {} failed: {}", tc.function.name, e),
             }
         }
     }

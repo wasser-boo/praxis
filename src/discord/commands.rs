@@ -181,6 +181,43 @@ pub fn channel_allowed(settings: &crate::db::contexts::ContextSettings, guild: O
     guild.map_or(true, |guild| allowed(&settings.allowed_guilds, guild)) && allowed(&settings.allowed_channels, channel)
 }
 
+#[cfg(test)]
+#[path = "skill_access_tests.rs"]
+mod skill_access_tests;
+
+fn skill_command_context(
+    db: &Database,
+    discord_user_id: &str,
+    guild: Option<&str>,
+    channel: &str,
+) -> anyhow::Result<crate::db::contexts::Context> {
+    let pairing = db.get_pairing_by_discord(discord_user_id)?
+        .ok_or_else(|| anyhow::anyhow!("Please pair first with /pair"))?;
+    let context = db.load_context(&pairing.user_id)?;
+    anyhow::ensure!(channel_allowed(&context.settings, guild, channel), "This channel or guild is not allowed");
+    Ok(context)
+}
+
+/// Authorize before filesystem access, including list/off/unknown arguments.
+/// A pending pairing code or an internal context ID is not a completed pairing.
+fn apply_skill_command_from_dir(
+    db: &Database,
+    discord_user_id: &str,
+    guild: Option<&str>,
+    channel: &str,
+    argument: &str,
+    directory: &std::path::Path,
+) -> anyhow::Result<String> {
+    skill_command_context(db, discord_user_id, guild, channel)?;
+    let mut registry = crate::skills::SkillRegistry::new();
+    // off stays usable for authorized users even if the directory is unreadable.
+    if !argument.trim().eq_ignore_ascii_case("off") {
+        registry.load_from_dir(directory)?;
+    }
+    // Recheck authorization immediately before returning data/changing context.
+    apply_skill_command(db, discord_user_id, guild, channel, argument, &registry)
+}
+
 pub fn apply_skill_command(
     db: &Database,
     discord_user_id: &str,
@@ -189,9 +226,7 @@ pub fn apply_skill_command(
     argument: &str,
     registry: &crate::skills::SkillRegistry,
 ) -> anyhow::Result<String> {
-    let pairing = db.get_pairing_by_discord(discord_user_id)?.ok_or_else(|| anyhow::anyhow!("Please pair first with /pair"))?;
-    let mut ctx = db.load_context(&pairing.user_id)?;
-    anyhow::ensure!(channel_allowed(&ctx.settings, guild, channel), "This channel or guild is not allowed");
+    let mut ctx = skill_command_context(db, discord_user_id, guild, channel)?;
     let name = argument.trim();
     if name.is_empty() || name.eq_ignore_ascii_case("list") {
         let skills = registry.list().iter().map(|s| format!("{} — {}", s.name, s.description)).collect::<Vec<_>>().join("\n");
@@ -214,12 +249,7 @@ pub fn apply_skill_command(
 pub async fn handle_skill_command(db: &Database, ctx: &Context, command: &CommandInteraction) -> anyhow::Result<()> {
     let result = (|| {
         let argument = command.data.options.iter().find(|o| o.name == "skillname").and_then(|o| o.value.as_str()).unwrap_or("list");
-        let mut registry = crate::skills::SkillRegistry::new();
-        // off must remain usable even if the skill directory becomes unreadable.
-        if !argument.trim().eq_ignore_ascii_case("off") {
-            registry.load_from_dir(std::path::Path::new("skills"))?;
-        }
-        apply_skill_command(db, &command.user.id.to_string(), command.guild_id.map(|g| g.to_string()).as_deref(), &command.channel_id.to_string(), argument, &registry)
+        apply_skill_command_from_dir(db, &command.user.id.to_string(), command.guild_id.map(|g| g.to_string()).as_deref(), &command.channel_id.to_string(), argument, std::path::Path::new("skills"))
     })();
     let response = match result { Ok(text) => text, Err(error) => format!("Error: {error}") };
     command.create_response(&ctx.http, serenity::builder::CreateInteractionResponse::Message(

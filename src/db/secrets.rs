@@ -35,6 +35,22 @@ pub struct Secrets {
     pub custom: std::collections::HashMap<String, String>,
 }
 
+impl Secrets {
+    /// Resolve a declared plugin credential without serializing the full store.
+    /// Explicit custom values win; empty/onboarding placeholders never shadow
+    /// existing native media credentials. Native gateway/admin secrets stay private.
+    pub fn plugin_secret(&self, key: &str) -> Option<&str> {
+        let usable = |value: &&str| !value.trim().is_empty() && value.trim() != "CHANGE_ME";
+        self.custom.get(key).map(String::as_str).filter(usable).or_else(|| {
+            match key {
+                "elevenlabs_api_key" => self.elevenlabs_api_key.as_deref(),
+                "openrouter_api_key" => self.openrouter_api_key.as_deref(),
+                _ => None,
+            }.filter(usable)
+        })
+    }
+}
+
 pub fn init_secrets(secrets: Secrets) {
     if let Ok(mut guard) = SECRETS.write() {
         *guard = Some(secrets);
