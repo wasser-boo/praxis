@@ -93,8 +93,11 @@ def main():
         render(authoring / 'skill.poml', {'user_request': 'Create a skill', 'target_kind': 'skill'},
                ('staged skill package', 'Return to the calling skill'), ('Save with update_template', 'key settings.system_template'))
         render(ROOT / 'skills/mnemodim-palace/skill.poml', {'user_request': 'Inspect only'},
-               ('references/format-cheatsheet.md', 'references/media.md'),
-               ('Major(2,', 'Built-ins include', '/home/marvin/.pi', 'codex_generate_image'))
+               ('references/format-cheatsheet.md', 'references/media.md',
+                'references/MNEMODIM_IMPORT_GUIDE.md', 'Before EVERY package creation, edit or repair',
+                'value MUST be a string', 'parseFormula', 'final saved bytes', 'sections 7.7 and 9'),
+               ('Major(2,', 'Built-ins include', '/home/marvin/.pi', 'codex_generate_image',
+                'Confirmed incident: the Hiragana palace', '## 7. Error catalogue'))
         render(ROOT / 'skills/skill_creator/skill.poml', {'user_request': 'Create a skill'},
                ('target_kind', 'references/authoring.md'), ('https://microsoft.github.io',))
         discovery = ROOT / 'templates/discovery/skills.poml'

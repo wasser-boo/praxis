@@ -84,6 +84,7 @@ const BUNDLED_ASSETS: &[Asset] = &[
     asset!("skills/mnemodim-palace/skill.json"),
     asset!("skills/mnemodim-palace/skill.poml"),
     asset!("skills/mnemodim-palace/references/format-cheatsheet.md"),
+    asset!("skills/mnemodim-palace/references/MNEMODIM_IMPORT_GUIDE.md"),
     asset!("skills/mnemodim-palace/references/design-and-workbook.md"),
     asset!("skills/mnemodim-palace/references/media.md"),
     asset!("skills/mnemodim-palace/scripts/mnemodim_tool.py", executable),

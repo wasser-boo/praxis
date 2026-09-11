@@ -47,6 +47,10 @@ only when the user requests that. It returns a local MP3. No autoplay is implied
 
 ## Embed and validate
 
+Apply `MNEMODIM_IMPORT_GUIDE.md` sections 6–8 before hand-off, including MIME
+signatures, sizes and ZIP integrity. A helper structural PASS does not verify
+media signatures/decodability or successful backend uploads.
+
 Read the returned local file bytes, assign a unique stable asset ID and add its
 MIME, ZIP path `assets/<id>` and exact size to `manifest.assets`. Reference that ID
 from `stage.imagePath`, `locus.imagePath`, `locus.soundPath`, or an asset table

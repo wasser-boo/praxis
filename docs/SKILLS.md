@@ -168,7 +168,7 @@ helpers resolve against the returned absolute skill directory.
 | `tmux` | `user_request` | Host tmux required; scripts never autorun |
 | `poml_templates` | `user_request` | Real Microsoft POML authoring/validation |
 | `skill_creator` | `user_request` | **User-only by default**; delegates POML work to `poml_templates` with `target_kind: "skill"` |
-| `mnemodim-palace` | `user_request` | Pi skill port; .mnemodim ZIPs, loci, workbooks, formulas and optional media |
+| `mnemodim-palace` | `user_request` | .mnemodim ZIPs, preventive import-error catalogue/preflight, loci, workbooks, formulas and optional media |
 
 The creator keeps package/index guidance in a separate reference and does not
 duplicate the POML guide. `target_kind: "skill"` tells the POML skill to validate
@@ -176,14 +176,60 @@ staged skill files with its helper rather than saving them through `update_templ
 which intentionally writes only `templates/`. Publication/indexing do not activate
 anything. See `skills/skill_creator/references/authoring.md` for manifest bounds.
 
-The mnemodim port has lazy format, design/workbook and media references plus a
-standard-library Python helper. It inspects packages read-only or extracts assets
-into a new directory without overwriting existing files. It rejects unsafe ZIP
-paths, duplicates, symlinks, oversized entries and broken basic references. It is
-**not** the application's complete importer, formula validator or media decoder.
+The mnemodim skill bundles
+`skills/mnemodim-palace/references/MNEMODIM_IMPORT_GUIDE.md` verbatim from the
+provided standalone guide (mnemodim importer audit commit `8276140`). It is a
+**mandatory read before every creation, edit or repair**, not just a troubleshooting
+reference after a failed import. It stays lazy rather than bloating discovery or
+every unrelated prompt. The guide covers generation rules, error families,
+local decoder/formula preflight, and separate backend/upload/destination failures;
+re-audit it when the target importer changes. Historical incident paths are not
+Praxis installation paths. Never embed the Markdown catalogue inside a palace ZIP.
+
+The compact format/design/media references agree with the guide: every workbook
+`cell.value` is a **string**, even for number, boolean and JSON types; numeric
+coordinates/order/sizes and actual null shared scope must not be stringified.
+The standard-library helper inspects packages read-only or extracts assets into
+a new directory without overwriting existing files. In addition to bounded ZIP
+paths/sizes/references, it checks complete CSV headers, global IDs, required
+background/stage order/shared scope, common cell type/content errors, and saved
+quiz/binding constraints. Cell diagnostics identify the archive path, row,
+sheet/key and column. Regression tests include the guide's standalone writer
+and malformed native number/boolean/JSON values.
+
+It is **not** the application's complete importer, formula validator or media
+decoder. Its PASS explicitly leaves full ZIP/media integrity, reconstructed
+document size, formula syntax/runtime and backend import untested. Follow the
+guide's section 8: use `decodePackage` and `parseFormula` on final saved bytes
+when available, test workbook behavior separately, and report unrun checks.
+No local catalogue can guarantee authentication, network or destination state.
 Use enabled Praxis `openrouter_image_generate` / `elevenlabs_tts` plugins only for
 explicit media requests; no Pi-specific Codex/Kokoro tools are assumed. See
 [Media plugins](MEDIA_PLUGINS.md). No real media calls are part of skill tests.
+
+### Updating an installed skill without restarting
+
+On a running version with the existing skill loader, **skill/reference/helper-only
+updates need no restart or binary replacement**. Review differences and back up
+the installation's existing skill files first; copy only the approved changed
+files to `INSTALLATION/skills/mnemodim-palace/` (references/helpers first,
+`skill.poml` last), using atomic file replacements. Do not overwrite unrelated
+customizations. Validate the installed POML with the real renderer, then refresh
+only that folder's metadata if its description changed:
+
+```bash
+/path/to/installation/praxis skill --directory /path/to/installation \
+  --data-dir /actual/data index --folder mnemodim-palace
+```
+
+`execute_skill` renders the disk POML on every load. The new instructions apply
+to the next `use_skill` load or next message with that skill already selected;
+an in-flight task can still hold older instructions. There is no need to change
+persistent selection, credentials, the main DB, VM or service state. A Git push
+alone does **not** update an existing installation. The asset allow-list also
+bundles the guide in future builds/onboarding/repair; `repair-assets` deliberately
+preserves existing skill files and is not an overwrite/update command for them.
+New Rust loader behavior would still require a rebuilt binary and restart.
 
 ## POML setup, validation and deployment
 

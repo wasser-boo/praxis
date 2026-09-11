@@ -37,6 +37,7 @@ fn onboarding_assets_install_every_bundled_file_and_executable() {
         "static/logo.png",
         "static/favicon.ico",
         "skills/poml_templates/reference.md",
+        "skills/mnemodim-palace/references/MNEMODIM_IMPORT_GUIDE.md",
     ] {
         assert!(
             root.join(name).is_file(),

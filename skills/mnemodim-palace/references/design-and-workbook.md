@@ -1,7 +1,8 @@
 # Locus design and workbook logic
 
-Adapted from the Pi mnemodim-palace skill. Read the format cheatsheet before
-serializing these structures; this is workflow guidance, not executable code.
+Adapted from the Pi mnemodim-palace skill. Before authoring or serializing these
+structures, read `MNEMODIM_IMPORT_GUIDE.md` and the format cheatsheet. The guide's
+import contract takes precedence; this is workflow guidance, not executable code.
 
 ## Loci and visual placement
 
@@ -20,12 +21,18 @@ have seen anchors. Use enabled Praxis image-understanding tools if available.
 - `soundPath` is optional audio, generated only on explicit request.
 - `contentType`: `recall`, `quiz` (multiple-choice/multi-answer), or `guess`
   (typed answer). Quiz correct answers live as comma-separated `memory`;
-  distractors go in `alternatives`. Do not invent an answer set.
+  distractors go in `alternatives`. A quiz needs 1–20 distinct nonempty answers
+  even when memory is formula-bound. Do not invent an answer set. For new
+  language/vocabulary palaces follow the app's `quiz` authoring convention;
+  never silently convert existing valid `recall` content during a repair.
 
 ## Tables, formulas and bindings
 
 Rows have stable `sheet` + `key` identity. Local rows shadow shared rows of the
 same sheet/key. Numeric keys use brackets: `Major["07"].object`.
+Every cell's stored `value` is a string: number `"7"`, boolean `"true"`, JSON
+`"[1,2]"`. These become typed values at runtime, not in the serialized cell.
+Shared rows require explicit `palaceId: null` (not a missing or string value).
 
 Common sheets:
 
