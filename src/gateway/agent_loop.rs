@@ -113,6 +113,7 @@ pub async fn run_agent_loop(
     feedback_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> anyhow::Result<AgentLoopResult> {
     let _task = crate::gateway::task_control::begin(user_id)?;
+    crate::gateway::prompt::reset_task_completion(&state.db, user_id)?;
     run_agent_loop_in_task(state, user_id, user_message_input, config, feedback_tx).await
 }
 
@@ -260,19 +261,18 @@ async fn run_agent_loop_inner(
             .db
             .get_messages_with_token_budget(user_id, token_budget)?;
 
-        // Find the indices of the last 2 messages that have content_parts
-        // Only those will get image data sent to the LLM
-        let mut image_msg_indices: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
-        let mut found = 0;
-        for (i, msg) in history.iter().enumerate().rev() {
-            if msg.content_parts.as_ref().map_or(false, |p| !p.is_empty()) {
-                image_msg_indices.insert(i);
-                found += 1;
-                if found >= 2 {
-                    break;
-                }
-            }
+        let image_msg_indices = crate::gateway::prompt::history_image_indices(
+            &history, &current_tool_ids, state.llm.history_image_messages(),
+        );
+        let omitted_history_images = history.iter()
+            .filter(|m| m.content_parts.as_ref().is_some_and(|p| !p.is_empty()))
+            .count().saturating_sub(image_msg_indices.len());
+        if omitted_history_images > 0 {
+            messages.push(ChatMessage {
+                role: "system".into(),
+                content: Some(crate::gateway::prompt::OMITTED_HISTORY_IMAGES_NOTICE.into()),
+                content_parts: None, tool_calls: None, tool_call_id: None, tool_name: None,
+            });
         }
 
         for (msg_idx, msg) in history.iter().enumerate() {
@@ -337,7 +337,7 @@ async fn run_agent_loop_inner(
             messages: messages.clone(),
             tools: if tools.is_empty() { None } else { Some(tools) },
             temperature: Some(0.7),
-            max_tokens: Some(4096),
+            max_tokens: Some(state.llm.task_output_tokens()),
             model: ctx.settings.model.clone(),
             vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
             vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
@@ -351,6 +351,8 @@ async fn run_agent_loop_inner(
             turn = ctx.turn,
             message_count = msg_count,
             tool_count = tool_count,
+            history_images_included = image_msg_indices.len(),
+            history_images_omitted = omitted_history_images,
             model = ?request.model,
             provider = ?ctx.settings.provider,
             ">>> LLM REQUEST >>>"
@@ -645,6 +647,7 @@ async fn run_agent_loop_inner(
             }
             ctx = state.db.load_context(user_id)?;
             if ctx.settings.done {
+                tracing::info!(user_id, turn, "Current task explicitly marked complete");
                 completed = true;
                 break;
             }

@@ -152,7 +152,7 @@ These settings do not affect the selected ElevenLabs backend unless RVC is enabl
 | `settings.active_state` | string or null | Workflow state name or `null` | `null` | Compatibility state marker synchronized with root `active_state` when shared workflow routing runs. |
 | `settings.active_templates` | array of strings | Template names without `.poml`, or `[]` | `[]` | Workflow stack modified by push/pop/next actions and tags. Does not directly select the system template. |
 | `settings.current_template` | string | Member of the settings template stack, or `""` | `""` | Cursor used by `agent_next`; not the system POML selection. |
-| `settings.done` | boolean | `true`, `false` | `false` | Set by `agent_complete`; the agent loop checks it after tools and can stop. Reset for a new workflow when necessary. |
+| `settings.done` | boolean | `true`, `false` | `false` | Current-task completion set by `agent_complete`; the agent loop checks it after tools. Automatically reset before a NEW task, not during tool continuations/retries/previews. |
 | `settings.path` | string | Directory/path text or `""` | `""` | Workflow metadata updated by path actions/tags. Does **not** change process cwd; ordinary file/terminal operations do not reliably honor it. Use explicit paths. |
 | `settings.tags_enabled` | boolean | `true`, `false` | `false` | Enables §-tag parsing/instructions in the agent path. Tags can cause workflow actions. Separate `[[AGENT:...]]` signals also exist. |
 | `settings.llm_turn` | I32 | Representable integer; ≥0 recommended | `0` | Incremented by `agent_next`; not the same as root `turn`, total provider requests, or token usage. |

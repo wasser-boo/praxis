@@ -24,6 +24,7 @@ impl LLMProvider for ToolProvider {
         self
     }
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        assert_eq!(request.max_tokens, Some(12_345), "configured output allowance lost");
         let turn = self.calls.fetch_add(1, Ordering::SeqCst);
         if turn > 0 {
             assert_eq!(
@@ -77,6 +78,7 @@ fn fixture(
     };
     let policy = ResilienceConfig {
         max_attempts: 2,
+        max_output_tokens: 12_345,
         initial_backoff_ms: 1,
         max_backoff_ms: 1,
         ..Default::default()

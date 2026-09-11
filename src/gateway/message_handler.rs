@@ -18,6 +18,8 @@ pub(crate) async fn handle_message_inner(
     content: &str,
     channel_id: Option<&str>,
 ) -> anyhow::Result<String> {
+    // A prior agent_complete must not stop this independent task after one tool.
+    crate::gateway::prompt::reset_task_completion(&state.db, user_id)?;
     // Route before deciding the path and before either prompt is rendered.
     let ctx = crate::gateway::prompt::prepare_runtime(state, user_id, content, None, channel_id)?;
     let max_turns = ctx.settings.max_llm_turns.unwrap_or(1);
@@ -33,6 +35,7 @@ pub(crate) async fn handle_message_inner(
     // Snapshot the budget: a tool cannot grow its own budget during this task.
     let tool_limit = ctx.settings.max_tool_calls.unwrap_or(5).max(0) as usize;
     let mut tool_calls_used = 0usize;
+    let mut current_tool_ids = std::collections::HashSet::new();
     let mut finalizing = tool_limit == 0;
     let mut ctx = ctx;
     let rendered_user = crate::gateway::prompt::render_user(state, &ctx, content).await?;
@@ -94,7 +97,7 @@ pub(crate) async fn handle_message_inner(
             Some(tool_defs)
         },
         temperature: Some(0.7),
-        max_tokens: Some(4096),
+        max_tokens: Some(state.llm.task_output_tokens()),
         model: ctx.settings.model.clone(),
         vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
         vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
@@ -106,6 +109,7 @@ pub(crate) async fn handle_message_inner(
         .await?;
 
     while let Some(tool_calls) = &response.tool_calls {
+        current_tool_ids.extend(tool_calls.iter().map(|call| call.id.clone()));
         // Persist the assistant message with tool_calls
         let db_tool_calls: Vec<crate::db::messages::ToolCallData> = tool_calls
             .iter()
@@ -234,18 +238,17 @@ pub(crate) async fn handle_message_inner(
             .db
             .get_messages_with_token_budget(user_id, ctx.settings.history_token_limit.unwrap_or(500000))?;
 
-        // Only include image data for the last 2 messages with content_parts
-        let mut image_msg_indices: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
-        let mut found = 0;
-        for (i, msg) in history.iter().enumerate().rev() {
-            if msg.content_parts.as_ref().map_or(false, |p| !p.is_empty()) {
-                image_msg_indices.insert(i);
-                found += 1;
-                if found >= 2 {
-                    break;
-                }
-            }
+        let image_msg_indices = crate::gateway::prompt::history_image_indices(
+            &history, &current_tool_ids, state.llm.history_image_messages(),
+        );
+        if history.iter().enumerate().any(|(i, m)|
+            m.content_parts.as_ref().is_some_and(|p| !p.is_empty()) && !image_msg_indices.contains(&i)
+        ) {
+            followup_messages.push(ChatMessage {
+                role: "system".into(),
+                content: Some(crate::gateway::prompt::OMITTED_HISTORY_IMAGES_NOTICE.into()),
+                content_parts: None, tool_calls: None, tool_call_id: None, tool_name: None,
+            });
         }
 
         for (msg_idx, msg) in history.iter().enumerate() {
@@ -304,7 +307,7 @@ pub(crate) async fn handle_message_inner(
             messages: followup_messages,
             tools: if finalizing || tool_defs.is_empty() { None } else { Some(tool_defs) },
             temperature: Some(0.7),
-            max_tokens: Some(4096),
+            max_tokens: Some(state.llm.task_output_tokens()),
             model: ctx.settings.model.clone(),
             vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
             vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),

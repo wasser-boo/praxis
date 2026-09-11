@@ -5,6 +5,48 @@ use crate::plugins::PluginRegistry;
 use serde_json::{json, Value};
 use std::path::Path;
 
+/// Completion belongs to one task, not the persisted conversation. Call only
+/// when starting a NEW task under its per-user guard, never on tool follow-ups,
+/// retries, injected input or previews. Preserve all other user settings/state.
+pub fn reset_task_completion(db: &Database, user_id: &str) -> anyhow::Result<()> {
+    let mut ctx = db.load_context(user_id)?;
+    if ctx.settings.done {
+        ctx.settings.done = false;
+        db.save_context(&ctx)?;
+        tracing::debug!(user_id, "Cleared previous task completion flag");
+    }
+    Ok(())
+}
+
+pub const OMITTED_HISTORY_IMAGES_NOTICE: &str = "Some earlier inline images are omitted from this request by the configured history-image policy. Their saved text/path references remain. Re-read relevant images with enabled tools before making visual claims; images read by the current task are eligible for the latest-two image window.";
+
+/// Keep the latest two eligible image-bearing history messages, as before.
+/// A zero previous-image budget excludes old task attachments but not freshly
+/// read tool images/current user attachments. Never mutate the saved history.
+pub fn history_image_indices(
+    history: &[crate::db::messages::Message],
+    current_tool_ids: &std::collections::HashSet<String>,
+    previous_limit: usize,
+) -> std::collections::HashSet<usize> {
+    let last_user = history.iter().rposition(|msg| msg.role == "user");
+    let mut selected = std::collections::HashSet::new();
+    let mut previous = 0;
+    for (index, msg) in history.iter().enumerate().rev() {
+        if !msg.content_parts.as_ref().is_some_and(|parts| !parts.is_empty()) {
+            continue;
+        }
+        let current = Some(index) == last_user
+            || msg.tool_call_id.as_ref().is_some_and(|id| current_tool_ids.contains(id));
+        if !current {
+            if previous >= previous_limit { continue; }
+            previous += 1;
+        }
+        selected.insert(index);
+        if selected.len() == 2 { break; }
+    }
+    selected
+}
+
 pub fn workflow_name(ctx: &Context) -> &str {
     ctx.settings
         .sm_file
@@ -321,6 +363,28 @@ pub async fn render_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_image_policy_keeps_current_tools_and_never_deletes_saved_images() {
+        use crate::db::messages::Message;
+        let image = |id: &str| Message::tool_with_image(
+            format!("Saved image path: /synthetic/{id}.png"), id.into(),
+            vec![json!({"type":"image_url","image_url":{"url":"data:image/png;base64,SYNTHETIC"}})],
+        );
+        let history = vec![image("old-a"), image("old-b"), Message::user("new task".into()), image("current")];
+        let before = serde_json::to_value(&history).unwrap();
+        let current = std::collections::HashSet::from(["current".into()]);
+        assert_eq!(history_image_indices(&history, &current, 0), std::collections::HashSet::from([3]));
+        for limit in [1, 2] {
+            assert_eq!(history_image_indices(&history, &current, limit), std::collections::HashSet::from([1, 3]));
+        }
+        assert!(history_image_indices(&history[..3], &current, 0).is_empty());
+        assert_eq!(history_image_indices(&history[..3], &current, 2), std::collections::HashSet::from([0, 1]));
+        assert_eq!(serde_json::to_value(&history).unwrap(), before);
+        let mut attached = Message::user("new attached image".into());
+        attached.content_parts = history[0].content_parts.clone();
+        assert_eq!(history_image_indices(&[attached], &Default::default(), 0), std::collections::HashSet::from([0]));
+    }
 
     // Exercise the shipped workflows/templates without changing the working
     // directory, editing fixtures in the repository, or invoking POML/LLMs.

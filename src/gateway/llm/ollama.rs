@@ -6,6 +6,10 @@ use async_trait::async_trait;
 #[path = "ollama_stream_tests.rs"]
 mod voice_stream_tests;
 
+#[cfg(test)]
+#[path = "ollama_output_limit_tests.rs"]
+mod output_limit_tests;
+
 pub struct OllamaProvider {
     base_url: String,
     model: String,
@@ -62,7 +66,8 @@ impl OllamaProvider {
         }
         state.finish(&on_token)?;
 
-        tracing::info!(content_bytes = state.content.len(), tool_call_count = state.tool_calls.len(), "[STREAM] Ollama response collected");
+        tracing::info!(content_bytes = state.content.len(), tool_call_count = state.tool_calls.len(), thinking_bytes = state.thinking_bytes, done_reason = state.done_reason.unwrap_or("unspecified"), completion_tokens = ?state.usage.as_ref().map(|u| u.completion_tokens), "[STREAM] Ollama response collected");
+        check_completion(state.done_reason)?;
         let has_tools = !state.tool_calls.is_empty();
         Ok(ChatResponse {
             content: if state.content.is_empty() { None } else { Some(state.content) },
@@ -101,7 +106,7 @@ impl LLMProvider for OllamaProvider {
         }
         let resp = req.send().await.map_err(ProviderError::from_reqwest)?;
         let data = super::http::json(resp).await?;
-        Ok(parse_ollama_response(&data))
+        parse_ollama_response(&data)
     }
 
     fn name(&self) -> &str {
@@ -204,8 +209,11 @@ fn add_tools(body: &mut serde_json::Value, request: &ChatRequest) {
 struct OllamaStreamState {
     buffer: Vec<u8>,
     content: String,
+    // Count thinking for diagnostics, but never retain, emit or speak it.
+    thinking_bytes: usize,
     tool_calls: Vec<ToolCall>,
     done: bool,
+    done_reason: Option<&'static str>,
     usage: Option<Usage>,
 }
 
@@ -248,8 +256,14 @@ impl OllamaStreamState {
             return Err(super::http::payload_error(200, &data).into());
         }
         let done = data.get("done").and_then(|value| value.as_bool()).unwrap_or(false);
-        if done { self.usage = parse_usage(&data); }
+        if done {
+            self.usage = parse_usage(&data);
+            self.done_reason = parse_done_reason(&data);
+        }
         let message = &data["message"];
+        self.thinking_bytes = self.thinking_bytes.saturating_add(
+            message["thinking"].as_str().map_or(0, str::len),
+        );
         if let Some(calls) = parse_tool_calls_from_message(message) {
             self.tool_calls.extend(calls);
         }
@@ -274,17 +288,46 @@ impl OllamaStreamState {
     }
 }
 
-fn parse_ollama_response(data: &serde_json::Value) -> ChatResponse {
+fn parse_ollama_response(data: &serde_json::Value) -> anyhow::Result<ChatResponse> {
     let message = &data["message"];
     let content = message["content"].as_str().map(|s| s.to_string());
     let tool_calls = parse_tool_calls_from_message(message);
+    let done_reason = parse_done_reason(data);
+    let usage = parse_usage(data);
+    tracing::info!(content_bytes = content.as_ref().map_or(0, String::len), tool_call_count = tool_calls.as_ref().map_or(0, Vec::len), thinking_bytes = message["thinking"].as_str().map_or(0, str::len), done_reason = done_reason.unwrap_or("unspecified"), completion_tokens = ?usage.as_ref().map(|u| u.completion_tokens), "Ollama response collected");
+    check_completion(done_reason)?;
+    let has_tools = tool_calls.as_ref().is_some_and(|calls| !calls.is_empty());
 
-    ChatResponse {
+    Ok(ChatResponse {
         content,
         tool_calls,
-        finish_reason: Some("stop".to_string()),
-        usage: parse_usage(data),
+        finish_reason: Some(if has_tools { "tool_calls" } else { "stop" }.to_string()),
+        usage,
+    })
+}
+
+// Only allowlisted metadata enters diagnostics, never arbitrary provider text.
+fn parse_done_reason(data: &serde_json::Value) -> Option<&'static str> {
+    data.get("done_reason").and_then(|value| value.as_str()).map(|reason| match reason {
+        "length" => "length",
+        "stop" => "stop",
+        "load" => "load",
+        "unload" => "unload",
+        _ => "unknown",
+    })
+}
+
+fn check_completion(done_reason: Option<&str>) -> anyhow::Result<()> {
+    if done_reason == Some("length") {
+        // num_predict includes thinking AND tool arguments. Even a valid tool
+        // parsed before the cutoff may be part of an incomplete batch: discard
+        // the entire attempt rather than treating it as successful completion.
+        return Err(ProviderError {
+            cause: Some("Ollama exhausted num_predict; thinking and tool arguments share this allowance"),
+            ..ProviderError::new(ErrorKind::OutputLimit)
+        }.into());
     }
+    Ok(())
 }
 
 fn parse_usage(data: &serde_json::Value) -> Option<Usage> {

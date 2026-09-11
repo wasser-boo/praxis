@@ -520,3 +520,116 @@ async fn resilience_cooldown_is_shared_across_parallel_tasks() {
         assert!(call.0.duration_since(calls[0].0) >= Duration::from_secs(12));
     }
 }
+
+#[test]
+fn resilience_long_task_output_and_time_budgets_are_configurable_and_bounded() {
+    let config = ResilienceConfig::from_lookup(|key| match key {
+        "LLM_MAX_OUTPUT_TOKENS" => Some("16384".into()),
+        "LLM_HISTORY_IMAGE_MESSAGES" => Some("0".into()),
+        "LLM_RETRY_MAX_OUTPUT_TOKENS" => Some("32768".into()),
+        "LLM_REQUEST_TIMEOUT_MS" => Some("600000".into()),
+        "LLM_TOTAL_TIMEOUT_MS" => Some("1800000".into()),
+        _ => None,
+    });
+    config.validate().unwrap();
+    assert_eq!(config.max_output_tokens, 16_384);
+    assert_eq!(config.history_image_messages, 0);
+    for value in ["3", "-1", "invalid"] {
+        let invalid = ResilienceConfig::from_lookup(|key| (key == "LLM_HISTORY_IMAGE_MESSAGES").then(|| value.into()));
+        assert!(invalid.validate().unwrap_err().to_string().contains("LLM_HISTORY_IMAGE_MESSAGES"));
+    }
+    assert_eq!(config.next_output_limit(Some(16_384)), Some(32_768));
+    assert_eq!(config.request_timeout_ms, 600_000);
+    assert_eq!(config.total_timeout_ms, 1_800_000);
+    assert_eq!(ResilienceConfig::default().max_output_tokens, 4096);
+    for value in ["", "0", "-1", "not-a-number", "1048577"] {
+        let invalid = ResilienceConfig::from_lookup(|key| (key == "LLM_MAX_OUTPUT_TOKENS").then(|| value.into()));
+        assert!(invalid.validate().unwrap_err().to_string().contains("LLM_MAX_OUTPUT_TOKENS"));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn resilience_long_task_budget_allows_slow_calls_but_keeps_cancellation() {
+    for cancelled in [false, true] {
+        let (p, calls) = Scripted::boxed("primary", vec![Step::Slow(Duration::from_secs(240))]);
+        let r = router(p, ResilienceConfig {
+            max_output_tokens: 16_384,
+            request_timeout_ms: 600_000,
+            total_timeout_ms: 1_800_000,
+            ..policy()
+        });
+        assert_eq!(r.task_output_tokens(), 16_384);
+        let cancel = CancellationToken::new();
+        if cancelled {
+            let token = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(181)).await;
+                token.cancel();
+            });
+        }
+        let start = Instant::now();
+        let result = r.chat_controlled(request(), None, None, &cancel).await;
+        if cancelled {
+            assert!(result.unwrap_err().to_string().contains("cancelled"));
+            assert_eq!(start.elapsed(), Duration::from_secs(181));
+        } else {
+            assert_eq!(result.unwrap().content.as_deref(), Some("done"));
+            assert_eq!(start.elapsed(), Duration::from_secs(240));
+        }
+        assert_eq!(calls.lock().unwrap().len(), 1, "never replay the slow request before its configured deadline");
+    }
+}
+
+#[test]
+fn resilience_output_limit_configuration_and_arithmetic_are_bounded() {
+    let defaults = ResilienceConfig::from_lookup(|_| None);
+    assert_eq!(defaults.retry_max_output_tokens, 16_384);
+    assert_eq!(defaults.next_output_limit(Some(4096)), Some(8192));
+    assert_eq!(defaults.next_output_limit(Some(8192)), Some(16_384));
+    for bound in [None, Some(0), Some(16_384), Some(u32::MAX)] {
+        assert_eq!(defaults.next_output_limit(bound), None);
+    }
+    for value in ["not-a-number", "-1", "1048577"] {
+        let config = ResilienceConfig::from_lookup(|key| {
+            (key == "LLM_RETRY_MAX_OUTPUT_TOKENS").then(|| value.into())
+        });
+        assert!(config.validate().unwrap_err().to_string().contains("LLM_RETRY_MAX_OUTPUT_TOKENS"));
+    }
+    assert!(!ErrorKind::OutputLimit.retryable(), "needs a larger allowance, not blind replay");
+}
+
+#[tokio::test(start_paused = true)]
+async fn resilience_output_limit_recovery_obeys_deadline_and_cancellation() {
+    for cancelled in [false, true] {
+        let (p, calls) = Scripted::boxed("primary", vec![Step::Fail(ProviderError::new(ErrorKind::OutputLimit))]);
+        let r = router(p, ResilienceConfig { total_timeout_ms: 200, ..policy() });
+        let cancel = CancellationToken::new();
+        if cancelled {
+            let token = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                token.cancel();
+            });
+        }
+        let start = Instant::now();
+        let error = r.chat_controlled(request(), None, None, &cancel).await.unwrap_err().to_string();
+        assert!(error.contains(if cancelled { "cancelled" } else { "time budget exhausted" }), "{error}");
+        assert!(start.elapsed() <= Duration::from_millis(200));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn resilience_output_limit_without_a_growable_bound_never_retries_or_falls_back() {
+    for bound in [None, Some(0), Some(16_384), Some(u32::MAX)] {
+        let (p, calls) = Scripted::boxed("primary", vec![Step::Fail(ProviderError::new(ErrorKind::OutputLimit))]);
+        let (f, fallback_calls) = Scripted::boxed("fallback", vec![]);
+        let r = LLMRouter::with_providers(vec![p, f], "primary".into(), vec!["fallback".into()], policy());
+        let mut req = request();
+        req.max_tokens = bound;
+        let error = r.chat(req, None).await.unwrap_err().to_string();
+        assert!(error.contains("output token limit"), "{error}");
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert!(fallback_calls.lock().unwrap().is_empty());
+    }
+}

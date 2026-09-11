@@ -19,6 +19,12 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone)]
 pub struct ResilienceConfig {
     pub max_attempts: u64,
+    /// Initial output allowance for application chat/agent tool-loop requests.
+    pub max_output_tokens: u64,
+    /// Previous-task image messages eligible for the agent's latest-two image window.
+    pub history_image_messages: u64,
+    /// Ceiling for output-limit recovery, not an override of the first request.
+    pub retry_max_output_tokens: u64,
     pub max_concurrent: u64,
     pub max_queue: u64,
     pub requests_per_minute: u64,
@@ -32,6 +38,9 @@ impl Default for ResilienceConfig {
     fn default() -> Self {
         Self {
             max_attempts: 5,
+            max_output_tokens: 4096,
+            history_image_messages: 2,
+            retry_max_output_tokens: 16_384,
             max_concurrent: 1,
             max_queue: 32,
             requests_per_minute: 0,
@@ -56,6 +65,9 @@ impl ResilienceConfig {
         };
         Self {
             max_attempts: number("LLM_MAX_ATTEMPTS", default.max_attempts),
+            max_output_tokens: number("LLM_MAX_OUTPUT_TOKENS", default.max_output_tokens),
+            history_image_messages: number("LLM_HISTORY_IMAGE_MESSAGES", default.history_image_messages),
+            retry_max_output_tokens: number("LLM_RETRY_MAX_OUTPUT_TOKENS", default.retry_max_output_tokens),
             max_concurrent: number("LLM_MAX_CONCURRENT", default.max_concurrent),
             max_queue: number("LLM_MAX_QUEUE", default.max_queue),
             requests_per_minute: number("LLM_REQUESTS_PER_MINUTE", default.requests_per_minute),
@@ -69,6 +81,9 @@ impl ResilienceConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         for (key, value, min, max) in [
             ("LLM_MAX_ATTEMPTS", self.max_attempts, 1, 20),
+            ("LLM_MAX_OUTPUT_TOKENS", self.max_output_tokens, 1, 1_048_576),
+            ("LLM_HISTORY_IMAGE_MESSAGES", self.history_image_messages, 0, 2),
+            ("LLM_RETRY_MAX_OUTPUT_TOKENS", self.retry_max_output_tokens, 0, 1_048_576),
             ("LLM_MAX_CONCURRENT", self.max_concurrent, 1, 64),
             ("LLM_MAX_QUEUE", self.max_queue, 0, 10_000),
             (
@@ -104,6 +119,16 @@ impl ResilienceConfig {
         );
         Ok(())
     }
+    /// Never blindly repeat a token-exhausted request with the same allowance.
+    /// None/zero has no usable bound to grow; a ceiling of zero disables recovery.
+    pub(crate) fn next_output_limit(&self, current: Option<u32>) -> Option<u32> {
+        let current = current.filter(|tokens| *tokens > 0)?;
+        let next = (u64::from(current) * 2)
+            .min(self.retry_max_output_tokens)
+            .min(u64::from(u32::MAX)) as u32;
+        (next > current).then_some(next)
+    }
+
     pub fn backoff(&self, attempt: usize) -> Duration {
         use rand::Rng;
         let ceiling = self

@@ -84,6 +84,8 @@ fn fixture(
         vec![],
         ResilienceConfig {
             max_attempts: 2,
+            max_output_tokens: 12_345,
+            history_image_messages: 0,
             initial_backoff_ms: 1,
             max_backoff_ms: 1,
             ..Default::default()
@@ -183,6 +185,7 @@ async fn tool_chain_skill_then_reference_then_action_reaches_final_answer() {
             let requests = requests.lock().unwrap();
             assert_eq!(requests.len(), 4);
             for (i, request) in requests.iter().enumerate() {
+                assert_eq!(request.max_tokens, Some(12_345), "configured output bound lost at continuation {i}");
                 assert!(
                     request
                         .tools
@@ -462,6 +465,79 @@ async fn tool_chain_budget_allows_one_honest_finalization_and_counts_invalid_cal
             .iter()
             .any(|m| m.role == "system" && m.content.as_deref().unwrap_or("").contains("budget")));
     }
+}
+
+#[tokio::test]
+#[ignore = "Requires Node and POML_CLI; synthetic provider and temporary files only"]
+async fn tool_chain_new_task_resets_stale_completion_without_losing_settings() {
+    for max_turns in [None, Some(5)] {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("fresh-task.txt");
+        let image = dir.path().join("current.png");
+        image::RgbaImage::new(1, 1).save(&image).unwrap();
+        let (state, user, requests) = fixture(dir.path(), vec![
+            Step::Reply(reply(None, vec![call("check", "get_context", serde_json::json!({"key":"settings.done"}))])),
+            Step::Reply(reply(Some("Continuing the current task."), vec![
+                call("write", "write_file", serde_json::json!({"path":output,"content":"fresh task"})),
+                call("current-image", "understand_image", serde_json::json!({"path":image,"prompt":"Inspect this synthetic test pixel."})),
+            ])),
+            Step::Reply(reply(Some("Fresh task finished."), vec![])),
+        ]);
+        state.db.merge_context(&user, serde_json::json!({
+            "settings.done":true, "settings.max_llm_turns":max_turns,
+            "settings.max_tool_calls":5, "custom_data.preserve_me":"unchanged"
+        })).unwrap();
+        let mut old_attachment = crate::db::messages::Message::user("Earlier image at /synthetic/old.png".into());
+        old_attachment.content_parts = Some(vec![serde_json::json!({"type":"image_url","image_url":{"url":"data:image/png;base64,OLD_SYNTHETIC"}})]);
+        state.db.add_message(&user, &old_attachment).unwrap();
+        let result = handle_message(&state, &user, "new independent task", Some("web")).await.unwrap();
+        assert_eq!(result, "Fresh task finished.", "old done flag stopped the new tool chain");
+        assert_eq!(std::fs::read_to_string(output).unwrap(), "fresh task");
+        let ctx = state.db.load_context(&user).unwrap();
+        assert!(!ctx.settings.done);
+        assert_eq!(ctx.settings.max_llm_turns, max_turns);
+        assert_eq!(ctx.settings.max_tool_calls, Some(5));
+        assert_eq!(ctx.custom_data["preserve_me"], "unchanged");
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        for request in requests.lock().unwrap().iter() {
+            assert!(!serde_json::to_string(request).unwrap().contains("OLD_SYNTHETIC"), "previous task images must not be retransmitted");
+        }
+        assert!(requests.lock().unwrap()[2].messages.iter().any(|m|
+            m.tool_call_id.as_deref() == Some("current-image") && m.content_parts.as_ref().is_some_and(|p| !p.is_empty())
+        ), "newly read tool images must still reach the model");
+        let history = state.db.get_messages(&user, 100).unwrap();
+        assert!(history.iter().any(|m| m.content == old_attachment.content && m.content_parts == old_attachment.content_parts), "saved images must remain intact");
+        let check = history.iter().find(|m| m.tool_call_id.as_deref() == Some("check")).unwrap();
+        let observed: serde_json::Value = serde_json::from_str(&check.content).unwrap();
+        assert_eq!(observed["settings"]["done"], false, "completion must reset BEFORE the first tool call");
+        assert_paired_history(&state, &user, 3);
+    }
+}
+
+#[tokio::test]
+#[ignore = "Requires Node and POML_CLI; no live provider calls"]
+async fn tool_chain_completion_stops_current_task_but_not_next_direct_agent_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, user, requests) = fixture(dir.path(), vec![
+        Step::Reply(reply(None, vec![call("complete", "agent_complete", serde_json::json!({}))])),
+        Step::Reply(reply(None, vec![call("next-task", "get_context", serde_json::json!({"key":"settings.done"}))])),
+        Step::Reply(reply(Some("Second task completed normally."), vec![])),
+    ]);
+    state.db.merge_context(&user, serde_json::json!({"settings.max_llm_turns":5})).unwrap();
+    let first = crate::gateway::agent_loop::run_agent_loop(
+        &state, &user, "complete this task", Default::default(), None,
+    ).await.unwrap();
+    assert!(first.completed);
+    assert!(state.db.load_context(&user).unwrap().settings.done);
+    assert_eq!(requests.lock().unwrap().len(), 1, "current completion must still stop generation");
+    let second = crate::gateway::agent_loop::run_agent_loop(
+        &state, &user, "start another task", Default::default(), None,
+    ).await.unwrap();
+    assert_eq!(second.response, "Second task completed normally.");
+    assert_eq!(second.turns_used, 2);
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert!(!state.db.load_context(&user).unwrap().settings.done);
+    assert_paired_history(&state, &user, 2);
 }
 
 #[test]

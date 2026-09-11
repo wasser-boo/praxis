@@ -43,6 +43,18 @@ impl LLMRouter {
         Ok(())
     }
 
+    /// Configured first-attempt bound for application task requests, including
+    /// every tool continuation. Explicit low-level requests/summaries keep their
+    /// own max_tokens; retries still obey the separate growth ceiling.
+    pub fn task_output_tokens(&self) -> u32 {
+        // validate_configuration/route reject invalid settings before inference.
+        self.policy.max_output_tokens.min(u64::from(u32::MAX)) as u32
+    }
+
+    pub fn history_image_messages(&self) -> usize {
+        self.policy.history_image_messages.min(2) as usize
+    }
+
     fn find_provider(&self, name: &str) -> Result<&dyn LLMProvider, anyhow::Error> {
         self.providers
             .iter()
@@ -171,12 +183,14 @@ impl LLMRouter {
                     &format!("LLM switching to configured fallback {}.", label(name)),
                 );
             }
-            let tokens = resilience::estimated_tokens(&req);
             // Reserve one attempt for each remaining explicit fallback. The
             // attempt cap and time budget apply to the WHOLE route, not per hop.
             let allowance =
                 max_attempts.saturating_sub((candidates.len() - index - 1).min(max_attempts - 1));
             while attempts < allowance {
+                // Output-limit recovery can enlarge the next request. Reserve
+                // its full allowance through the same gate before sending it.
+                let tokens = resilience::estimated_tokens(&req);
                 let permit = match interruptible(deadline, cancel, gate.acquire(tokens, user)).await
                 {
                     Ok(Ok(permit)) => permit,
@@ -255,9 +269,23 @@ impl LLMRouter {
                         }
                         tracing::warn!(provider = %label(name), attempt = attempts, elapsed_ms = attempt_start.elapsed().as_millis() as u64, error = %error, "LLM attempt failed");
                         failures.push((label(name), error.clone()));
-                        let retryable = error.kind.retryable();
+                        // A known output cutoff is recoverable only before any
+                        // visible text, with a strictly larger bounded allowance.
+                        // This remains below tool execution and inside the same
+                        // global attempt/time/rate limits; no hidden adapter retry.
+                        let expanded_output = if error.kind == ErrorKind::OutputLimit
+                            && attempts < allowance
+                        {
+                            self.policy.next_output_limit(req.max_tokens)
+                        } else {
+                            None
+                        };
+                        if let Some(tokens) = expanded_output {
+                            req.max_tokens = Some(tokens);
+                        }
+                        let retryable = error.kind.retryable() || expanded_output.is_some();
                         terminal = error.clone();
-                        if transient_failure {
+                        if transient_failure || expanded_output.is_some() {
                             let delay = self
                                 .policy
                                 .backoff(attempts)
@@ -266,10 +294,13 @@ impl LLMRouter {
                             // user task cannot immediately hammer this account.
                             gate.defer(delay);
                             if retryable && attempts < allowance {
+                                let output_notice = expanded_output
+                                    .map(|tokens| format!(" with {tokens} output tokens"))
+                                    .unwrap_or_default();
                                 resilience::progress(
                                     user,
                                     &format!(
-                                        "LLM {}: retry {}/{} in at least {:.1}s ({error}).",
+                                        "LLM {}: retry {}/{}{output_notice} in at least {:.1}s ({error}).",
                                         label(name),
                                         attempts + 1,
                                         max_attempts,

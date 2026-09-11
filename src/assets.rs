@@ -97,6 +97,7 @@ const BUNDLED_ASSETS: &[Asset] = &[
     asset!("static/favicon.png"),
     asset!("static/apple-touch-icon.png"),
     asset!("examples/poml-test-context.json"),
+    asset!("examples/long-horizon.env"),
     asset!("docs/SKILLS.md"),
     asset!("docs/POML_WORKFLOWS.md"),
     asset!("docs/CONTEXT_VARIABLES.md"),

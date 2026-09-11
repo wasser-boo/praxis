@@ -35,11 +35,41 @@ Es gibt keine Garantie für Exactly-once-Ausführung über Prozessabstürze hinw
 
 ### Tool-only-Antworten sind keine leeren Endantworten
 
-Ein Modell kann ausschließlich `tool_calls` zurückgeben, ohne Text. Das ist eine gültige Fortsetzung, kein Abschluss und kein Grund für TTS. Die Logs zeigen deshalb Textbytes **und** Tool-Anzahl. Eine Antwort ohne Text **und ohne Tools** bleibt ein expliziter `InvalidResponse`-Fehler; sie wird nicht blind wiederholt.
+Ein Modell kann ausschließlich `tool_calls` zurückgeben, ohne Text. Das ist eine gültige Fortsetzung, kein Abschluss und kein Grund für TTS. Die Logs zeigen deshalb Textbytes **und** Tool-Anzahl. Eine Antwort ohne Text **und ohne Tools** bleibt ohne nachgewiesenen Token-Abbruch ein expliziter `InvalidResponse`-Fehler; sie wird nicht blind wiederholt.
 
 Der Chat-Pfad (`settings.max_llm_turns` null/≤1) führt auch mehrere aufeinanderfolgende Tool-Runden aus, etwa `use_skill` → `read_file` → Dateioperation → Textantwort. Tool-Definitionen und Kontext werden für jede Fortsetzung aktualisiert, die Ergebnisse dauerhaft gespeichert. `settings.max_tool_calls` begrenzt dabei die gesamten angeforderten Calls pro Nachricht (Standard 5, ≤0 deaktiviert Ausführung); ungültige Calls verbrauchen ebenfalls Budget. Die Obergrenze wird am Nachrichtenbeginn festgehalten und kann nicht durch ein Tool für die laufende Nachricht erhöht werden. Nach Budgetverbrauch ist höchstens eine textuelle Abschlussanfrage ohne Tools erlaubt. Fordert das Modell dennoch weitere Tools an, erhalten diese gespeicherte Ablehnungen und der Nutzer einen Limitfehler statt einer leeren Erfolgsmeldung.
 
 Für längere Aufgaben bleibt der explizite Multi-Turn-Modus verfügbar: dort begrenzt `max_llm_turns` die LLM-Runden und `max_tool_calls` die Ausführungen je Runde. Tool-Historie der **laufenden** Aufgabe bleibt auch bei deaktivierter älterer Tool-Historie erhalten. Ein Turn-Limit ohne Endantwort wird gemeldet; frühere Antworten anderer Aufgaben werden nicht als Ergebnis ausgegeben. Kein automatisches Erhöhen der gespeicherten Limits oder Wiederanlaufen einer abgebrochenen Aufgabe. Leere/Whitespace-Texte starten keine automatische TTS-Aufgabe.
+
+### Neue Aufgabe nach `agent_complete`
+
+`settings.done` ist ein Abschlussflag **der aktuellen Aufgabe**, kein dauerhaftes
+Stoppsignal für die Unterhaltung. Beide neuen Nachrichteneinstiege (Chat und
+Multi-Turn) sowie der direkte Agent-Loop-Einstieg löschen einen alten
+Abschlussstatus vor Routing/Prompt/Tools. Tool-Folgeaufrufe, Retries, Vorschauen
+und eingeschobene Nachrichten setzen ihn **nicht** zurück. Ein aktuelles
+`agent_complete` beendet die laufende Aufgabe weiterhin. Sonstige Einstellungen,
+History, Skills und Workflow-Zustände bleiben erhalten.
+
+Der konkrete Fehler am 11.09.2026: Der betroffene Kontext enthielt `done=true`,
+obwohl `max_llm_turns=3000` gesetzt war. Nach dem ersten erfolgreichen Tool wurde
+ohne weitere Modellrunde abgebrochen. Das Anheben des Turn-Limits allein konnte
+diesen Fehler nicht beheben. Eine Offline-Regression prüft nun auch zwei
+aufeinanderfolgende Aufgaben nach explizitem Abschluss.
+
+### Ollama: Tokenlimit während Thinking oder Tool-Ausgabe
+
+Ollama zählt Thinking und Tool-Argumente gegen `options.num_predict`. Bei `done_reason=length` kann HTTP 200 deshalb **null Text und null Tools** enthalten. Ein begrenzter Inferenztest mit der gespeicherten Unterhaltung aus `/workspace/release/data/praxis.db` reproduzierte das mit `glm-5.3-flash:cloud`: 4096 generierte Tokens, ausschließlich Thinking, Abschlussgrund `length`. Eine zweite Anfrage mit 8192 erlaubten Ausgabetokens lieferte gültige Toolcalls mit Abschlussgrund `stop`. Der Test führte keine Tools aus und änderte weder Kontext noch Historie.
+
+Beide Ollama-Pfade erkennen diesen Abschlussgrund jetzt als `OutputLimit`, nicht als leere/erfolgreiche Antwort. **Vor sichtbarer Textausgabe** darf derselbe LLM-Aufruf mit verdoppelter Ausgabegrenze wiederholt werden, standardmäßig 4096 → 8192 → 16384. Die Obergrenze ist `LLM_RETRY_MAX_OUTPUT_TOKENS` (0 deaktiviert die Erweiterung). Der erste Versuch bleibt unverändert; es werden keine Gesprächs-, Modell- oder Tool-Parameter ausgetauscht. Ohne bekannte positive Grenze, ohne verbleibenden Versuch oder am Erweiterungslimit endet der Aufruf mit einem konkreten Tokenlimit-Fehler statt weiterer identischer Retries oder Providerwechsel.
+
+Die **anfängliche** Ausgabegrenze ist jetzt über `LLM_MAX_OUTPUT_TOKENS`
+konfigurierbar (unveränderter Default: 4096). Chat, Multi-Turn-Agent und die
+öffentliche Tool-Loop-API verwenden sie auch für alle Tool-Folgeaufrufe statt
+einer fest eingebauten 4096. Niedrigstufige Requests mit explizitem `max_tokens`
+und kurze Compaction-Zusammenfassungen behalten ihre eigene Grenze.
+
+Die größere Anfrage durchläuft erneut dasselbe RPM-/TPM-Gate und das globale Zeit-/Versuchslimit. Bereits ausgeführte Tools werden nicht wiederholt; auch vor dem Abbruch empfangene Tools aus der **unvollständigen Antwort** werden verworfen. Nach sichtbaren Textdeltas bleibt die bestehende Partial-Stream-Regel aktiv: kein automatischer Retry. Thinking wird weder ausgegeben noch als vermeintliche Endantwort/TTS verwendet; `think=false` wird nicht erzwungen. Logs enthalten nur Byte-/Tokenzähler und einen erlaubten Abschlussgrund, nicht den Thinking-Inhalt.
 
 ### Fortschritt und Abbrechen
 
@@ -55,6 +85,9 @@ Alle Einstellungen werden beim Start gelesen; Änderungen benötigen einen Neust
 |---|---:|---|
 | `LLM_FALLBACK_PROVIDERS` | leer | Kommagetrennte explizite Provider-Auswahl; alle müssen registriert sein |
 | `LLM_MAX_ATTEMPTS` | `5` | Gesamtzahl der Versuche einschließlich erstem Versuch und Fallbacks; 1–20 |
+| `LLM_MAX_OUTPUT_TOKENS` | `4096` | Initiale Ausgabegrenze für Chat/Agent/Tool-Folgerunden, inklusive Thinking und Tool-Argumenten bei Ollama; 1–1048576 |
+| `LLM_HISTORY_IMAGE_MESSAGES` | `2` | 0–2 alte bildhaltige Nachrichten dürfen in Agent-/Tool-Folgerunden mitgesendet werden; aktuelle Tool-Bilder und der aktuelle User-Anhang bleiben für das insgesamt letzte-zwei-Bilder-Fenster berechtigt |
+| `LLM_RETRY_MAX_OUTPUT_TOKENS` | `16384` | Maximale Ausgabegrenze bei Wiederholung nach Ollama-Tokenabbruch; 0 deaktiviert Erweiterung, maximal 1048576; verändert nicht den ersten Versuch |
 | `LLM_MAX_CONCURRENT` | `1` | Gleichzeitige ausgehende Versuche pro Zugang; 1–64 |
 | `LLM_MAX_QUEUE` | `32` | Zusätzliche zugelassene Aufgaben pro Zugang; 0–10000; Wartende/Retry-Aufgaben belegen Queue-Kapazität |
 | `LLM_REQUESTS_PER_MINUTE` | `0` | Gleichmäßige Request-Pacing-Rate; 0 = kein festes RPM-Limit; maximal 1000000 |
@@ -63,6 +96,62 @@ Alle Einstellungen werden beim Start gelesen; Änderungen benötigen einen Neust
 | `LLM_RETRY_MAX_MS` | `30000` | Maximaler exponentieller Backoff; mindestens Base, maximal 300000 ms; begrenzt nicht `Retry-After` |
 | `LLM_REQUEST_TIMEOUT_MS` | `180000` | Pro Versuch inklusive HTTP-Upload, Antwort/Stream und Parsing; 1–86400000 ms |
 | `LLM_TOTAL_TIMEOUT_MS` | `300000` | Queue, alle Versuche und Wartezeiten zusammen; 1–86400000 ms |
+
+### Opt-in-Profil für lange Thinking-/Tool-Aufgaben
+
+Die Datei [`examples/long-horizon.env`](../examples/long-horizon.env) enthält
+öffentliche Konfigurationswerte, keine Zugangsdaten. Die sechs Zeilen gezielt in
+die **vorhandene** Installations-`.env` übernehmen (vorher sichern), nicht die
+ganze Konfiguration ersetzen. Danach Praxis neu starten:
+
+```env
+LLM_HISTORY_IMAGE_MESSAGES=0
+LLM_MAX_OUTPUT_TOKENS=16384
+LLM_RETRY_MAX_OUTPUT_TOKENS=32768
+LLM_REQUEST_TIMEOUT_MS=600000
+LLM_TOTAL_TIMEOUT_MS=1800000
+LLM_MAX_ATTEMPTS=5
+```
+
+Das sind 10 Minuten je Versuch und maximal 30 Minuten **je logischem LLM-Aufruf**
+inklusive Queue und Wiederholungen, nicht für die gesamte mehrstündige Aufgabe.
+Jede weitere Tool-Runde erhält ein neues Aufrufbudget. Die Versuchsanzahl ist eine
+Obergrenze, keine Zusage, dass fünf volle 10-Minuten-Versuche in 30 Minuten passen.
+`settings.max_llm_turns` und `settings.max_tool_calls` bleiben die getrennten,
+benutzerkontrollierten Aufgabengrenzen; sie werden nicht automatisch hochgesetzt.
+
+`LLM_HISTORY_IMAGE_MESSAGES=0` verhindert, dass alte Bilder aus früheren Aufgaben
+in jeder weiteren Modellrunde erneut übertragen werden. Keine Datei und kein
+History-Datensatz wird gelöscht/verändert; Text- und Pfadreferenzen bleiben im
+Prompt. Das Modell erhält einen Hinweis auf ausgelassene Bilder und muss relevante
+Bilder neu mit aktivierten Tools lesen, statt Sichtbarkeit zu behaupten. Aktuelle
+Tool-Bilder und aktuelle User-Anhänge bleiben im bestehenden letzten-zwei-Fenster;
+der separat injizierte aktuelle VM-Screenshot wird dadurch nicht deaktiviert.
+Mit Default `2` bleibt die bisherige Auswahl unverändert.
+
+Ein begrenzter, schreibfreier Vergleich am 11.09.2026 mit der betroffenen Historie
+(101 Nachrichten inkl. Systemprompt, 45 Tools, `glm-5.3-flash:cloud`, 16384
+Ausgabetokens) ergab: Mit zwei alten PNGs (je 1536×864) war die rekonstruierte
+Anfrage 5.313.310 Bytes groß und erreichte nach 600 Sekunden einen Client-Timeout.
+Ollama protokollierte erst danach HTTP 400. Ohne diese alten Inline-Bilder betrug
+sie 151.638 Bytes, lieferte HTTP 200 und nach 77,8 Sekunden einen gültigen Toolcall
+(`done_reason=stop`, 6914 Ausgabetokens). Keine zurückgegebenen Tools, Bilder- oder
+TTS-Aufträge wurden ausgeführt, keine Live-Historie verändert. Das war ein
+Vergleich rekonstruierter Requests, keine byteidentische Aufzeichnung oder
+Garantie gegen weitere Cloud-Störungen. Eine minimale Modellanfrage funktionierte
+ebenfalls; Ollamas gemeldete Vision-Fähigkeit war vorhanden.
+
+Im beobachteten Lauf wurden Versuche exakt nach 180 Sekunden abgebrochen und das
+Gesamtbudget nach 300 Sekunden erreicht. Ollamas späte HTTP-400-Zeilen allein
+beweisen keinen Schemafehler: Praxis hatte diese Requests bereits abgebrochen.
+Unbekannte oder echte HTTP-400-Fehler bleiben **nicht** blind wiederholbar; für eine
+abschließende Diagnose ist der konkrete Fehler und nicht nur die Zugriffslogzeile
+nötig. Das höhere Budget verhindert diese vorzeitigen Client-Abbrüche, garantiert
+aber weder Provider-Verfügbarkeit, Cloud-Guthaben noch unbegrenzten Modellkontext.
+Größere Ausgaben/Wiederholungen können mehr Zeit und Inferenzbudget verbrauchen.
+Stop/Cancellation, RPM/TPM, Sichtbarkeitsregeln für Teilstreams und Schutz vor
+doppelten Tool-Effekten bleiben aktiv. Beendete Aufgaben starten beim Deployment
+nicht automatisch neu; insbesondere werden keine Bilder/Audio heimlich generiert.
 
 TCP-Verbindungsaufbau ist zusätzlich auf 10 Sekunden begrenzt. Die HTTP-Bibliothek führt keine verdeckten eigenen Retries aus. Unter Linux/Android/Fuchsia wird ihr standardmäßiger 30-Sekunden-`TCP_USER_TIMEOUT` entfernt; stattdessen begrenzt das explizite Aufrufbudget die Operation. Dieser Socket-Timer betrifft unbestätigte Upload-Daten, **nicht** generell langsame Modellgenerierung. Dass er die beobachteten Abbrüche verursacht hat, ist damit noch nicht bewiesen.
 
@@ -94,6 +183,7 @@ Keys werden beim Start in den Router übernommen. Dashboard-Secret-Änderungen e
 
 ```bash
 cargo test --locked --lib resilience_ -- --test-threads=1
+cargo test --locked --lib ollama_output_limit -- --test-threads=1
 POML_CLI=/path/to/Microsoft/POML/cli.js \
   cargo test --locked --lib resilience_ -- --include-ignored --test-threads=1
 POML_CLI=/path/to/Microsoft/POML/cli.js \

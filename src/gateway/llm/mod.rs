@@ -157,7 +157,7 @@ impl LLMRouter {
                     Some(tools.clone())
                 },
                 temperature: Some(0.7),
-                max_tokens: Some(4096),
+                max_tokens: Some(self.task_output_tokens()),
                 model: model.map(|m| m.to_string()),
                 vision_provider: None,
                 vision_model: None,
