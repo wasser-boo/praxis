@@ -2,6 +2,11 @@ const API_BASE = '';
 let authToken = localStorage.getItem('praxis_token');
 let chatPollInterval = null;
 let chatEventSource = null;
+// TTS-only side channel: receives chat_tts events from the paired Discord
+// context so replies generated for Discord are also spoken in the dashboard
+// while another session is active. No chat content flows through it.
+let chatTtsSideSource = null;
+let chatTtsSideUserId = null;
 // Per chat-session unique identifier. Each session has its OWN user_id at
 // the storage layer (separate context + separate messages). Sessions are
 // created by forking a parent context (see chatNewSession).
@@ -217,6 +222,7 @@ async function initChatTab() {
     // Always open the SSE stream so we can react to agent_start events even
     // before any user interaction in this session.
     startChatStream();
+    startTtsSideChannel();
     // Scroll to bottom when chat tab opens
     const container = document.getElementById('chat-messages');
     if (container) container.scrollTop = container.scrollHeight;
@@ -866,9 +872,61 @@ function stopChatStream() {
         chatEventSource.close();
         chatEventSource = null;
     }
+    if (chatTtsSideSource) {
+        chatTtsSideSource.close();
+        chatTtsSideSource = null;
+        chatTtsSideUserId = null;
+    }
     // A broken/reconnecting SSE can never deliver chat_tts audio; hide the
     // speaking chip so it cannot get stuck in "speaking" state.
     chatTtsActive(false);
+}
+
+/// Open the TTS-only side channel for the paired Discord context (if any).
+/// The main chat stream stays untouched; this connection only feeds
+/// chatPlayTts so Discord-generated replies are spoken in the dashboard too.
+async function startTtsSideChannel() {
+    // Close the previous side channel when switching sessions.
+    if (chatTtsSideSource) {
+        chatTtsSideSource.close();
+        chatTtsSideSource = null;
+        chatTtsSideUserId = null;
+    }
+    if (!authToken) return;
+    let pairedUserId = null;
+    try {
+        const res = await apiGet('/api/pairings');
+        if (!res || !res.ok) return;
+        const data = await res.json();
+        const pairings = data.pairings || [];
+        // Prefer the pairing that is NOT the active session (the active one
+        // already receives chat_tts via the main stream).
+        const other = pairings.find(p => p.user_id !== chatUserId);
+        pairedUserId = other ? other.user_id : null;
+    } catch (_) { return; }
+    if (!pairedUserId) return;
+    chatTtsSideUserId = pairedUserId;
+    const url = `/api/chat/stream/${encodeURIComponent(pairedUserId)}/tts?token=${encodeURIComponent(authToken)}`;
+    console.log('[SSE-TTS] opening side channel for', pairedUserId);
+    const es = new EventSource(url);
+    es.addEventListener('chat_tts', (e) => {
+        try {
+            const d = JSON.parse(e.data);
+            if (d.audio) {
+                console.log('[SSE-TTS] chat_tts from side channel');
+                chatPlayTts(d.audio);
+            }
+        } catch (err) { console.error('[SSE-TTS chat_tts error]', err); }
+    });
+    es.onerror = () => {
+        console.warn('[SSE-TTS] side channel error; retrying in 5s');
+        es.close();
+        if (chatTtsSideUserId === pairedUserId) {
+            chatTtsSideSource = null;
+            setTimeout(() => { if (chatTtsSideUserId === pairedUserId) startTtsSideChannel(); }, 5000);
+        }
+    };
+    chatTtsSideSource = es;
 }
 
 async function pollChatMessages() {
@@ -1287,6 +1345,7 @@ async function switchChatSession(id) {
     // Always open the SSE stream for the active session so agent_start /
     // streaming-token events arrive even before user interaction.
     startChatStream();
+    startTtsSideChannel();
     // If an agent loop happens to already be running for this session,
     // startChatPolling will be triggered via updateAgentUI(true).
 }

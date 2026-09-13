@@ -260,6 +260,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/api/status", axum::routing::get(status))
         .route("/api/auth/login", axum::routing::post(login_handler))
         .route("/api/chat/stream/:user_id", axum::routing::get(chat_stream_auth))
+        .route("/api/chat/stream/:user_id/tts", axum::routing::get(chat_stream_tts_only))
         .route("/api/vm/vnc/ws", axum::routing::get(vnc_ws_proxy))
         .route("/websockify", axum::routing::get(vnc_ws_proxy_noauth))
         .route("/vnc", axum::routing::get(vnc_viewer_page))
@@ -1729,6 +1730,61 @@ async fn chat_stream_auth(
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         tracing::info!(user_id = %uid, "[SSE] channel closed, ending stream");
+                        return None;
+                    }
+                }
+            }
+        }
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// TTS-only side channel for the dashboard chat: forwards ONLY `chat_tts`
+/// events from the given user's stream. Used by the frontend to also hear
+/// TTS generated for a different session (e.g. Discord traffic on the paired
+/// user_id) while another chat session is active. All other events are
+/// dropped here so the main stream stays the single source for chat content.
+async fn chat_stream_tts_only(
+    Path(user_id): Path<String>,
+    State(state): State<Arc<DashboardState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Sse<impl futures_util::stream::Stream<Item = Result<Event, std::convert::Infallible>>>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str());
+    let valid = token.map_or(false, |t| {
+        let jwt = jsonwebtoken::decode::<crate::gateway::auth::Claims>(
+            t,
+            &jsonwebtoken::DecodingKey::from_secret(state.gateway_api_key.as_bytes()),
+            &jsonwebtoken::Validation::default(),
+        );
+        jwt.is_ok() || t == state.gateway_api_key
+    });
+    if !valid {
+        tracing::warn!(user_id = %user_id, "[SSE-TTS] auth failed");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    tracing::info!(user_id = %user_id, "[SSE-TTS] connection opened");
+    let rx = crate::dashboard::stream::get_or_create(&user_id).subscribe();
+    let uid = user_id.clone();
+    let stream = futures_util::stream::unfold(rx, move |mut r| {
+        let uid = uid.clone();
+        async move {
+            loop {
+                match r.recv().await {
+                    Ok(ev) => {
+                        if ev.event != "chat_tts" {
+                            continue; // TTS-only channel: drop everything else
+                        }
+                        tracing::debug!(user_id = %uid, "[SSE-TTS] forwarding chat_tts");
+                        let data = serde_json::to_string(&ev).unwrap_or_default();
+                        let event = Event::default().event(ev.event).data(data);
+                        return Some((Ok(event), r));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(user_id = %uid, skipped = n, "[SSE-TTS] receiver lagged");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::info!(user_id = %uid, "[SSE-TTS] channel closed, ending stream");
                         return None;
                     }
                 }
