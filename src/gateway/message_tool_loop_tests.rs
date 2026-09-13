@@ -543,12 +543,15 @@ async fn tool_chain_completion_stops_current_task_but_not_next_direct_agent_run(
 #[test]
 fn tool_chain_empty_tts_returns_before_spawning_any_task() {
     // No Tokio runtime: trying to spawn even a doomed TTS task must fail this test.
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::db::Database::new(dir.path()).unwrap();
     for text in ["", " \n\t", "\u{a0}\u{2003}"] {
         spawn_tts(
             text.into(),
             &Default::default(),
             &Default::default(),
             "no-tts-for-empty-text",
+            &db,
         );
     }
 }

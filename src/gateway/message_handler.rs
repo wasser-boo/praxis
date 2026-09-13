@@ -336,6 +336,7 @@ pub(crate) async fn handle_message_inner(
             &updated_ctx.settings,
             &state.secrets,
             user_id,
+            &state.db,
         );
     }
 
@@ -448,6 +449,7 @@ async fn handle_message_agent_loop(
     let ch = feedback_channel.clone();
     let tts_settings = settings.clone();
     let tts_secrets = secrets.clone();
+    let tts_db = state.db.clone();
 
     tokio::spawn(async move {
         while let Some(msg) = feedback_rx.recv().await {
@@ -458,7 +460,7 @@ async fn handle_message_agent_loop(
             for mode in &feedback_modes {
                 match mode.as_str() {
                     "tts" => {
-                        spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid);
+                        spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid, &tts_db);
                         handled = true;
                     }
                     "dm" => {
@@ -487,7 +489,7 @@ async fn handle_message_agent_loop(
                 }
             }
             if !handled && tts_for_feedback {
-                spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid);
+                spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid, &tts_db);
             }
         }
     });
@@ -518,6 +520,7 @@ async fn handle_message_agent_loop(
             &updated_ctx.settings,
             &state.secrets,
             user_id,
+            &state.db,
         );
     }
 
@@ -952,6 +955,7 @@ fn spawn_tts(
     settings: &crate::db::contexts::ContextSettings,
     secrets: &crate::db::secrets::Secrets,
     user_id: &str,
+    db: &crate::db::Database,
 ) {
     // Tool-only turns, empty tag output and whitespace are not speech. Return
     // before spawning a task or constructing/contacting any TTS provider.
@@ -993,6 +997,7 @@ fn spawn_tts(
     let audio_output_path = settings.voice_audio_output_path.clone();
     let web_chat_tts = settings.web_chat_tts;
     let user_id = user_id.to_string();
+    let tts_db = db.clone();
 
     tracing::trace!(user_id = %user_id, tts_type = %tts_type, "TTS: Spawning task");
 
@@ -1109,6 +1114,14 @@ fn spawn_tts(
         };
 
         tracing::trace!(user_id = %user_id, "TTS: Audio received ({} bytes)", audio_bytes.len());
+
+        // Cost ledger: record ElevenLabs character usage per user.
+        if tts_type == "elevenlabs" {
+            let chars = text.chars().count();
+            if let Err(e) = crate::db::memory::record_media_spend(&tts_db, &user_id, chars) {
+                tracing::warn!("media_spend record failed: {}", e);
+            }
+        }
 
         if let Some(ref path) = audio_output_path {
             let folder = tts::ensure_audio_folder(path, "generated_tts");

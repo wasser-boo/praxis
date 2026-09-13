@@ -503,3 +503,38 @@ mod db_tests {
         assert!(loaded.last_topics.contains(&"topic1".to_string()));
     }
 }
+
+/// Record TTS/media character usage into memory.variables.media_spend.
+/// Structure: {"tts_chars_total": N, "tts_chars_month_YYYY-MM": n, "tts_calls": n}
+pub fn record_media_spend(db: &Database, user_id: &str, chars: usize) -> anyhow::Result<()> {
+    update_memory(db, user_id, |memory| {
+        let month = chrono::Utc::now().format("%Y-%m").to_string();
+        let entry = memory
+            .custom_variables
+            .entry("media_spend".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        let obj = match entry.as_object_mut() {
+            Some(o) => o,
+            None => return,
+        };
+        *obj.entry("tts_chars_total".to_string())
+            .or_insert(serde_json::json!(0)) = serde_json::json!(
+                obj.get("tts_chars_total").and_then(|v| v.as_u64()).unwrap_or(0) + chars as u64
+            );
+        let month_key = format!("tts_chars_month_{month}");
+        *obj.entry(month_key).or_insert(serde_json::json!(0)) = serde_json::json!(
+            obj.get(&month_key).and_then(|v| v.as_u64()).unwrap_or(0) + chars as u64
+        );
+        *obj.entry("tts_calls".to_string())
+            .or_insert(serde_json::json!(0)) = serde_json::json!(
+                obj.get("tts_calls").and_then(|v| v.as_u64()).unwrap_or(0) + 1
+            );
+    })?;
+    Ok(())
+}
+
+/// Read the current media spend record (None when absent).
+pub fn load_media_spend(db: &Database, user_id: &str) -> anyhow::Result<Option<serde_json::Value>> {
+    let memory = load_memory(db, user_id)?;
+    Ok(memory.custom_variables.get("media_spend").cloned())
+}

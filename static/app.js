@@ -790,6 +790,41 @@ function startChatStream() {
             addChatImage(inner.path, inner.caption);
         } catch (err) { console.error('[SSE image error]', err); }
     });
+    es.addEventListener('chat_image', (e) => {
+        console.log('[SSE] chat_image event received');
+        try {
+            const d = JSON.parse(e.data);
+            const inner = JSON.parse(d.data);
+            // data URLs render inline; server paths need the /api prefix check
+            addChatImage(inner.url || inner.path, inner.caption);
+        } catch (err) { console.error('[SSE chat_image error]', err); }
+    });
+    es.addEventListener('tool_call', (e) => {
+        console.log('[SSE] tool_call event received');
+        try {
+            const d = JSON.parse(e.data);
+            const inner = JSON.parse(d.data);
+            const tool = inner.tool || '?';
+            let detail = '';
+            const ap = inner.args_preview || {};
+            if (ap.path) detail = escapeHtml(ap.path);
+            else if (ap.query) detail = escapeHtml(String(ap.query));
+            else if (ap.command) detail = escapeHtml(String(ap.command));
+            else if (ap.args) detail = escapeHtml(String(ap.args));
+            addChatMessage('tool', `🔧 <b>${escapeHtml(tool)}</b>`, detail);
+        } catch (err) { console.error('[SSE tool_call error]', err); }
+    });
+    es.addEventListener('tool_result', (e) => {
+        console.log('[SSE] tool_result event received');
+        try {
+            const d = JSON.parse(e.data);
+            const inner = JSON.parse(d.data);
+            const tool = inner.tool || '?';
+            const dur = inner.duration_ms != null ? ` (${inner.duration_ms} ms)` : '';
+            const result = inner.result || '';
+            addChatMessage('tool', `✅ ${escapeHtml(tool)}${escapeHtml(dur)}`, String(result));
+        } catch (err) { console.error('[SSE tool_result error]', err); }
+    });
     es.onerror = (err) => {
         console.error('[SSE] connection error (EventSource readyState=' + es.readyState + '), reconnecting in 3s');
         stopChatStream();

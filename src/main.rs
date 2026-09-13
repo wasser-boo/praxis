@@ -468,6 +468,9 @@ async fn run_services(
         tracing::warn!("Failed to init default tools: {}", e);
     }
 
+    // Ensure the delegations table exists before the first delegate_task call.
+    praxis::gateway::delegation::ensure_delegations_table(&db);
+
     // Sync templates from disk to database
     praxis::dashboard::routes::sync_templates_from_disk(&db);
 

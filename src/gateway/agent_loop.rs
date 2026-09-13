@@ -518,6 +518,37 @@ async fn run_agent_loop_inner(
                     "=== TOOL CALL START ==="
                 );
 
+                // Dashboard chat visibility: announce the tool call so the user
+                // sees what the agent is doing right now.
+                {
+                    let args_preview: serde_json::Value =
+                        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                    let preview = match tc.function.name.as_str() {
+                        "write_file" | "edit_file" => serde_json::json!({
+                            "path": args_preview.get("path").cloned().unwrap_or_default(),
+                            "content_bytes": tc.function.arguments.len(),
+                        }),
+                        "read_file" | "get_context" | "rag_search" => serde_json::json!({
+                            "path": args_preview.get("path").cloned().unwrap_or_default(),
+                            "query": args_preview.get("query").cloned().unwrap_or_default(),
+                        }),
+                        _ => serde_json::json!({
+                            "args": crate::util::truncate_chars(
+                                &tc.function.arguments, 200),
+                        }),
+                    };
+                    crate::dashboard::stream::send(
+                        user_id,
+                        "tool_call",
+                        &serde_json::json!({
+                            "tool": tc.function.name,
+                            "call_id": tc.id,
+                            "args_preview": preview,
+                        })
+                        .to_string(),
+                    );
+                }
+
                 let tool_start_time = chrono::Local::now();
                 let result = execute_tool_call(&state.db, user_id, tc, &state.plugins).await;
                 // The tool may have changed settings, state, or custom_data.
@@ -582,6 +613,32 @@ async fn run_agent_loop_inner(
                     "=== TOOL CALL END ==="
                 );
 
+                // Dashboard chat visibility: report the tool result so the user
+                // can follow what happened.
+                {
+                    let result_for_stream = if tc.function.name == "understand_image" {
+                        // Keep the chat payload small: text summary only, the
+                        // image itself is streamed separately as chat_image.
+                        serde_json::from_str::<serde_json::Value>(&result)
+                            .ok()
+                            .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                            .unwrap_or_else(|| crate::util::truncate_chars(&result, 400))
+                    } else {
+                        crate::util::truncate_chars(&result, 400)
+                    };
+                    crate::dashboard::stream::send(
+                        user_id,
+                        "tool_result",
+                        &serde_json::json!({
+                            "tool": tc.function.name,
+                            "call_id": tc.id,
+                            "duration_ms": tool_duration.num_milliseconds(),
+                            "result": result_for_stream,
+                        })
+                        .to_string(),
+                    );
+                }
+
                 // Check if understand_image returned image data
                 if tc.function.name == "understand_image" {
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result) {
@@ -599,6 +656,25 @@ async fn run_agent_loop_inner(
                                     parts.len(),
                                     final_result
                                 );
+                                // Show the image directly in the dashboard chat so
+                                // the user sees what the agent is looking at.
+                                for part in parts {
+                                    if let Some(url) = part
+                                        .get("image_url")
+                                        .and_then(|iu| iu.get("url"))
+                                        .and_then(|u| u.as_str())
+                                    {
+                                        crate::dashboard::stream::send(
+                                            user_id,
+                                            "chat_image",
+                                            &serde_json::json!({
+                                                "url": url,
+                                                "caption": final_result,
+                                            })
+                                            .to_string(),
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -1899,5 +1975,55 @@ mod agent_tests {
         let hist = used["history"].as_array().unwrap();
         assert_eq!(hist.len(), 1);
         assert_eq!(hist[0]["tool"], "execute_terminal");
+    }
+
+    #[test]
+    fn test_tool_stream_event_payloads() {
+        // tool_call payload: tool name + call id + safe args preview.
+        let call_payload = serde_json::json!({
+            "tool": "write_file",
+            "call_id": "call_1",
+            "args_preview": {"path": "/tmp/x.txt", "content_bytes": 42},
+        });
+        assert_eq!(call_payload["tool"], "write_file");
+        assert_eq!(call_payload["args_preview"]["path"], "/tmp/x.txt");
+        assert!(call_payload["args_preview"]["content_bytes"].is_u64());
+        // The preview must NOT contain the file content itself.
+        assert!(call_payload["args_preview"].get("content").is_none());
+
+        // tool_result payload: tool name + duration + truncated result.
+        let result_payload = serde_json::json!({
+            "tool": "execute_terminal",
+            "call_id": "call_2",
+            "duration_ms": 150,
+            "result": "total 248...",
+        });
+        assert_eq!(result_payload["tool"], "execute_terminal");
+        assert_eq!(result_payload["duration_ms"], 150);
+        assert_eq!(result_payload["result"], "total 248...");
+
+        // understand_image results stream text only (image goes as chat_image).
+        let image_tool_result = serde_json::json!({
+            "text": "Image loaded: /tmp/x.png. describe",
+            "content_parts": [{"image_url": {"url": "data:image/png;base64,AAAA"}}],
+        });
+        let text_only = image_tool_result.get("text").and_then(|t| t.as_str()).unwrap_or_default();
+        assert!(text_only.contains("Image loaded"));
+        assert!(image_tool_result.get("content_parts").is_some());
+    }
+
+    #[test]
+    fn test_chat_image_event_extracts_data_url() {
+        // understand_image returns content_parts with a data URL; the chat
+        // event must carry that URL so the browser can render it inline.
+        let data_url = "data:image/png;base64,AAAA";
+        let part = serde_json::json!({"image_url": {"url": data_url, "detail": "high"}});
+        let extracted = part
+            .get("image_url")
+            .and_then(|iu| iu.get("url"))
+            .and_then(|u| u.as_str())
+            .unwrap_or("");
+        assert_eq!(extracted, data_url);
+        assert!(extracted.starts_with("data:image/"));
     }
 }

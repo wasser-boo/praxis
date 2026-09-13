@@ -63,6 +63,8 @@ const BUNDLED_ASSETS: &[Asset] = &[
     asset!("templates/tasks/review.poml"),
     asset!("templates/tasks/feedback.poml"),
     asset!("templates/tasks/done.poml"),
+    asset!("templates/tasks/daily_quiz.poml"),
+    asset!("templates/tasks/transcript_check.poml"),
     asset!("skills/code_review/skill.json"),
     asset!("skills/code_review/skill.poml"),
     asset!("skills/debug/skill.json"),

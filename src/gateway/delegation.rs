@@ -43,6 +43,14 @@ fn delegation_table(db: &crate::db::Database) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Called at startup so the delegations table exists even before the first
+/// delegate_task call (otherwise list_delegations fails on a fresh DB).
+pub fn ensure_delegations_table(db: &crate::db::Database) {
+    if let Err(e) = delegation_table(db) {
+        tracing::error!(error = %e, "Failed to ensure delegations table");
+    }
+}
+
 fn insert_delegation(db: &crate::db::Database, rec: &DelegationRecord) -> anyhow::Result<()> {
     let conn = db.conn();
     conn.execute(

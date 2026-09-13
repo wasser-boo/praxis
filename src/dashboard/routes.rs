@@ -238,6 +238,19 @@ pub fn routes(db: crate::db::Database) -> Router {
     // Static file service
     let static_service = tower_http::services::ServeDir::new("static");
 
+    // Authenticated routes that the commit notes flagged as unprotected.
+    let protected_extra = Router::new()
+        .route("/stt", axum::routing::post(dashboard_stt))
+        .route("/profiles", axum::routing::get(list_profiles))
+        .route("/profiles", axum::routing::post(save_profile))
+        .route("/profiles/:name/apply/:user_id", axum::routing::post(apply_profile))
+        .route("/profiles/:name", axum::routing::delete(delete_profile))
+        .route("/media", axum::routing::get(list_media))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            dashboard_auth_middleware,
+        ));
+
     Router::new()
         .route("/", axum::routing::get(index))
         .route("/logo.svg", axum::routing::get(logo_svg))
@@ -255,11 +268,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/api/screenshots/*path", axum::routing::get(get_screenshot))
         .route("/api/upload-avatar", axum::routing::post(upload_avatar))
         .route("/api/upload-file", axum::routing::post(upload_chat_file))
-        .route("/api/stt", axum::routing::post(dashboard_stt))
-        .route("/api/profiles", axum::routing::get(list_profiles))
-        .route("/api/profiles", axum::routing::post(save_profile))
-        .route("/api/profiles/:name/apply/:user_id", axum::routing::post(apply_profile))
-        .route("/api/profiles/:name", axum::routing::delete(delete_profile))
+        .nest("/api", protected_extra)
         .nest_service("/static", static_service)
         .nest("/api", protected)
         .with_state(state.clone())
@@ -1426,12 +1435,35 @@ async fn get_screenshot(
 async fn dashboard_stt(
     State(state): State<Arc<DashboardState>>,
     Query(params): Query<HashMap<String, String>>,
-    body: axum::body::Bytes,
+    mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let user_id = params
         .get("user_id")
         .cloned()
         .unwrap_or_else(|| "default".to_string());
+    // Accept both multipart form uploads (browser MediaRecorder) and raw
+    // bodies (curl tests). The dashboard mic sends multipart with an 'audio'
+    // field; a raw body is used as fallback.
+    let body: Vec<u8> = {
+        let mut collected: Vec<u8> = Vec::new();
+        // Find the audio field (accept any field name; first non-empty wins).
+        loop {
+            match multipart.next_field().await {
+                Ok(Some(mut field)) => {
+                    let mut data = Vec::new();
+                    while let Ok(Some(chunk)) = field.chunk().await {
+                        data.extend_from_slice(&chunk);
+                    }
+                    if !data.is_empty() {
+                        collected = data;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        collected
+    };
     if body.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -1453,7 +1485,7 @@ async fn dashboard_stt(
         elevenlabs_tag_audio_events: ctx.settings.elevenlabs_stt_tag_audio_events,
         elevenlabs_no_verbatim: ctx.settings.elevenlabs_stt_no_verbatim,
     };
-    match crate::voice::transcribe_audio(&body.to_vec(), &stt_config).await {
+    match crate::voice::transcribe_audio(&body, &stt_config).await {
         Ok(text) => Ok(Json(serde_json::json!({
             "text": text,
             "confidence": crate::voice::last_stt_confidence(),
@@ -1543,21 +1575,25 @@ async fn apply_profile(
     State(state): State<Arc<DashboardState>>,
     Path((name, user_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let conn = state.db.conn();
-    let data: String = conn
-        .query_row(
-            "SELECT data FROM context_profiles WHERE name = ?1",
-            rusqlite::params![name],
-            |row| row.get(0),
-        )
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    let snapshot: serde_json::Value =
-        serde_json::from_str(&data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let update = serde_json::json!({
-        "settings": snapshot.get("settings").cloned().unwrap_or_default(),
-        "custom_data": snapshot.get("custom_data").cloned().unwrap_or_default(),
-        "sm_file": snapshot.get("sm_file").cloned().unwrap_or_default(),
-    });
+    // Read the profile snapshot in its own lock scope, then drop the guard
+    // BEFORE merge_context takes the lock again (avoids self-deadlock).
+    let update = {
+        let conn = state.db.conn();
+        let data: String = conn
+            .query_row(
+                "SELECT data FROM context_profiles WHERE name = ?1",
+                rusqlite::params![name],
+                |row| row.get(0),
+            )
+            .map_err(|_| StatusCode::NOT_FOUND)?;
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        serde_json::json!({
+            "settings": snapshot.get("settings").cloned().unwrap_or_default(),
+            "custom_data": snapshot.get("custom_data").cloned().unwrap_or_default(),
+            "sm_file": snapshot.get("sm_file").cloned().unwrap_or_default(),
+        })
+    }; // MutexGuard dropped here
     let ctx = state
         .db
         .merge_context(&user_id, update)
@@ -2214,4 +2250,42 @@ mod dashboard_tests {
         let update: SmFileUpdate = serde_json::from_str(json).unwrap();
         assert!(update.content.contains("state test"));
     }
+}
+
+/// Media asset index: lists files in data/uploads with size and mtime,
+/// newest first. Backed by the filesystem, no separate index file needed.
+async fn list_media(
+    State(_state): State<Arc<DashboardState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+    let uploads = format!("{}/uploads", data_dir);
+    let filter = params.get("q").map(|q| q.to_lowercase()).unwrap_or_default();
+    let mut files: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&uploads) {
+        for entry in entries_flat(entries) {
+            let path = entry.path();
+            if !path.is_file() { continue; }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !filter.is_empty() && !name.to_lowercase().contains(&filter) { continue; }
+            let meta = entry.metadata().ok();
+            files.push(serde_json::json!({
+                "name": name,
+                "url": format!("/api/files/{}", name),
+                "size": meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                "modified": meta.and_then(|m| m.modified().ok())
+                    .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+            }));
+        }
+    }
+    files.sort_by(|a, b| {
+        let am = a["modified"].as_str().unwrap_or("");
+        let bm = b["modified"].as_str().unwrap_or("");
+        bm.cmp(am)
+    });
+    Ok(Json(serde_json::json!({ "files": files, "count": files.len() })))
+}
+
+fn entries_flat(rd: std::fs::ReadDir) -> Vec<std::fs::DirEntry> {
+    rd.filter_map(|e| e.ok()).collect()
 }
