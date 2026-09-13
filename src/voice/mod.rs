@@ -307,6 +307,8 @@ pub mod elevenlabs_stt {
         text: Option<String>,
         #[serde(rename = "error")]
         error: Option<String>,
+        #[serde(default)]
+        language_confidence: Option<f64>,
     }
 
     impl ElevenLabsSTT {
@@ -404,6 +406,13 @@ pub mod elevenlabs_stt {
             stt_response
                 .text
                 .ok_or_else(|| STTError::TranscriptionFailed("No text in response".to_string()))
+                .map(|text| {
+                    if let Some(c) = stt_response.language_confidence {
+                        crate::voice::store_stt_confidence(c);
+                        tracing::info!(confidence = c, "STT: language_confidence received");
+                    }
+                    text
+                })
         }
 
         pub fn is_ready(&self) -> bool {
@@ -1693,6 +1702,26 @@ pub struct STTConfig {
     pub elevenlabs_language: Option<String>,
     pub elevenlabs_tag_audio_events: bool,
     pub elevenlabs_no_verbatim: bool,
+}
+
+/// Last STT language_confidence (0.0..1.0) from the most recent ElevenLabs
+/// transcription. None until the first transcription happened. Used by the
+/// message handler to flag low-confidence transcripts for clarification.
+static LAST_STT_CONFIDENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+static HAS_STT_CONFIDENCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn store_stt_confidence(confidence: f64) {
+    let bits = confidence.clamp(0.0, 1.0).to_bits();
+    LAST_STT_CONFIDENCE.store(bits, std::sync::atomic::Ordering::Relaxed);
+    HAS_STT_CONFIDENCE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn last_stt_confidence() -> Option<f64> {
+    if !HAS_STT_CONFIDENCE.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let bits = LAST_STT_CONFIDENCE.load(std::sync::atomic::Ordering::Relaxed);
+    Some(f64::from_bits(bits))
 }
 
 pub async fn transcribe_audio(

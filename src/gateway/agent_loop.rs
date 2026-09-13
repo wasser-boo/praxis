@@ -205,6 +205,8 @@ async fn run_agent_loop_inner(
         // Refresh after tools and injected inputs; route BEFORE rendering.
         ctx = crate::gateway::prompt::prepare_runtime(state, user_id, &user_message, Some(turn), None)?;
         let system_prompt = crate::gateway::prompt::render_system(state, &ctx, &user_message).await?;
+        // Remember the hash BEFORE the prompt is moved into the system message.
+        let prompt_hash = crate::gateway::prompt_change::hash_system_prompt(&system_prompt);
         let mut messages = vec![ChatMessage {
             role: "system".to_string(),
             content: Some(system_prompt),
@@ -328,6 +330,23 @@ async fn run_agent_loop_inner(
         // Get tool definitions from database + plugins
         let mut tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
         tools.extend(state.plugins.tool_definitions());
+
+        // Announce system-prompt changes so the model re-reads its instructions
+        // (template updates via SM files or manual switches would otherwise go
+        // unnoticed until the user points them out).
+        if let Some(notice) =
+            crate::gateway::prompt_change::take_prompt_change_notice_hash(user_id, prompt_hash)
+        {
+            tracing::info!(user_id = %user_id, "System prompt changed; injecting change notice");
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: Some(notice),
+                content_parts: None,
+                tool_calls: None,
+                tool_call_id: None,
+                tool_name: None,
+            });
+        }
 
         // Clone tool names and definitions for validation before moving tools into request
         let tool_names: Vec<String> = tools.iter().map(|t| t.function.name.clone()).collect();
@@ -1030,6 +1049,58 @@ async fn execute_tool_call(
                     Err(e) => format!("Error: {}", e),
                 }
             } // end else (shared mode)
+        }
+        "run_background" => {
+            let command = args["command"].as_str().unwrap_or("");
+            let cwd = args["cwd"].as_str();
+            match crate::tools::execute_terminal::start_background(command, cwd, Some(user_id)).await {
+                Ok(job_id) => format!(
+                    "Background job started: {} (command: {}). You can keep working; it will announce completion automatically. Check with background_status job_id={}.",
+                    job_id, command, job_id
+                ),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "background_status" => {
+            match args["job_id"].as_str() {
+                Some(id) => match crate::tools::execute_terminal::job_status(id) {
+                    Some(job) => serde_json::to_string_pretty(&job).unwrap_or_else(|_| format!("{}", id)),
+                    None => format!("Unknown job id: {}. Use no job_id to list all jobs.", id),
+                },
+                None => {
+                    let jobs = crate::tools::execute_terminal::list_jobs();
+                    if jobs.is_empty() {
+                        "No background jobs.".to_string()
+                    } else {
+                        serde_json::to_string_pretty(&jobs).unwrap_or_else(|_| "jobs".to_string())
+                    }
+                }
+            }
+        }
+        "delegate_task" => {
+            // Needs GatewayState for the child agent loop; fetch it from the
+            // global gateway state accessor used by the message handler.
+            // Boxed to break the async recursion (loop -> tool -> child loop).
+            match crate::gateway::state_ref() {
+                Some(state) => {
+                    let state = state.clone();
+                    let user_id = user_id.to_string();
+                    let args = args.clone();
+                    Box::pin(async move {
+                        crate::gateway::delegation::delegate_task(&state, &user_id, &args).await
+                    })
+                    .await
+                }
+                None => "Error: gateway state unavailable for delegation.".to_string(),
+            }
+        }
+        "list_delegations" => {
+            match crate::gateway::delegation::list_delegations(db, user_id) {
+                Ok(list) if list.is_empty() => "No delegations yet.".to_string(),
+                Ok(list) => serde_json::to_string_pretty(&list)
+                    .unwrap_or_else(|_| format!("{} delegations", list.len())),
+                Err(e) => format!("Error: {}", e),
+            }
         }
         "write_file" => {
             let vm_mode = std::env::var("VM_MODE").unwrap_or_else(|_| "shared".to_string());

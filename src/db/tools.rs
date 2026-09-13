@@ -145,8 +145,32 @@ fn get_default_tools() -> Vec<Tool> {
     vec![
         Tool {
             name: "execute_terminal".into(),
-            description: Some("Run shell command".into()),
+            description: Some("Run shell command. Long-running commands: use run_background instead, then poll with background_status (finished jobs also announce themselves).".into()),
             parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "run_background".into(),
+            description: Some("Start a long-running shell command DETACHED (compile, download, server). Returns a job id immediately so you can keep working. The job announces its completion to the user's dashboard automatically; poll background_status only if you need the result mid-task.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"}},"required":["command"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "background_status".into(),
+            description: Some("Check status/output of a detached background command. Call without job_id to list all jobs.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"job_id":{"type":"string"}}}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "delegate_task".into(),
+            description: Some("Delegate ONE self-contained subtask to a fresh child agent with its own forked context (inherits settings/memory snapshot). You continue working after it returns. Delegated tasks CANNOT delegate further (one level only). The child does NOT see your conversation; pass everything it needs in 'task'/'context'.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"task":{"type":"string","description":"Complete, self-contained task description"},"context":{"type":"string","description":"Optional extra context/data for the child"},"timeout_secs":{"type":"integer","description":"Max runtime (default 600, max 3600)"}},"required":["task"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "list_delegations".into(),
+            description: Some("List your delegated tasks and their status/results.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
             is_enabled: true,
         },
         Tool {

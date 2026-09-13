@@ -120,6 +120,7 @@ impl DiscordBot {
             GatewayIntents::GUILDS
                 | GatewayIntents::MESSAGE_CONTENT
                 | GatewayIntents::DIRECT_MESSAGES
+                | GatewayIntents::DIRECT_MESSAGE_REACTIONS
                 | GatewayIntents::GUILD_MESSAGES
                 | GatewayIntents::GUILD_MESSAGE_REACTIONS
                 | GatewayIntents::GUILD_VOICE_STATES

@@ -38,6 +38,7 @@ const BUNDLED_ASSETS: &[Asset] = &[
     asset!("contexts/self_learning.sm"),
     asset!("templates/standard.poml"),
     asset!("templates/language_instructor.poml"),
+    asset!("templates/code_reviewer.poml"),
     asset!("templates/code_assistant.poml"),
     asset!("templates/researcher.poml"),
     asset!("templates/system.poml"),

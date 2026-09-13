@@ -102,6 +102,9 @@ pub struct ContextSettings {
     pub elevenlabs_tts_language: Option<String>,
     #[serde(default)]
     pub use_tts: bool,
+    /// Speak agent replies in the web dashboard chat (ElevenLabs TTS event).
+    #[serde(default)]
+    pub web_chat_tts: bool,
     #[serde(default = "default_true")]
     pub use_stt: bool,
     #[serde(default)]
@@ -309,6 +312,7 @@ impl Default for ContextSettings {
             voice_muted: false,
             voice_deafened: default_deafened(),
             voice_discord_guild_id: None,
+            web_chat_tts: false,
             rvc_on: false,
             rvc_server: None,
             rvc_model_path: None,

@@ -255,6 +255,11 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/api/screenshots/*path", axum::routing::get(get_screenshot))
         .route("/api/upload-avatar", axum::routing::post(upload_avatar))
         .route("/api/upload-file", axum::routing::post(upload_chat_file))
+        .route("/api/stt", axum::routing::post(dashboard_stt))
+        .route("/api/profiles", axum::routing::get(list_profiles))
+        .route("/api/profiles", axum::routing::post(save_profile))
+        .route("/api/profiles/:name/apply/:user_id", axum::routing::post(apply_profile))
+        .route("/api/profiles/:name", axum::routing::delete(delete_profile))
         .nest_service("/static", static_service)
         .nest("/api", protected)
         .with_state(state.clone())
@@ -1413,6 +1418,164 @@ async fn get_screenshot(
         "application/octet-stream"
     };
     Ok(([(axum::http::header::CONTENT_TYPE, ct)], data))
+}
+
+/// Dashboard chat speech-to-text: accepts a browser MediaRecorder blob
+/// (webm/ogg/wav), transcribes it with the user's configured STT engine
+/// (ElevenLabs scribe by default) and returns the text.
+async fn dashboard_stt(
+    State(state): State<Arc<DashboardState>>,
+    Query(params): Query<HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let user_id = params
+        .get("user_id")
+        .cloned()
+        .unwrap_or_else(|| "default".to_string());
+    if body.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let ctx = state.db.load_context(&user_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let secrets = crate::db::secrets::get_secrets();
+    let api_key = secrets
+        .elevenlabs_api_key
+        .clone()
+        .unwrap_or_default();
+    if api_key.is_empty() {
+        return Ok(Json(serde_json::json!({"error": "ElevenLabs API key not configured"})));
+    }
+    let stt_config = crate::voice::STTConfig {
+        engine: ctx.settings.voice_stt_type.clone(),
+        api_key: Some(api_key),
+        model_path: ctx.settings.voice_whisper_model_path.clone(),
+        elevenlabs_model: ctx.settings.elevenlabs_stt_model.clone(),
+        elevenlabs_language: ctx.settings.elevenlabs_stt_language.clone(),
+        elevenlabs_tag_audio_events: ctx.settings.elevenlabs_stt_tag_audio_events,
+        elevenlabs_no_verbatim: ctx.settings.elevenlabs_stt_no_verbatim,
+    };
+    match crate::voice::transcribe_audio(&body.to_vec(), &stt_config).await {
+        Ok(text) => Ok(Json(serde_json::json!({
+            "text": text,
+            "confidence": crate::voice::last_stt_confidence(),
+            "low_confidence": crate::voice::last_stt_confidence().map_or(false, |c| c < 0.70),
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+    }
+}
+
+/// Context profiles: named, complete context snapshots ("Marvin-Default", ...)
+/// stored in the DB so a fresh user can be configured with one click.
+/// Stored in table `context_profiles (name, data, created_at)`.
+async fn list_profiles(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let conn = state.db.conn();
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS context_profiles (
+            name TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    );
+    let mut stmt = conn
+        .prepare("SELECT name, created_at FROM context_profiles ORDER BY created_at")
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+            ))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let profiles: Vec<_> = rows
+        .filter_map(|row| {
+            let (name, created_at) = match row {
+                Ok((n, c)) => (n, c),
+                Err(_) => return None,
+            };
+            Some(serde_json::json!({
+                "name": name,
+                "created_at": created_at,
+            }))
+        })
+        .collect();
+    Ok(Json(serde_json::json!({"profiles": profiles})))
+}
+
+async fn save_profile(
+    State(state): State<Arc<DashboardState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let name = req["name"].as_str().unwrap_or("").trim().to_string();
+    let source_user = req["source_user_id"].as_str().unwrap_or("default");
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let ctx = state
+        .db
+        .load_context(source_user)
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    // Strip volatile fields: keep settings + custom_data + sm_file choice.
+    let snapshot = serde_json::json!({
+        "settings": ctx.settings,
+        "custom_data": ctx.custom_data,
+        "sm_file": ctx.sm_file,
+    });
+    let conn = state.db.conn();
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS context_profiles (
+            name TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    );
+    conn.execute(
+        "INSERT INTO context_profiles (name, data, created_at) VALUES (?1, ?2, datetime('now'))
+         ON CONFLICT(name) DO UPDATE SET data = ?2, created_at = datetime('now')",
+        rusqlite::params![name, snapshot.to_string()],
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"success": true, "name": name})))
+}
+
+async fn apply_profile(
+    State(state): State<Arc<DashboardState>>,
+    Path((name, user_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let conn = state.db.conn();
+    let data: String = conn
+        .query_row(
+            "SELECT data FROM context_profiles WHERE name = ?1",
+            rusqlite::params![name],
+            |row| row.get(0),
+        )
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let update = serde_json::json!({
+        "settings": snapshot.get("settings").cloned().unwrap_or_default(),
+        "custom_data": snapshot.get("custom_data").cloned().unwrap_or_default(),
+        "sm_file": snapshot.get("sm_file").cloned().unwrap_or_default(),
+    });
+    let ctx = state
+        .db
+        .merge_context(&user_id, update)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(Json(serde_json::to_value(ctx).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?))
+}
+
+async fn delete_profile(
+    State(state): State<Arc<DashboardState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let conn = state.db.conn();
+    conn.execute(
+        "DELETE FROM context_profiles WHERE name = ?1",
+        rusqlite::params![name],
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"success": true})))
 }
 
 async fn chat_query(

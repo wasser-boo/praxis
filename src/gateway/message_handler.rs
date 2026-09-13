@@ -367,19 +367,59 @@ async fn handle_message_agent_loop(
     let secrets = state.secrets.clone();
     let settings = ctx.settings.clone();
 
-    // Inject channel_id into custom_data so tools can use it
+    // Inject channel_id into custom_data so tools can use it.
+    // Always overwrite with the CURRENT channel so replies/tools follow the user
+    // (previously it was written once and never updated, so later messages from
+    // other channels kept the stale value and outputs landed in random channels).
+    // Voice input keeps the last real text channel for text tools and records the
+    // voice channel separately under voice_channel_id.
     let mut ctx = ctx.clone();
     if ctx.custom_data.is_null() {
         ctx.custom_data = serde_json::json!({});
     }
     if let Some(obj) = ctx.custom_data.as_object_mut() {
-        if !obj.contains_key("channel_id") {
-            let ch = channel_id
+        let is_voice = channel_id.map_or(false, |ch| ch.starts_with("voice:"));
+        let text_channel: Option<String> = if is_voice {
+            // STT/voice input: text tools should target the last text channel the
+            // user actually wrote in; fall back to a non-voice feedback channel.
+            obj.get("user_channel_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    ctx.settings
+                        .feedback_channel_id
+                        .clone()
+                        .filter(|s| !s.starts_with("voice:"))
+                })
+        } else {
+            channel_id
                 .filter(|s| !s.is_empty())
-                .or_else(|| ctx.settings.feedback_channel_id.as_deref())
-                .unwrap_or("");
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    ctx.settings
+                        .feedback_channel_id
+                        .clone()
+                        .filter(|s| !s.starts_with("voice:"))
+                })
+        };
+        if let Some(ch) = text_channel {
             if !ch.is_empty() {
+                obj.insert("user_channel_id".to_string(), serde_json::json!(ch));
                 obj.insert("channel_id".to_string(), serde_json::json!(ch));
+            }
+        }
+        if is_voice {
+            if let Some(ch) = channel_id {
+                obj.insert("voice_channel_id".to_string(), serde_json::json!(ch));
+            }
+        }
+        // STT language confidence for the transcript-check rule (see voice::last_stt_confidence)
+        if let Some(c) = crate::voice::last_stt_confidence() {
+            obj.insert("stt_confidence".to_string(), serde_json::json!(c));
+            if c < 0.70 {
+                obj.insert("stt_low_confidence".to_string(), serde_json::json!(true));
+            } else {
+                obj.remove("stt_low_confidence");
             }
         }
     }
@@ -467,9 +507,12 @@ async fn handle_message_agent_loop(
     state.db.increment_turn(&mut updated_ctx);
     state.db.save_context(&updated_ctx)?;
 
-    // Final response TTS: always speak if use_tts is on, or if input came from voice
+    // Final response TTS: always speak if use_tts is on, or if input came from voice.
+    // Web chat: speak only when the dashboard switch (web_chat_tts) is enabled.
     let is_voice_input = channel_id.map_or(false, |ch| ch.starts_with("voice:"));
-    if updated_ctx.settings.use_tts || is_voice_input {
+    let is_web_chat = channel_id.map_or(false, |ch| ch == "web");
+    let web_tts_on = updated_ctx.settings.web_chat_tts;
+    if updated_ctx.settings.use_tts || is_voice_input || (is_web_chat && web_tts_on) {
         spawn_tts(
             reply.clone(),
             &updated_ctx.settings,
@@ -948,6 +991,7 @@ fn spawn_tts(
     let qwen_voice_clone_enabled = settings.qwen_voice_clone_enabled;
     let qwen_voice_clone_prompt = settings.qwen_voice_clone_prompt.clone();
     let audio_output_path = settings.voice_audio_output_path.clone();
+    let web_chat_tts = settings.web_chat_tts;
     let user_id = user_id.to_string();
 
     tracing::trace!(user_id = %user_id, tts_type = %tts_type, "TTS: Spawning task");
@@ -1102,6 +1146,26 @@ fn spawn_tts(
         if let Some(ref path) = audio_output_path {
             let folder = tts::ensure_audio_folder(path, "final_output");
             let _ = tts::save_audio_file(&final_audio, folder.to_str().unwrap_or(path), "03_final");
+        }
+
+        // Web chat speech: deliver the rendered audio to the dashboard stream as
+        // a base64 data URL so the web chat can play it (toggle: web_chat_tts).
+        // Discord voice users receive the audio through the voice pipeline.
+        if web_chat_tts {
+            use base64::Engine;
+            let data_url = format!(
+                "data:audio/mpeg;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(&final_audio)
+            );
+            crate::dashboard::stream::send(
+                &user_id,
+                "chat_tts",
+                &serde_json::json!({
+                    "audio": data_url,
+                    "mime": "audio/mpeg",
+                })
+                .to_string(),
+            );
         }
 
         crate::event_channel::broadcast_voice_tts(&user_id, final_audio);

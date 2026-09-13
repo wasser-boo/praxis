@@ -1,11 +1,13 @@
 pub mod agent_loop;
 pub mod auth;
 pub mod cron_scheduler;
+pub mod delegation;
 pub mod http_handler;
 pub mod llm;
 pub mod message_handler;
 pub mod poml;
 pub mod prompt;
+pub mod prompt_change;
 pub mod rate_limiter;
 pub mod task_control;
 pub mod templates;
@@ -22,6 +24,14 @@ pub struct GatewayState {
     pub plugins: Arc<crate::plugins::PluginRegistry>,
     pub event_tx: tokio::sync::broadcast::Sender<crate::event_channel::GatewayEvent>,
     pub start_time: std::time::Instant,
+}
+
+/// Global reference to the running gateway state, set in `start`. Tools that
+/// need to spawn sub-agent loops (e.g. delegation) access it from here.
+static GATEWAY_STATE: once_cell::sync::OnceCell<GatewayState> = once_cell::sync::OnceCell::new();
+
+pub fn state_ref() -> Option<&'static GatewayState> {
+    GATEWAY_STATE.get()
 }
 
 pub async fn start(db: crate::db::Database, config: crate::config::Config) -> anyhow::Result<()> {
@@ -45,6 +55,7 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
         event_tx,
         start_time: std::time::Instant::now(),
     };
+    let _ = GATEWAY_STATE.set(state.clone());
 
     let rate_limiter = Arc::new(rate_limiter::UserRateLimiter::new(60));
 

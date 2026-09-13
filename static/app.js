@@ -455,6 +455,19 @@ async function chatStartAgent() {
         addChatMessage('system', `Agent started for ${uid}`);
         updateAgentUI(true);
         await loadCLStatus();
+        // Load the TTS switch state from the user's settings.
+        try {
+            const ctxRes = await apiFetch(`/api/contexts/${encodeURIComponent(uid)}`);
+            const ctxData = await ctxRes.json();
+            const on = !!(ctxData && ctxData.settings && ctxData.settings.web_chat_tts);
+            chatTtsOn = on;
+            const btn = document.getElementById('chat-tts-btn');
+            if (btn) {
+                btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+                btn.classList.toggle('tts-on', on);
+                btn.textContent = on ? '🔊' : '🔉';
+            }
+        } catch (_) { /* switch state stays default */ }
     } catch (err) { addChatMessage('feedback', 'Failed to start: ' + err.message); }
 }
 
@@ -673,6 +686,14 @@ function startChatStream() {
         updateAgentUI(false);
         document.body.classList.remove('agent-loop-running');
         stopChatTimer();
+    });
+
+    es.addEventListener('chat_tts', (e) => {
+        console.log('[SSE] chat_tts event received');
+        try {
+            const d = JSON.parse(e.data);
+            if (d.audio) chatPlayTts(d.audio);
+        } catch (err) { console.error('[SSE chat_tts error]', err); }
     });
 
     es.addEventListener('feedback', (e) => {
@@ -2381,3 +2402,74 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('load-messages-btn').addEventListener('click', loadMessages);
     document.getElementById('load-memory-btn').addEventListener('click', loadMemory);
 });
+
+/* ── Web chat speech: mic (STT) + reply TTS toggle ─────────────────────────── */
+let chatMicStream = null;
+let chatMediaRecorder = null;
+let chatMicChunks = [];
+let chatTtsOn = false;
+let chatTtsAudio = null;
+
+async function chatToggleMic() {
+  const btn = document.getElementById('chat-mic-btn');
+  if (chatMediaRecorder && chatMediaRecorder.state === 'recording') {
+    chatMediaRecorder.stop();
+    return;
+  }
+  try {
+    chatMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    chatMicChunks = [];
+    chatMediaRecorder = new MediaRecorder(chatMicStream);
+    chatMediaRecorder.ondataavailable = (e) => { if (e.data.size) chatMicChunks.push(e.data); };
+    chatMediaRecorder.onstop = async () => {
+      chatMicStream.getTracks().forEach(t => t.stop());
+      chatMicStream = null;
+      btn.classList.remove('recording');
+      btn.textContent = '🎤';
+      const blob = new Blob(chatMicChunks, { type: 'audio/webm' });
+      if (blob.size < 2000) { addChatMessage('system', '(Recording too short)'); return; }
+      addChatMessage('system', '⏳ Transcribing...');
+      try {
+        const fd = new FormData();
+        fd.append('audio', blob, 'speech.webm');
+        const res = await apiFetch(`/api/stt?user_id=${encodeURIComponent(chatUserId)}`, { method: 'POST', body: fd });
+        const data = await res.json();
+        if (data.error) { addChatMessage('feedback', 'STT failed: ' + data.error); return; }
+        const ta = document.getElementById('chat-input');
+        ta.value = (ta.value ? ta.value + ' ' : '') + (data.text || '');
+        if (data.low_confidence) addChatMessage('system', '⚠️ Low speech confidence – check the text.');
+        ta.focus();
+      } catch (err) { addChatMessage('feedback', 'STT failed: ' + err.message); }
+    };
+    chatMediaRecorder.start();
+    btn.classList.add('recording');
+    btn.textContent = '⏺';
+    addChatMessage('system', '🎙 Recording... click again to send.');
+  } catch (err) {
+    addChatMessage('feedback', 'Microphone unavailable: ' + err.message);
+  }
+}
+
+async function chatToggleTts() {
+  const btn = document.getElementById('chat-tts-btn');
+  chatTtsOn = !chatTtsOn;
+  btn.setAttribute('aria-pressed', chatTtsOn ? 'true' : 'false');
+  btn.classList.toggle('tts-on', chatTtsOn);
+  btn.textContent = chatTtsOn ? '🔊' : '🔉';
+  try {
+    await apiFetch(`/api/contexts/${encodeURIComponent(chatUserId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ settings: { web_chat_tts: chatTtsOn } })
+    });
+    addChatMessage('system', chatTtsOn ? '🔊 Replies will be read aloud.' : '🔉 TTS off.');
+  } catch (err) {
+    addChatMessage('feedback', 'Could not save TTS setting: ' + err.message);
+  }
+}
+
+function chatPlayTts(dataUrl) {
+  if (!chatTtsOn) return; // respect the switch
+  if (chatTtsAudio) { chatTtsAudio.pause(); }
+  chatTtsAudio = new Audio(dataUrl);
+  chatTtsAudio.play().catch(() => {});
+}

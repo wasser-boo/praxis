@@ -115,6 +115,8 @@
                                 <div class="chat-input-row">
                                     <button class="btn btn-sm btn-secondary chat-upload-btn" onclick="document.getElementById('chat-file-input').click()" title="Upload files">&#128206;</button>
                                     <input type="file" id="chat-file-input" multiple style="display:none" onchange="chatHandleFiles(this.files)">
+                                    <button class="btn btn-sm btn-secondary" id="chat-mic-btn" onclick="chatToggleMic()" title="Speak to Praxis (speech-to-text)">&#127908;</button>
+                                    <button class="btn btn-sm btn-secondary" id="chat-tts-btn" onclick="chatToggleTts()" title="Read replies aloud (ElevenLabs TTS)" aria-pressed="false">&#128266;</button>
                                     <div style="position:relative;flex:1">
                                         <textarea id="chat-input" class="chat-input" placeholder="Type a message... (try /clear, /start, /stop, /new, /status)" rows="3" onkeydown="chatKeyDown(event)" oninput="chatInput(event)"></textarea>
                                         <div id="slash-commands" class="slash-commands" style="display:none"></div>
