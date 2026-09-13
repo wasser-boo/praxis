@@ -25,9 +25,21 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCallData>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_parts: Option<Vec<serde_json::Value>>,
+    /// Discord mirror metadata (direction/author/channel_id/channel_kind).
+    /// Only set for mirrored Discord messages; never sent to the LLM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_meta: Option<serde_json::Value>,
 }
 
+/// Roles that only exist for the dashboard/TUI chat mirror and must never be
+/// replayed into the LLM conversation history.
+pub const MIRROR_ROLES: [&str; 2] = ["discord_user", "discord_bot"];
+
 impl Message {
+    fn empty_meta() -> Option<serde_json::Value> {
+        None
+    }
+
     pub fn user(content: String) -> Self {
         Self {
             role: "user".to_string(),
@@ -36,6 +48,7 @@ impl Message {
             tool_name: None,
             tool_calls: None,
             content_parts: None,
+            discord_meta: Self::empty_meta(),
         }
     }
 
@@ -47,6 +60,7 @@ impl Message {
             tool_name: None,
             tool_calls: None,
             content_parts: None,
+            discord_meta: Self::empty_meta(),
         }
     }
 
@@ -58,6 +72,7 @@ impl Message {
             tool_name: None,
             tool_calls: Some(tool_calls),
             content_parts: None,
+            discord_meta: Self::empty_meta(),
         }
     }
 
@@ -69,6 +84,7 @@ impl Message {
             tool_name: None,
             tool_calls: None,
             content_parts: None,
+            discord_meta: Self::empty_meta(),
         }
     }
 
@@ -84,7 +100,42 @@ impl Message {
             tool_name: None,
             tool_calls: None,
             content_parts: Some(content_parts),
+            discord_meta: Self::empty_meta(),
         }
+    }
+
+    /// A mirrored Discord chat message (dashboard/TUI display only).
+    /// `direction` is "user" or "bot".
+    pub fn discord_mirror(
+        content: String,
+        direction: &str,
+        author: &str,
+        channel_id: &str,
+        channel_kind: &str,
+    ) -> Self {
+        Self {
+            role: if direction == "bot" {
+                "discord_bot".to_string()
+            } else {
+                "discord_user".to_string()
+            },
+            content,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            content_parts: None,
+            discord_meta: Some(serde_json::json!({
+                "direction": direction,
+                "author": author,
+                "channel_id": channel_id,
+                "channel_kind": channel_kind,
+            })),
+        }
+    }
+
+    /// True when this row is a Discord-mirror message (not LLM history).
+    pub fn is_discord_mirror(&self) -> bool {
+        MIRROR_ROLES.contains(&self.role.as_str()) || self.discord_meta.is_some()
     }
 }
 
@@ -133,9 +184,13 @@ impl Database {
             .content_parts
             .as_ref()
             .map(|cp| serde_json::to_string(cp).unwrap_or_default());
+        let discord_meta_json = msg
+            .discord_meta
+            .as_ref()
+            .map(|dm| serde_json::to_string(dm).unwrap_or_default());
         let id = conn.execute(
-            "INSERT INTO messages (user_id, role, content, tool_call_id, tool_name, tool_calls, content_parts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![key, msg.role, msg.content, msg.tool_call_id, msg.tool_name, tool_calls_json, content_parts_json],
+            "INSERT INTO messages (user_id, role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![key, msg.role, msg.content, msg.tool_call_id, msg.tool_name, tool_calls_json, content_parts_json, discord_meta_json],
         )?;
         Ok(id as i64)
     }
@@ -144,7 +199,7 @@ impl Database {
         let conn = self.conn();
         let key = self.resolve_user_key(&conn, user_id);
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts FROM messages WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2"
+            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta FROM messages WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2"
         )?;
 
         let messages = stmt
@@ -155,6 +210,9 @@ impl Database {
                 let content_parts_json: Option<String> = row.get(5)?;
                 let content_parts: Option<Vec<serde_json::Value>> =
                     content_parts_json.and_then(|json| serde_json::from_str(&json).ok());
+                let discord_meta_json: Option<String> = row.get(6)?;
+                let discord_meta: Option<serde_json::Value> =
+                    discord_meta_json.and_then(|json| serde_json::from_str(&json).ok());
                 Ok(Message {
                     role: row.get(0)?,
                     content: row.get(1)?,
@@ -162,6 +220,7 @@ impl Database {
                     tool_name: row.get(3)?,
                     tool_calls,
                     content_parts,
+                    discord_meta,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -177,7 +236,7 @@ impl Database {
         let conn = self.conn();
         let key = self.resolve_user_key(&conn, user_id);
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts FROM messages WHERE user_id = ?1 ORDER BY id DESC",
+            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta FROM messages WHERE user_id = ?1 ORDER BY id DESC",
         )?;
 
         let mut messages = Vec::new();
@@ -189,6 +248,9 @@ impl Database {
             let content_parts_json: Option<String> = row.get(5)?;
             let content_parts: Option<Vec<serde_json::Value>> =
                 content_parts_json.and_then(|json| serde_json::from_str(&json).ok());
+            let discord_meta_json: Option<String> = row.get(6)?;
+            let discord_meta: Option<serde_json::Value> =
+                discord_meta_json.and_then(|json| serde_json::from_str(&json).ok());
             Ok(Message {
                 role: row.get(0)?,
                 content: row.get(1)?,
@@ -196,6 +258,62 @@ impl Database {
                 tool_name: row.get(3)?,
                 tool_calls,
                 content_parts,
+                discord_meta,
+            })
+        })?;
+
+        for row in rows {
+            let msg = row?;
+            // Discord-mirror rows are display-only; never replay them into the
+            // LLM conversation history.
+            if msg.is_discord_mirror() {
+                continue;
+            }
+            let tokens = estimate_message_tokens(&msg);
+            if total_tokens + tokens > token_budget && !messages.is_empty() {
+                break;
+            }
+            total_tokens += tokens;
+            messages.push(msg);
+        }
+
+        messages.reverse();
+        Ok((messages, total_tokens))
+    }
+
+    /// Full chat transcript for the dashboard/TUI: includes Discord-mirror
+    /// rows (they are display-only but must appear in the chat history).
+    pub fn get_chat_messages_with_token_budget(
+        &self,
+        user_id: &str,
+        token_budget: usize,
+    ) -> anyhow::Result<(Vec<Message>, usize)> {
+        let conn = self.conn();
+        let key = self.resolve_user_key(&conn, user_id);
+        let mut stmt = conn.prepare(
+            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta FROM messages WHERE user_id = ?1 ORDER BY id DESC",
+        )?;
+
+        let mut messages = Vec::new();
+        let mut total_tokens = 0usize;
+        let rows = stmt.query_map(rusqlite::params![key], |row| {
+            let tool_calls_json: Option<String> = row.get(4)?;
+            let tool_calls: Option<Vec<ToolCallData>> =
+                tool_calls_json.and_then(|json| serde_json::from_str(&json).ok());
+            let content_parts_json: Option<String> = row.get(5)?;
+            let content_parts: Option<Vec<serde_json::Value>> =
+                content_parts_json.and_then(|json| serde_json::from_str(&json).ok());
+            let discord_meta_json: Option<String> = row.get(6)?;
+            let discord_meta: Option<serde_json::Value> =
+                discord_meta_json.and_then(|json| serde_json::from_str(&json).ok());
+            Ok(Message {
+                role: row.get(0)?,
+                content: row.get(1)?,
+                tool_call_id: row.get(2)?,
+                tool_name: row.get(3)?,
+                tool_calls,
+                content_parts,
+                discord_meta,
             })
         })?;
 
@@ -328,5 +446,47 @@ mod db_tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].id, "call_123");
         assert_eq!(tool_calls[0].function.name, "read_file");
+    }
+
+    #[test]
+    fn test_discord_mirror_persisted_and_history_filtered() {
+        let (db, _dir) = test_db();
+        ensure_context(&db, "user1");
+        db.add_message("user1", &Message::user("real user msg".into()))
+            .unwrap();
+        db.add_message(
+            "user1",
+            &Message::discord_mirror(
+                "discord question".into(),
+                "user",
+                "Marvin",
+                "12345",
+                "dm",
+            ),
+        )
+        .unwrap();
+        db.add_message(
+            "user1",
+            &Message::discord_mirror("discord answer".into(), "bot", "bot", "12345", "dm"),
+        )
+        .unwrap();
+        db.add_message("user1", &Message::assistant("real reply".into()))
+            .unwrap();
+
+        // Chat transcript (dashboard/TUI): mirror rows included with meta.
+        let (chat, _) = db.get_chat_messages_with_token_budget("user1", usize::MAX).unwrap();
+        assert_eq!(chat.len(), 4);
+        assert_eq!(chat[1].role, "discord_user");
+        assert_eq!(chat[1].is_discord_mirror(), true);
+        let meta = chat[1].discord_meta.as_ref().unwrap();
+        assert_eq!(meta["author"], "Marvin");
+        assert_eq!(meta["channel_id"], "12345");
+        assert_eq!(chat[2].role, "discord_bot");
+
+        // LLM history: mirror rows filtered out, order preserved.
+        let (history, _) = db.get_messages_with_token_budget("user1", usize::MAX).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].content, "real user msg");
+        assert_eq!(history[1].content, "real reply");
     }
 }

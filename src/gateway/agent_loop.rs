@@ -205,16 +205,32 @@ async fn run_agent_loop_inner(
         // Refresh after tools and injected inputs; route BEFORE rendering.
         ctx = crate::gateway::prompt::prepare_runtime(state, user_id, &user_message, Some(turn), None)?;
         let system_prompt = crate::gateway::prompt::render_system(state, &ctx, &user_message).await?;
-        // Remember the hash BEFORE the prompt is moved into the system message.
-        let prompt_hash = crate::gateway::prompt_change::hash_system_prompt(&system_prompt);
         let mut messages = vec![ChatMessage {
             role: "system".to_string(),
-            content: Some(system_prompt),
+            content: Some(system_prompt.clone()),
             content_parts: None,
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
         }];
+
+        // Announce system-prompt changes so the model re-reads its instructions
+        // (template updates via SM files or manual switches would otherwise go
+        // unnoticed until the user points them out). Text-based so the notice
+        // includes a diff of WHICH lines changed.
+        if let Some(notice) =
+            crate::gateway::prompt_change::take_prompt_change_notice_text(user_id, &system_prompt)
+        {
+            tracing::info!(user_id = %user_id, "System prompt changed; injecting change notice");
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: Some(notice),
+                content_parts: None,
+                tool_calls: None,
+                tool_call_id: None,
+                tool_name: None,
+            });
+        }
 
         // Add compaction summary if available
         if ctx.settings.compaction_enabled && !ctx.settings.compaction_summary.is_empty() {
@@ -330,23 +346,6 @@ async fn run_agent_loop_inner(
         // Get tool definitions from database + plugins
         let mut tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
         tools.extend(state.plugins.tool_definitions());
-
-        // Announce system-prompt changes so the model re-reads its instructions
-        // (template updates via SM files or manual switches would otherwise go
-        // unnoticed until the user points them out).
-        if let Some(notice) =
-            crate::gateway::prompt_change::take_prompt_change_notice_hash(user_id, prompt_hash)
-        {
-            tracing::info!(user_id = %user_id, "System prompt changed; injecting change notice");
-            messages.push(ChatMessage {
-                role: "system".to_string(),
-                content: Some(notice),
-                content_parts: None,
-                tool_calls: None,
-                tool_call_id: None,
-                tool_name: None,
-            });
-        }
 
         // Clone tool names and definitions for validation before moving tools into request
         let tool_names: Vec<String> = tools.iter().map(|t| t.function.name.clone()).collect();
@@ -901,9 +900,12 @@ async fn run_agent_loop_inner(
                     let keep_budget = ctx.settings.history_token_limit.unwrap_or(500000) / 2;
                     if let Ok((recent, _)) = state
                         .db
-                        .get_messages_with_token_budget(user_id, keep_budget)
+                        .get_chat_messages_with_token_budget(user_id, keep_budget)
                     {
                         // Filter out orphaned tool results (tool messages without preceding tool_calls)
+                        // and keep Discord-mirror rows (display-only, but they
+                        // must survive compaction — they are part of the chat
+                        // transcript, not the LLM history).
                         let mut valid_tool_call_ids: std::collections::HashSet<String> =
                             std::collections::HashSet::new();
                         for msg in &recent {
@@ -916,7 +918,9 @@ async fn run_agent_loop_inner(
                         let filtered: Vec<_> = recent
                             .into_iter()
                             .filter(|msg| {
-                                if msg.role == "tool" {
+                                if msg.is_discord_mirror() {
+                                    true
+                                } else if msg.role == "tool" {
                                     msg.tool_call_id
                                         .as_ref()
                                         .map(|id| valid_tool_call_ids.contains(id))

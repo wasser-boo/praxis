@@ -833,6 +833,16 @@ function startChatStream() {
             addDiscordMirrorMessage(inner);
         } catch (err) { console.error('[SSE discord_message error]', err); }
     });
+    es.addEventListener('delegation_update', (e) => {
+        console.log('[SSE] delegation_update event received');
+        try {
+            const d = JSON.parse(e.data);
+            const inner = JSON.parse(d.data);
+            const icon = inner.status === 'done' ? '✅' : '❌';
+            const result = String(inner.result || '').slice(0, 400);
+            addChatMessage('system', `${icon} Delegation ${inner.delegation_id} ${inner.status === 'done' ? 'finished' : 'failed'}\n${result}`);
+        } catch (err) { console.error('[SSE delegation_update error]', err); }
+    });
     es.onerror = (err) => {
         console.error('[SSE] connection error (EventSource readyState=' + es.readyState + '), reconnecting in 3s');
         stopChatStream();
@@ -905,6 +915,12 @@ async function loadChatHistory() {
 }
 
 function renderChatMessage(m) {
+    // Discord-mirror rows from history: render with the same badge as live
+    // discord_message SSE events so the chat looks identical after a reload.
+    if ((m.role === 'discord_user' || m.role === 'discord_bot') && m.discord_meta) {
+        addDiscordMirrorMessage({ ...m.discord_meta, content: m.content });
+        return;
+    }
     // Skip intermediate assistant messages that have tool_calls — only show final responses
     if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
         return; // intermediate step, not shown
@@ -2544,5 +2560,19 @@ function chatPlayTts(dataUrl) {
   if (!chatTtsOn) return; // respect the switch
   if (chatTtsAudio) { chatTtsAudio.pause(); }
   chatTtsAudio = new Audio(dataUrl);
-  chatTtsAudio.play().catch(() => {});
+  chatTtsAudio.onended = () => chatTtsActive(false);
+  chatTtsAudio.onerror = () => chatTtsActive(false);
+  chatTtsActive(true);
+  chatTtsAudio.play().catch((err) => { console.error('[TTS] play failed', err); chatTtsActive(false); });
+}
+
+// Visible "Praxis is speaking" indicator in the chat header. Clicking it
+// stops playback immediately.
+function chatTtsActive(on) {
+  const chip = document.getElementById('chat-tts-indicator');
+  if (!chip) return;
+  chip.style.display = on ? '' : 'none';
+  const btn = document.getElementById('chat-tts-btn');
+  if (btn) btn.classList.toggle('tts-speaking', on);
+  if (!on && chatTtsAudio) { try { chatTtsAudio.pause(); } catch (_) {} chatTtsAudio = null; }
 }

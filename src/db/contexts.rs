@@ -88,6 +88,10 @@ pub struct ContextSettings {
     pub elevenlabs_stt_tag_audio_events: bool,
     #[serde(default = "default_elevenlabs_stt_no_verbatim")]
     pub elevenlabs_stt_no_verbatim: bool,
+    /// Minimum STT confidence (0.0..1.0) below which a transcript is flagged
+    /// as low-confidence (dashboard warning + transcript-check rule).
+    #[serde(default = "default_stt_low_confidence_threshold")]
+    pub stt_low_confidence_threshold: f64,
     #[serde(default = "default_elevenlabs_tts_model")]
     pub elevenlabs_tts_model: String,
     #[serde(default = "default_elevenlabs_stability")]
@@ -264,6 +268,9 @@ fn default_elevenlabs_stt_model() -> String {
 fn default_elevenlabs_stt_no_verbatim() -> bool {
     true
 }
+fn default_stt_low_confidence_threshold() -> f64 {
+    0.70
+}
 fn default_elevenlabs_tts_model() -> String {
     "eleven_multilingual_v2".to_string()
 }
@@ -312,6 +319,7 @@ impl Default for ContextSettings {
             elevenlabs_stt_language: None,
             elevenlabs_stt_tag_audio_events: false,
             elevenlabs_stt_no_verbatim: default_elevenlabs_stt_no_verbatim(),
+            stt_low_confidence_threshold: default_stt_low_confidence_threshold(),
             elevenlabs_tts_model: default_elevenlabs_tts_model(),
             elevenlabs_stability: default_elevenlabs_stability(),
             elevenlabs_similarity_boost: default_elevenlabs_similarity_boost(),

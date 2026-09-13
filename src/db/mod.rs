@@ -79,6 +79,10 @@ impl Database {
             conn.execute_batch(include_str!("../../migrations/009_delegations.sql"))?;
             conn.pragma_update(None, "user_version", 9)?;
         }
+        if version < 10 {
+            conn.execute_batch(include_str!("../../migrations/010_discord_mirror.sql"))?;
+            conn.pragma_update(None, "user_version", 10)?;
+        }
 
         Ok(())
     }

@@ -32,6 +32,7 @@ pub const SLASH_COMMANDS: &[SlashCmd] = &[
     SlashCmd { name: "/sessions", desc: "Toggle the sessions sidebar" },
     SlashCmd { name: "/stop", desc: "Stop the running agent loop" },
     SlashCmd { name: "/status", desc: "Print agent status" },
+    SlashCmd { name: "/delegations", desc: "Show delegated subtasks (status + result)" },
     SlashCmd { name: "/context", desc: "Get/set context variables (e.g. set foo=bar)" },
     SlashCmd { name: "/rename", desc: "Rename the current session" },
     SlashCmd { name: "/delete", desc: "Delete the current session" },
@@ -194,6 +195,19 @@ impl App {
                 "system" => Bubble::System {
                     content: m.content.clone(),
                 },
+                // Discord-mirror rows (persisted for the dashboard chat):
+                // shown with an origin tag so TUI and dashboard stay in sync.
+                "discord_user" | "discord_bot" => {
+                    let author = m
+                        .discord_meta
+                        .as_ref()
+                        .and_then(|v| v.get("author"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(if m.role == "discord_user" { "discord" } else { "bot" });
+                    Bubble::System {
+                        content: format!("🎮 Discord {}: {}", author, m.content),
+                    }
+                }
                 _ => continue,
             };
             self.transcript.push(bubble);
@@ -274,6 +288,53 @@ impl App {
                     kind: BannerKind::Info,
                     content: format!("Agent is {active} for session {}", self.active_user_id()),
                 });
+            }
+            "/delegations" => {
+                let user_id = self.active_user_id().to_string();
+                match crate::gateway::delegation::list_delegations(&self.db, &user_id) {
+                    Ok(list) if list.is_empty() => {
+                        self.transcript.push(Bubble::Banner {
+                            kind: BannerKind::Info,
+                            content: "No delegations yet.".to_string(),
+                        });
+                    }
+                    Ok(list) => {
+                        let body = list
+                            .iter()
+                            .map(|d| {
+                                let status_icon = match d.status.as_str() {
+                                    "done" => "✅",
+                                    "failed" => "❌",
+                                    _ => "⏳",
+                                };
+                                let task_short: String = d.task.chars().take(80).collect();
+                                let result_short = d
+                                    .result
+                                    .as_deref()
+                                    .map(|r| {
+                                        let r = r.replace('\n', " ");
+                                        r.chars().take(120).collect::<String>()
+                                    })
+                                    .unwrap_or_else(|| "-".to_string());
+                                format!(
+                                    "{} {} [{}] {}\n    result: {}",
+                                    status_icon, d.id, d.status, task_short, result_short
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        self.transcript.push(Bubble::Banner {
+                            kind: BannerKind::Info,
+                            content: format!("🤝 Delegations:\n{}", body),
+                        });
+                    }
+                    Err(e) => {
+                        self.transcript.push(Bubble::Banner {
+                            kind: BannerKind::Error,
+                            content: format!("/delegations: {}", e),
+                        });
+                    }
+                }
             }
             "/context" | "/ctx" => {
                 self.run_context_command(line);

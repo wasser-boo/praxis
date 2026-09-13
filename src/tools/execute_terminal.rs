@@ -44,6 +44,11 @@ use once_cell::sync::Lazy;
 use tokio::io::AsyncReadExt;
 
 const MAX_CAPTURE: usize = 200_000; // bytes kept per stream
+/// Finished jobs are removed from the registry after this long so the
+/// in-memory job list cannot grow without bound (see `cleanup_finished_jobs`).
+const FINISHED_JOB_TTL_SECS: i64 = 3600;
+/// Hard cap on retained jobs; the oldest finished entries are dropped first.
+const MAX_JOBS: usize = 500;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BackgroundJob {
@@ -236,6 +241,82 @@ pub fn list_jobs() -> Vec<BackgroundJob> {
         .collect();
     v.sort_by(|a, b| a.id.cmp(&b.id));
     v
+}
+
+/// Remove finished background jobs older than `FINISHED_JOB_TTL_SECS` and, if
+/// the registry still exceeds `MAX_JOBS`, drop the oldest finished entries.
+/// Running jobs are never removed. Called periodically from the gateway cron
+/// tick so the in-memory registry cannot grow without bound.
+pub fn cleanup_finished_jobs() -> usize {
+    let now = chrono::Utc::now();
+    let mut removed = 0usize;
+
+    // Pass 1: TTL-based removal of finished/failed jobs.
+    JOBS.retain(|_, state| {
+        let j = match state.job.lock() {
+            Ok(j) => j,
+            Err(p) => p.into_inner(),
+        };
+        if j.status == "running" {
+            return true;
+        }
+        match &j.finished_at {
+            Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
+                Ok(t) => {
+                    let keep = (now - t.with_timezone(&chrono::Utc)).num_seconds()
+                        < FINISHED_JOB_TTL_SECS;
+                    if !keep {
+                        removed += 1;
+                    }
+                    keep
+                }
+                Err(_) => true, // unparseable timestamp: keep
+            },
+            None => true,
+        }
+    });
+
+    // Pass 2: hard cap — drop oldest finished jobs until under the cap.
+    let running: Vec<String> = JOBS
+        .iter()
+        .filter(|e| {
+            let j = match e.value().job.lock() {
+                Ok(j) => j,
+                Err(p) => p.into_inner(),
+            };
+            j.status == "running"
+        })
+        .map(|e| e.key().clone())
+        .collect();
+    let cap = MAX_JOBS.saturating_sub(running.len());
+    if JOBS.len() > cap {
+        let mut finished: Vec<(String, String)> = JOBS
+            .iter()
+            .filter_map(|e| {
+                let j = match e.value().job.lock() {
+                    Ok(j) => j,
+                    Err(p) => p.into_inner(),
+                };
+                if j.status == "running" {
+                    None
+                } else {
+                    Some((e.key().clone(), j.finished_at.clone().unwrap_or_default()))
+                }
+            })
+            .collect();
+        finished.sort_by(|a, b| a.1.cmp(&b.1));
+        let excess = JOBS.len().saturating_sub(cap);
+        for (id, _) in finished.into_iter().take(excess) {
+            if JOBS.remove(&id).is_some() {
+                removed += 1;
+            }
+        }
+    }
+
+    if removed > 0 {
+        tracing::debug!(removed, remaining = JOBS.len(), "background job cleanup");
+    }
+    removed
 }
 
 #[cfg(test)]

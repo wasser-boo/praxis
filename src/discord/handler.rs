@@ -208,25 +208,42 @@ impl EventHandler for DiscordHandler {
         };
 
         // Mirror the Discord message into the dashboard chat so the user sees
-        // Discord traffic next to dashboard-originated messages.
+        // Discord traffic next to dashboard-originated messages. Persisted in
+        // the messages table so it survives reloads (SSE alone is transient).
         {
             let author_name = msg.author.name.clone();
             let channel_id_str = msg.channel_id.to_string();
             let content_clone = msg.content.clone();
             let uid = pairing.user_id.clone();
             let is_dm = msg.guild_id.is_none();
+            let payload = serde_json::json!({
+                "direction": "user",
+                "channel_id": channel_id_str,
+                "channel_kind": if is_dm { "dm" } else { "guild" },
+                "author": author_name,
+                "content": content_clone,
+            });
             crate::dashboard::stream::send(
                 &uid,
                 "discord_message",
-                &serde_json::json!({
-                    "direction": "user",
-                    "channel_id": channel_id_str,
-                    "channel_kind": if is_dm { "dm" } else { "guild" },
-                    "author": author_name,
-                    "content": content_clone,
-                })
-                .to_string(),
+                &payload.to_string(),
             );
+            // Persist for the dashboard chat history (role discord_user).
+            if !content_clone.trim().is_empty() {
+                let db = self.db.clone();
+                let stored = crate::db::messages::Message::discord_mirror(
+                    content_clone,
+                    "user",
+                    &author_name,
+                    &channel_id_str,
+                    if is_dm { "dm" } else { "guild" },
+                );
+                tokio::spawn(async move {
+                    if let Err(e) = db.add_message(&uid, &stored) {
+                        tracing::warn!("Failed to persist Discord mirror message: {}", e);
+                    }
+                });
+            }
         }
 
         // Handle file attachments - download to appropriate folder
@@ -354,6 +371,7 @@ impl EventHandler for DiscordHandler {
 
         let mirror_uid = pairing.user_id.clone();
         let mirror_channel = msg.channel_id.to_string();
+        let mirror_kind = if msg.guild_id.is_none() { "dm" } else { "guild" };
         loop {
             match ws_client.recv().await {
                 Ok(IncomingMessage::Response { content, .. }) => {
@@ -368,17 +386,33 @@ impl EventHandler for DiscordHandler {
                             tracing::error!("Failed to send response: {}", e);
                         }
                         // Mirror the bot's Discord reply into the dashboard chat.
+                        let bot_meta = serde_json::json!({
+                            "direction": "bot",
+                            "channel_id": mirror_channel,
+                            "channel_kind": mirror_kind,
+                            "author": "bot",
+                            "content": trimmed,
+                        });
                         crate::dashboard::stream::send(
                             &mirror_uid,
                             "discord_message",
-                            &serde_json::json!({
-                                "direction": "bot",
-                                "channel_id": mirror_channel,
-                                "author": "bot",
-                                "content": trimmed,
-                            })
-                            .to_string(),
+                            &bot_meta.to_string(),
                         );
+                        // Persist for the dashboard chat history (role discord_bot).
+                        let db = self.db.clone();
+                        let stored = crate::db::messages::Message::discord_mirror(
+                            trimmed.to_string(),
+                            "bot",
+                            "bot",
+                            &mirror_channel,
+                            mirror_kind,
+                        );
+                        let mirror_uid2 = mirror_uid.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = db.add_message(&mirror_uid2, &stored) {
+                                tracing::warn!("Failed to persist Discord mirror bot reply: {}", e);
+                            }
+                        });
                     } else {
                         tracing::warn!("LLM returned empty response, skipping send");
                     }

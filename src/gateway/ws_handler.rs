@@ -220,7 +220,10 @@ async fn compact_user_history(state: &GatewayState, user_id: &str) -> anyhow::Re
     state.db.save_context(&ctx)?;
 
     let keep_budget = ctx.settings.history_token_limit.unwrap_or(500000) / 2;
-    if let Ok((recent, _)) = state.db.get_messages_with_token_budget(user_id, keep_budget) {
+    if let Ok((recent, _)) = state
+        .db
+        .get_chat_messages_with_token_budget(user_id, keep_budget)
+    {
         let mut valid_tool_call_ids: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for msg in &recent {
@@ -233,7 +236,9 @@ async fn compact_user_history(state: &GatewayState, user_id: &str) -> anyhow::Re
         let filtered: Vec<_> = recent
             .into_iter()
             .filter(|msg| {
-                if msg.role == "tool" {
+                if msg.is_discord_mirror() {
+                    true
+                } else if msg.role == "tool" {
                     msg.tool_call_id
                         .as_ref()
                         .map(|id| valid_tool_call_ids.contains(id))

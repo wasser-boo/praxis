@@ -88,6 +88,9 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
             if let Err(e) = run_due_cron_jobs(&cron_db).await {
                 tracing::error!("Cron scheduler error: {}", e);
             }
+            // Housekeeping: drop old finished background jobs so the
+            // in-memory registry cannot grow without bound.
+            crate::tools::execute_terminal::cleanup_finished_jobs();
         }
     });
 

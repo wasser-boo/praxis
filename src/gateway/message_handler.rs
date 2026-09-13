@@ -418,8 +418,9 @@ async fn handle_message_agent_loop(
         }
         // STT language confidence for the transcript-check rule (see voice::last_stt_confidence)
         if let Some(c) = crate::voice::last_stt_confidence() {
+            let threshold = ctx.settings.stt_low_confidence_threshold;
             obj.insert("stt_confidence".to_string(), serde_json::json!(c));
-            if c < 0.70 {
+            if c < threshold {
                 obj.insert("stt_low_confidence".to_string(), serde_json::json!(true));
             } else {
                 obj.remove("stt_low_confidence");

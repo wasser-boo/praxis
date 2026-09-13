@@ -485,7 +485,7 @@ async fn get_messages(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let budget = 500000usize;
     tracing::debug!(user_id = %user_id, "[MESSAGES] fetching messages");
-    match state.db.get_messages_with_token_budget(&user_id, budget) {
+    match state.db.get_chat_messages_with_token_budget(&user_id, budget) {
         Ok((messages, total_tokens)) => {
             let msgs: Vec<serde_json::Value> = messages
                 .iter()
@@ -498,6 +498,9 @@ async fn get_messages(
                         "tool_call_id": m.tool_call_id,
                         "tool_name": m.tool_name,
                     });
+                    if let Some(meta) = m.discord_meta.as_ref() {
+                        val["discord_meta"] = meta.clone();
+                    }
                     if let Some(ref tool_calls) = m.tool_calls {
                         val["tool_calls"] = serde_json::json!(tool_calls
                             .iter()
@@ -1485,11 +1488,13 @@ async fn dashboard_stt(
         elevenlabs_tag_audio_events: ctx.settings.elevenlabs_stt_tag_audio_events,
         elevenlabs_no_verbatim: ctx.settings.elevenlabs_stt_no_verbatim,
     };
+    let stt_threshold = ctx.settings.stt_low_confidence_threshold;
     match crate::voice::transcribe_audio(&body, &stt_config).await {
         Ok(text) => Ok(Json(serde_json::json!({
             "text": text,
             "confidence": crate::voice::last_stt_confidence(),
-            "low_confidence": crate::voice::last_stt_confidence().map_or(false, |c| c < 0.70),
+            "low_confidence": crate::voice::last_stt_confidence().map_or(false, |c| c < stt_threshold),
+            "threshold": stt_threshold,
         }))),
         Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
     }
