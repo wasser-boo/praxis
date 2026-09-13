@@ -1138,6 +1138,45 @@ function loadChatSessions() {
         saveChatSessions();
     }
     renderChatSessionList();
+    // Discord pairings appear as chat sessions too (their full history lives
+    // under the paired user_id). Merged in the background; the list re-renders
+    // when they arrive.
+    mergeDiscordPairingSessions();
+}
+
+/// Fetch pairings and add one chat-session entry per paired context (marked
+/// with a Discord badge). Idempotent: existing entries are updated, local
+/// sessions are never removed.
+async function mergeDiscordPairingSessions() {
+    try {
+        const res = await apiGet('/api/pairings');
+        if (!res || !res.ok) return;
+        const data = await res.json();
+        const pairings = data.pairings || [];
+        if (pairings.length === 0) return;
+        let changed = false;
+        for (const p of pairings) {
+            const existing = chatSessions.find(s => s.id === p.user_id);
+            if (existing) {
+                if (existing.discord !== p.discord_user_id) {
+                    existing.discord = p.discord_user_id;
+                    changed = true;
+                }
+            } else {
+                chatSessions.push({
+                    id: p.user_id,
+                    name: `🎮 Discord (${p.discord_user_id})`,
+                    username: chatUsername,
+                    discord: p.discord_user_id,
+                });
+                changed = true;
+            }
+        }
+        if (changed) {
+            saveChatSessions();
+            renderChatSessionList();
+        }
+    } catch (err) { console.error('[SESSION] pairing merge failed:', err); }
 }
 
 function saveChatSessions() {
@@ -1242,6 +1281,13 @@ async function switchChatSession(id) {
 
 function deleteChatSession(id) {
     if (chatSessions.length <= 1) return;
+    const s = chatSessions.find(x => x.id === id);
+    if (s && s.discord) {
+        // Discord-paired contexts are managed by the pairing; deleting the
+        // context here would break the Discord bot coupling.
+        alert('This conversation is linked to your Discord pairing and cannot be deleted here. Remove the pairing in the Pairings tab instead.');
+        return;
+    }
     if (!confirm('Delete this chat session and all its messages? This cannot be undone.')) return;
     // Best-effort backend cleanup of the session context + messages.
     apiFetch(`/api/contexts/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
