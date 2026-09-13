@@ -83,6 +83,10 @@ impl Database {
             conn.execute_batch(include_str!("../../migrations/010_discord_mirror.sql"))?;
             conn.pragma_update(None, "user_version", 10)?;
         }
+        if version < 11 {
+            conn.execute_batch(include_str!("../../migrations/011_message_audio.sql"))?;
+            conn.pragma_update(None, "user_version", 11)?;
+        }
 
         Ok(())
     }

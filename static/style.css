@@ -627,6 +627,10 @@ body.agent-loop-running .agent-badge { animation: agent-pulse 2s ease-in-out inf
 @keyframes agent-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
 
 /* Web chat speech buttons */
+.chat-audio-controls { display:flex; align-items:center; flex-wrap:wrap; gap:0.5rem; margin-top:0.65rem; }
+.chat-audio-play { min-height:2.2rem; white-space:nowrap; }
+.chat-audio-status { font-size:0.8rem; color:var(--text-secondary); overflow-wrap:anywhere; }
+.chat-audio-play[aria-pressed="true"] { border-color:var(--accent-purple); }
 #chat-mic-btn.recording{background:#c0392b;color:#fff;border-color:#c0392b;animation:pulse 1.2s infinite}
 #chat-tts-btn.tts-on{background:#2e7d32;color:#fff;border-color:#2e7d32}
 #chat-tts-btn.tts-speaking{animation:tts-pulse 1.2s ease-in-out infinite}

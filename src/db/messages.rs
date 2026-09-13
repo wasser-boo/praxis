@@ -15,6 +15,11 @@ pub struct FunctionCallData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    /// Dashboard-only metadata; audio bytes are fetched separately, never sent to the LLM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_mime: Option<String>,
     pub role: String,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42,6 +47,8 @@ impl Message {
 
     pub fn user(content: String) -> Self {
         Self {
+            id: None,
+            audio_mime: None,
             role: "user".to_string(),
             content,
             tool_call_id: None,
@@ -54,6 +61,8 @@ impl Message {
 
     pub fn assistant(content: String) -> Self {
         Self {
+            id: None,
+            audio_mime: None,
             role: "assistant".to_string(),
             content,
             tool_call_id: None,
@@ -66,6 +75,8 @@ impl Message {
 
     pub fn assistant_with_tool_calls(content: String, tool_calls: Vec<ToolCallData>) -> Self {
         Self {
+            id: None,
+            audio_mime: None,
             role: "assistant".to_string(),
             content,
             tool_call_id: None,
@@ -78,6 +89,8 @@ impl Message {
 
     pub fn tool(content: String, tool_call_id: String) -> Self {
         Self {
+            id: None,
+            audio_mime: None,
             role: "tool".to_string(),
             content,
             tool_call_id: Some(tool_call_id),
@@ -94,6 +107,8 @@ impl Message {
         content_parts: Vec<serde_json::Value>,
     ) -> Self {
         Self {
+            id: None,
+            audio_mime: None,
             role: "tool".to_string(),
             content,
             tool_call_id: Some(tool_call_id),
@@ -114,6 +129,8 @@ impl Message {
         channel_kind: &str,
     ) -> Self {
         Self {
+            id: None,
+            audio_mime: None,
             role: if direction == "bot" {
                 "discord_bot".to_string()
             } else {
@@ -188,18 +205,51 @@ impl Database {
             .discord_meta
             .as_ref()
             .map(|dm| serde_json::to_string(dm).unwrap_or_default());
-        let id = conn.execute(
+        conn.execute(
             "INSERT INTO messages (user_id, role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![key, msg.role, msg.content, msg.tool_call_id, msg.tool_name, tool_calls_json, content_parts_json, discord_meta_json],
         )?;
-        Ok(id as i64)
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Save speech on the original reply, before notifying SSE subscribers. A
+    /// disconnected dashboard can recover it from history without regenerating TTS.
+    pub fn save_message_audio(
+        &self,
+        user_id: &str,
+        message_id: i64,
+        mime: &str,
+        audio: &[u8],
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(!audio.is_empty(), "Empty TTS audio");
+        let conn = self.conn();
+        let key = self.resolve_user_key(&conn, user_id);
+        Ok(conn.execute(
+            "UPDATE messages SET audio = ?1, audio_mime = ?2 WHERE user_id = ?3 AND id = ?4 AND role = 'assistant'",
+            rusqlite::params![audio, mime, key, message_id],
+        )? == 1)
+    }
+
+    pub fn get_message_audio(
+        &self,
+        user_id: &str,
+        message_id: i64,
+    ) -> anyhow::Result<Option<(String, Vec<u8>)>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn();
+        let key = self.resolve_user_key(&conn, user_id);
+        Ok(conn.query_row(
+            "SELECT audio_mime, audio FROM messages WHERE user_id = ?1 AND id = ?2 AND audio IS NOT NULL",
+            rusqlite::params![key, message_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?)
     }
 
     pub fn get_messages(&self, user_id: &str, limit: i32) -> anyhow::Result<Vec<Message>> {
         let conn = self.conn();
         let key = self.resolve_user_key(&conn, user_id);
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta FROM messages WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2"
+            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta, id FROM messages WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2"
         )?;
 
         let messages = stmt
@@ -214,6 +264,8 @@ impl Database {
                 let discord_meta: Option<serde_json::Value> =
                     discord_meta_json.and_then(|json| serde_json::from_str(&json).ok());
                 Ok(Message {
+                    id: Some(row.get(7)?),
+                    audio_mime: None,
                     role: row.get(0)?,
                     content: row.get(1)?,
                     tool_call_id: row.get(2)?,
@@ -236,7 +288,7 @@ impl Database {
         let conn = self.conn();
         let key = self.resolve_user_key(&conn, user_id);
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta FROM messages WHERE user_id = ?1 ORDER BY id DESC",
+            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta, id FROM messages WHERE user_id = ?1 ORDER BY id DESC",
         )?;
 
         let mut messages = Vec::new();
@@ -252,6 +304,8 @@ impl Database {
             let discord_meta: Option<serde_json::Value> =
                 discord_meta_json.and_then(|json| serde_json::from_str(&json).ok());
             Ok(Message {
+                id: Some(row.get(7)?),
+                audio_mime: None,
                 role: row.get(0)?,
                 content: row.get(1)?,
                 tool_call_id: row.get(2)?,
@@ -304,7 +358,7 @@ impl Database {
         let conn = self.conn();
         let key = self.resolve_user_key(&conn, user_id);
         let mut stmt = conn.prepare(
-            "SELECT id, role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta FROM messages WHERE user_id = ?1 ORDER BY id DESC",
+            "SELECT id, role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta, audio_mime FROM messages WHERE user_id = ?1 ORDER BY id DESC",
         )?;
 
         let mut messages = Vec::new();
@@ -321,6 +375,8 @@ impl Database {
             let discord_meta: Option<serde_json::Value> =
                 discord_meta_json.and_then(|json| serde_json::from_str(&json).ok());
             Ok((id, Message {
+                id: Some(id),
+                audio_mime: row.get(8)?,
                 role: row.get(1)?,
                 content: row.get(2)?,
                 tool_call_id: row.get(3)?,
@@ -375,6 +431,20 @@ impl Database {
         Ok(count as usize)
     }
 
+    /// Compaction must keep the original rows: delete/reinsert changes reply
+    /// identities and discards their saved audio (including still-running TTS).
+    pub fn retain_chat_messages(&self, user_id: &str, messages: &[Message]) -> anyhow::Result<()> {
+        let ids: Vec<_> = messages.iter().filter_map(|m| m.id).collect();
+        anyhow::ensure!(ids.len() == messages.len(), "Cannot retain messages without DB ids");
+        let conn = self.conn();
+        let key = self.resolve_user_key(&conn, user_id);
+        conn.execute(
+            "DELETE FROM messages WHERE user_id = ?1 AND id NOT IN (SELECT value FROM json_each(?2))",
+            rusqlite::params![key, serde_json::to_string(&ids)?],
+        )?;
+        Ok(())
+    }
+
     pub fn clear_messages(&self, user_id: &str) -> anyhow::Result<()> {
         let conn = self.conn();
         let key = self.resolve_user_key(&conn, user_id);
@@ -416,6 +486,63 @@ mod db_tests {
         let messages = db.get_messages("user1", 10).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "Hello");
+    }
+
+    #[test]
+    fn audio_persists_with_stable_reply_ids_and_not_in_llm_history() {
+        let (db, dir) = test_db();
+        ensure_context(&db, "user1");
+        let first = db.add_message("user1", &Message::assistant("same text".into())).unwrap();
+        let second = db.add_message("user1", &Message::assistant("same text".into())).unwrap();
+        assert!(second > first, "add_message must return row id, not rows affected");
+        assert!(db.save_message_audio("user1", second, "audio/wav", b"synthetic audio").unwrap());
+        drop(db);
+
+        let db = Database::new(dir.path()).unwrap(); // migration is idempotent; bytes survive restart
+        let (chat, _) = db.get_chat_messages_with_token_budget("user1", usize::MAX).unwrap();
+        assert_eq!(chat[0].id, Some(first));
+        assert_eq!(chat[0].audio_mime, None);
+        assert_eq!(chat[1].id, Some(second));
+        assert_eq!(chat[1].audio_mime.as_deref(), Some("audio/wav"));
+        assert_eq!(db.get_message_audio("user1", second).unwrap(), Some(("audio/wav".into(), b"synthetic audio".to_vec())));
+        let (llm, _) = db.get_messages_with_token_budget("user1", usize::MAX).unwrap();
+        assert!(llm.iter().all(|m| m.audio_mime.is_none()));
+        assert!(!serde_json::to_string(&chat).unwrap().contains("synthetic audio"));
+        assert!(db.get_chat_messages_after("user1", usize::MAX, second).unwrap().0.is_empty());
+        assert!(db.get_message_audio("user1", second).unwrap().is_some(), "chat-only clear keeps audio");
+        db.retain_chat_messages("user1", &chat[1..]).unwrap();
+        let retained = db.get_messages("user1", 10).unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].id, Some(second), "compaction preserves reply identity");
+        assert!(db.get_message_audio("user1", second).unwrap().is_some(), "retained replies keep their audio");
+        assert!(db.retain_chat_messages("user1", &[Message::assistant("unsaved".into())]).is_err());
+        db.clear_messages("user1").unwrap();
+        assert!(db.get_message_audio("user1", second).unwrap().is_none());
+    }
+
+    #[test]
+    fn audio_is_scoped_to_user_session_and_existing_assistant_rows() {
+        let (db, _dir) = test_db();
+        ensure_context(&db, "user1");
+        ensure_context(&db, "user2");
+        let id = db.add_message("user1", &Message::assistant("reply".into())).unwrap();
+        let user_msg = db.add_message("user1", &Message::user("question".into())).unwrap();
+        assert!(!db.save_message_audio("user2", id, "audio/mpeg", b"bytes").unwrap());
+        assert!(!db.save_message_audio("user1", user_msg, "audio/mpeg", b"bytes").unwrap());
+        assert!(!db.save_message_audio("user1", 99999, "audio/mpeg", b"bytes").unwrap());
+        assert!(db.save_message_audio("user1", id, "audio/mpeg", b"").is_err());
+        assert!(db.save_message_audio("user1", id, "audio/mpeg", b"bytes").unwrap());
+        assert!(db.get_message_audio("user2", id).unwrap().is_none());
+        let mut ctx = db.load_context("user1").unwrap();
+        ctx.session_id = "other-session".into();
+        db.save_context(&ctx).unwrap();
+        assert!(db.get_message_audio("user1", id).unwrap().is_none());
+        assert!(!db.save_message_audio("user1", id, "audio/wav", b"late audio").unwrap());
+        ctx.session_id = "default".into();
+        db.save_context(&ctx).unwrap();
+        assert!(db.get_message_audio("user1", id).unwrap().is_some());
+        db.delete_context("user1").unwrap();
+        assert!(db.get_message_audio("user1", id).unwrap().is_none());
     }
 
     #[test]

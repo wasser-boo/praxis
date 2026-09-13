@@ -233,6 +233,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/sm/:user_id", axum::routing::get(get_sm_info))
         .route("/cl/:user_id", axum::routing::get(get_sm_info)) // legacy route alias
         .route("/chat/send", axum::routing::post(chat_query))
+        .route("/chat/audio/:user_id/:message_id", axum::routing::get(get_chat_audio))
         .route("/context/exec", axum::routing::post(context_exec))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -538,10 +539,10 @@ async fn get_messages(
         Ok((messages, total_tokens)) => {
             let msgs: Vec<serde_json::Value> = messages
                 .iter()
-                .enumerate()
-                .map(|(idx, m)| {
+                .map(|m| {
                     let mut val = serde_json::json!({
-                        "id": idx,
+                        "id": m.id,
+                        "audio_mime": m.audio_mime,
                         "role": m.role,
                         "content": m.content,
                         "tool_call_id": m.tool_call_id,
@@ -573,6 +574,20 @@ async fn get_messages(
         }
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+/// Authenticated, on-demand replay. Never embed credentials or audio blobs in history.
+async fn get_chat_audio(
+    State(state): State<Arc<DashboardState>>,
+    Path((user_id, message_id)): Path<(String, i64)>,
+) -> Result<axum::response::Response, StatusCode> {
+    let (mime, audio) = state.db.get_message_audio(&user_id, message_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(([
+        (axum::http::header::CONTENT_TYPE, mime),
+        (axum::http::header::CACHE_CONTROL, "private, no-store".to_string()),
+    ], audio).into_response())
 }
 
 async fn clear_messages(
@@ -2333,6 +2348,10 @@ async fn handle_vnc_proxy(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "audio_tests.rs"]
+mod audio_tests;
 
 #[cfg(test)]
 mod dashboard_tests {

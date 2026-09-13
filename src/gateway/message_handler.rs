@@ -323,22 +323,27 @@ pub(crate) async fn handle_message_inner(
 
     let reply = response.content.unwrap_or_default();
 
-    state.db.add_message(
+    let message_id = state.db.add_message(
         user_id,
         &crate::db::messages::Message::assistant(reply.clone()),
     )?;
+    crate::dashboard::stream::assistant_saved(user_id, message_id, &reply);
 
     let mut updated_ctx = state.db.load_context(user_id)?;
     state.db.increment_turn(&mut updated_ctx);
     state.db.save_context(&updated_ctx)?;
 
-    if updated_ctx.settings.use_tts {
+    if updated_ctx.settings.use_tts
+        || channel_id.is_some_and(|ch| ch.starts_with("voice:"))
+        || (channel_id == Some("web") && updated_ctx.settings.web_chat_tts)
+    {
         spawn_tts(
             reply.clone(),
             &updated_ctx.settings,
             &state.secrets,
             user_id,
             &state.db,
+            Some(message_id),
         );
     }
 
@@ -463,7 +468,7 @@ async fn handle_message_agent_loop(
             for mode in &feedback_modes {
                 match mode.as_str() {
                     "tts" => {
-                        spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid, &tts_db);
+                        spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid, &tts_db, None);
                         handled = true;
                     }
                     "dm" => {
@@ -492,7 +497,7 @@ async fn handle_message_agent_loop(
                 }
             }
             if !handled && tts_for_feedback {
-                spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid, &tts_db);
+                spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid, &tts_db, None);
             }
         }
     });
@@ -524,6 +529,7 @@ async fn handle_message_agent_loop(
             &state.secrets,
             user_id,
             &state.db,
+            result.response_message_id,
         );
     }
 
@@ -959,6 +965,7 @@ fn spawn_tts(
     secrets: &crate::db::secrets::Secrets,
     user_id: &str,
     db: &crate::db::Database,
+    message_id: Option<i64>,
 ) {
     // Tool-only turns, empty tag output and whitespace are not speech. Return
     // before spawning a task or constructing/contacting any TTS provider.
@@ -1164,33 +1171,57 @@ fn spawn_tts(
             let _ = tts::save_audio_file(&final_audio, folder.to_str().unwrap_or(path), "03_final");
         }
 
-        // Web chat speech: deliver the rendered audio to the dashboard stream as
-        // a base64 data URL so the web chat can play it (toggle: web_chat_tts).
-        // Discord voice users receive the audio through the voice pipeline.
-        if web_chat_tts {
-            use base64::Engine;
-            // The dashboard (main stream + TTS side channels) may still be
-            // connecting when the reply finishes; wait briefly for a receiver
-            // so the audio is not dropped as "no receivers" during startup or
-            // a reconnect.
-            crate::dashboard::stream::wait_for_subscriber(&user_id, 3000).await;
-            let data_url = format!(
-                "data:audio/mpeg;base64,{}",
-                base64::engine::general_purpose::STANDARD.encode(&final_audio)
-            );
-            crate::dashboard::stream::send(
-                &user_id,
-                "chat_tts",
-                &serde_json::json!({
-                    "audio": data_url,
-                    "mime": "audio/mpeg",
+        if final_audio.is_empty() {
+            tracing::warn!(user_id = %user_id, "TTS returned empty audio");
+            return;
+        }
+
+        // Persist first: SSE is only a notification, not the sole copy of the
+        // audio. History/reconnect can recover it even with zero subscribers.
+        let mime = tts_audio_mime(&final_audio);
+        let stored = match message_id {
+            Some(id) => match tts_db.save_message_audio(&user_id, id, mime, &final_audio) {
+                Ok(saved) => saved,
+                Err(e) => {
+                    tracing::warn!(user_id = %user_id, "Saving reply audio failed: {e}");
+                    false
+                }
+            },
+            None => false, // Transient feedback has no persisted reply row.
+        };
+        // Never resurrect a deleted reply (or a changed storage session) as an
+        // anonymous audio clip. Inline fallback is only for transient feedback.
+        if web_chat_tts && (stored || message_id.is_none())
+            && crate::dashboard::stream::has_subscriber(&user_id)
+        {
+            let payload = if stored {
+                serde_json::json!({ "message_id": message_id, "mime": mime })
+            } else {
+                use base64::Engine;
+                serde_json::json!({
+                    "audio": format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&final_audio)),
+                    "mime": mime,
                 })
-                .to_string(),
-            );
+            };
+            crate::dashboard::stream::send(&user_id, "chat_tts", &payload.to_string());
+        } else if stored {
+            tracing::info!(user_id = %user_id, message_id, "Reply audio saved for dashboard replay");
         }
 
         crate::event_channel::broadcast_voice_tts(&user_id, final_audio);
     });
+}
+
+fn tts_audio_mime(audio: &[u8]) -> &'static str {
+    if audio.starts_with(b"RIFF") && audio.get(8..12) == Some(b"WAVE") {
+        "audio/wav"
+    } else if audio.starts_with(b"OggS") {
+        "audio/ogg"
+    } else if audio.starts_with(b"fLaC") {
+        "audio/flac"
+    } else {
+        "audio/mpeg"
+    }
 }
 
 #[cfg(test)]
@@ -1204,6 +1235,10 @@ mod backend_dispatch_tests;
 #[cfg(test)]
 #[path = "message_tool_loop_tests.rs"]
 mod message_tool_loop_tests;
+
+#[cfg(test)]
+#[path = "message_audio_tests.rs"]
+mod message_audio_tests;
 
 #[cfg(test)]
 mod gateway_tests {

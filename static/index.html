@@ -110,16 +110,16 @@
                                     <div class="chat-timer-fill" id="chat-timer-fill"></div>
                                     <span class="chat-timer-text" id="chat-timer-text">30s</span>
                                 </div>
-                                <div id="chat-tts-indicator" class="chat-tts-indicator" style="display:none" onclick="chatTtsActive(false)" title="Praxis is speaking – click to stop">
-                                    🔊 Praxis is speaking… <span class="tts-stop-hint">■ stop</span>
-                                </div>
+                                <button type="button" id="chat-tts-indicator" class="chat-tts-indicator" style="display:none" onclick="chatTtsActive(false)" title="Audio stoppen">
+                                    🔊 Praxis spricht … ■ Stop
+                                </button>
                                 <div id="chat-options-box" class="chat-options" style="display:none"></div>
                                 <div id="chat-attachments-preview" class="chat-attachments" style="display:none"></div>
                                 <div class="chat-input-row">
                                     <button class="btn btn-sm btn-secondary chat-upload-btn" onclick="document.getElementById('chat-file-input').click()" title="Upload files">&#128206;</button>
                                     <input type="file" id="chat-file-input" multiple style="display:none" onchange="chatHandleFiles(this.files)">
                                     <button class="btn btn-sm btn-secondary" id="chat-mic-btn" onclick="chatToggleMic()" title="Speak to Praxis (speech-to-text)">&#127908;</button>
-                                    <button class="btn btn-sm btn-secondary" id="chat-tts-btn" onclick="chatToggleTts()" title="Read replies aloud (ElevenLabs TTS)" aria-pressed="false">&#128266;</button>
+                                    <button class="btn btn-sm btn-secondary" id="chat-tts-btn" onclick="chatToggleTts()" title="Read replies aloud (configured TTS provider)" aria-pressed="false">&#128266;</button>
                                     <div style="position:relative;flex:1">
                                         <textarea id="chat-input" class="chat-input" placeholder="Type a message... (try /clear, /start, /stop, /new, /status)" rows="3" onkeydown="chatKeyDown(event)" oninput="chatInput(event)"></textarea>
                                         <div id="slash-commands" class="slash-commands" style="display:none"></div>
@@ -206,6 +206,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=13"></script>
+    <script src="/static/app.js?v=14"></script>
+    <script src="/static/chat-audio.js?v=1"></script>
 </body>
 </html>

@@ -2,6 +2,8 @@ const API_BASE = '';
 let authToken = localStorage.getItem('praxis_token');
 let chatPollInterval = null;
 let chatEventSource = null;
+let chatStreamUserId = null;
+let chatTtsSideGeneration = 0;
 // TTS-only side channels: receive chat_tts events from ALL paired Discord
 // contexts so replies generated for Discord are also spoken in the dashboard
 // while another session is active. No chat content flows through them.
@@ -41,6 +43,12 @@ async function login(password) {
 }
 
 function logout() {
+    stopChatPolling();
+    stopChatStream();
+    chatTtsActive(false);
+    chatTtsOn = false;
+    chatTtsClips.clear();
+    chatPollGen++;
     authToken = null;
     localStorage.removeItem('praxis_token');
     showScreen('login-screen');
@@ -188,23 +196,26 @@ async function loadOverview() {
 }
 
 function quickStartAgent(userId) {
-    chatUserId = userId;
-    document.getElementById('chat-user-name').textContent = userId;
-    showTab('chat');
-    setTimeout(() => chatStartAgent(), 300);
+    switchChatSession(userId).then(() => {
+        if (chatUserId !== userId) return;
+        showTab('chat');
+        chatStartAgent();
+    });
 }
 
 // ═══ Chat Tab ════════════════════════════════════════════════════════════════════
 
 // Load the TTS switch state from the user's settings. Called on every
-// session load/switch — otherwise chatTtsOn stays false after a page reload
-// and chatPlayTts silently drops every incoming chat_tts event (audio sent
-// by the server but never played).
+// session load/switch so a persisted ON setting also enables autoplay after
+// a reload. Replay buttons work independently of this automatic-play switch.
 async function loadTtsSwitchState() {
+    const uid = chatUserId;
     try {
-        const res = await apiGet(`/api/contexts/${encodeURIComponent(chatUserId)}`);
-        const ctxData = await res.json();
-        const on = !!(ctxData && ctxData.settings && ctxData.settings.web_chat_tts);
+        const res = await apiGet(`/api/contexts/${encodeURIComponent(uid)}`);
+        const data = await res.json();
+        if (uid !== chatUserId) return;
+        const ctxData = data.context || data;
+        const on = !!ctxData.settings?.web_chat_tts;
         chatTtsOn = on;
         const btn = document.getElementById('chat-tts-btn');
         if (btn) {
@@ -237,8 +248,8 @@ async function initChatTab() {
     // Load existing chat history immediately on startup so the user sees
     // their previous conversation, not just an empty welcome banner.
     await loadChatHistory();
-    await loadChatStatus();
     await loadTtsSwitchState();
+    await loadChatStatus();
     // Always open the SSE stream so we can react to agent_start events even
     // before any user interaction in this session.
     startChatStream();
@@ -506,9 +517,11 @@ function chatKeyDown(e) {
 }
 
 async function loadChatUserInfo() {
+    const uid = chatUserId;
     try {
-        const res = await apiGet('/api/contexts/' + encodeURIComponent(chatUserId));
+        const res = await apiGet('/api/contexts/' + encodeURIComponent(uid));
         const data = await res.json();
+        if (uid !== chatUserId) return;
         if (data.context) {
             chatBotName = data.context.settings?.agent_name || 'Praxis';
             const ctxUsername = data.context.username;
@@ -528,7 +541,9 @@ async function loadChatUserInfo() {
 }
 
 async function loadChatStatus() {
-    const active = await checkAgentActive(chatUserId);
+    const uid = chatUserId;
+    const active = await checkAgentActive(uid);
+    if (uid !== chatUserId) return;
     updateAgentUI(active);
     await loadCLStatus();
     loadAvatar();
@@ -574,6 +589,8 @@ function loadAvatar() {
 
 async function chatStartAgent() {
     const uid = chatUserId;
+    if (chatTtsOn) chatTtsUnlock();
+    startChatStream();
     try {
         const beginRes = await apiFetch('/api/agent/begin', {
             method: 'POST',
@@ -583,19 +600,7 @@ async function chatStartAgent() {
         addChatMessage('system', `Agent started for ${uid}`);
         updateAgentUI(true);
         await loadCLStatus();
-        // Load the TTS switch state from the user's settings.
-        try {
-            const ctxRes = await apiFetch(`/api/contexts/${encodeURIComponent(uid)}`);
-            const ctxData = await ctxRes.json();
-            const on = !!(ctxData && ctxData.settings && ctxData.settings.web_chat_tts);
-            chatTtsOn = on;
-            const btn = document.getElementById('chat-tts-btn');
-            if (btn) {
-                btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-                btn.classList.toggle('tts-on', on);
-                btn.textContent = on ? '🔊' : '🔉';
-            }
-        } catch (_) { /* switch state stays default */ }
+        await loadTtsSwitchState();
     } catch (err) { addChatMessage('feedback', 'Failed to start: ' + err.message); }
 }
 
@@ -611,6 +616,10 @@ async function chatSendMessage() {
     const input = document.getElementById('chat-input');
     const msg = input.value.trim();
     if (!msg && chatAttachments.length === 0) return;
+    // The persisted TTS switch may already be on after a reload. Unlock the
+    // SAME player during Send/Enter, not only when toggling the switch.
+    if (chatTtsOn) chatTtsUnlock();
+    startChatStream();
     input.value = '';
     input.style.height = 'auto';
 
@@ -774,27 +783,35 @@ function showChatQuestion(questionId, text, suggestions) {
     addChatQuestionCard(questionId, text, suggestions);
 }
 function startChatPolling() {
-    stopChatPolling();
-    chatPollInterval = setInterval(pollChatMessages, 3000);
+    if (!chatPollInterval) chatPollInterval = setInterval(pollChatMessages, 3000);
     startChatStream();
 }
 
 function stopChatPolling() {
     if (chatPollInterval) { clearInterval(chatPollInterval); chatPollInterval = null; }
-    stopChatStream();
+    // Keep SSE alive while idle: TTS finishes AFTER agent_stop.
 }
 
 function startChatStream() {
-    stopChatStream();
     if (!chatUserId || !authToken) return;
-    const url = `/api/chat/stream/${encodeURIComponent(chatUserId)}?token=${encodeURIComponent(authToken)}`;
-    console.log('[SSE] connecting to', url);
+    if (chatEventSource && chatStreamUserId === chatUserId
+        && chatEventSource.readyState !== EventSource.CLOSED) return;
+    stopChatStream();
+    const uid = chatUserId;
+    chatStreamUserId = uid;
+    const url = `/api/chat/stream/${encodeURIComponent(uid)}?token=${encodeURIComponent(authToken)}`;
+    console.log('[SSE] connecting for user', uid);
     const es = new EventSource(url);
     let streamBuffer = '';
     let streamMsg = null;
+    let completedMsg = null;
 
     es.onopen = () => {
-        console.log('[SSE] connection opened for user', chatUserId);
+        if (chatEventSource !== es || chatUserId !== uid) return;
+        console.log('[SSE] connection opened for user', uid);
+        // Recover audio produced while the connection was down. History
+        // registration deduplicates this against live chat_tts notifications.
+        pollChatMessages();
     };
 
     es.addEventListener('typing', (e) => {
@@ -823,9 +840,22 @@ function startChatStream() {
             // The server wraps the payload as {event, data:<json-string>};
             // the audio URL lives in d.data.audio, not d.audio.
             const inner = (typeof d.data === 'string') ? JSON.parse(d.data) : (d.data || d);
-            if (inner.audio) chatPlayTts(inner.audio);
-            else if (d.audio) chatPlayTts(d.audio); // tolerate unwrapped payloads
+            chatReceiveTts(inner, uid);
         } catch (err) { console.error('[SSE chat_tts error]', err); }
+    });
+
+    es.addEventListener('assistant_saved', (e) => {
+        try {
+            const d = JSON.parse(e.data);
+            const m = typeof d.data === 'string' ? JSON.parse(d.data) : (d.data || d);
+            if (completedMsg) {
+                completedMsg.dataset.messageId = String(m.id);
+                completedMsg.chatText = m.content;
+                completedMsg.querySelector('.msg-content').innerHTML = renderMarkdown(m.content);
+                completedMsg = null;
+            }
+            renderChatMessage(m);
+        } catch (err) { console.error('[SSE assistant_saved error]', err); }
     });
 
     es.addEventListener('feedback', (e) => {
@@ -895,11 +925,13 @@ function startChatStream() {
                         contentEl.classList.remove('stream-live');
                         contentEl.innerHTML = renderMarkdown(d.data);
                     }
+                    streamMsg.chatText = d.data;
+                    completedMsg = streamMsg;
                     streamMsg = null;
                     streamBuffer = '';
                 } else {
                     console.log('[SSE] no stream message — adding as regular assistant message');
-                    addChatMessage('assistant', d.data);
+                    completedMsg = addChatMessage('assistant', d.data);
                 }
                 stopChatTimer();
                 autoScrollChat();
@@ -975,10 +1007,10 @@ function startChatStream() {
             addChatMessage('system', `${icon} Delegation ${inner.delegation_id} ${inner.status === 'done' ? 'finished' : 'failed'}\n${result}`);
         } catch (err) { console.error('[SSE delegation_update error]', err); }
     });
-    es.onerror = (err) => {
-        console.error('[SSE] connection error (EventSource readyState=' + es.readyState + '), reconnecting in 3s');
-        stopChatStream();
-        setTimeout(startChatStream, 3000);
+    es.onerror = () => {
+        // EventSource reconnects itself. Closing/recreating it here used to
+        // tear down the independent TTS channels and interrupt playback too.
+        console.warn('[SSE] connection interrupted; waiting for automatic reconnect');
     };
     chatEventSource = es;
     console.log('[SSE] EventSource created, readyState:', es.readyState);
@@ -989,18 +1021,19 @@ function stopChatStream() {
         chatEventSource.close();
         chatEventSource = null;
     }
+    chatStreamUserId = null;
+    chatTtsSideGeneration++;
     for (const es of chatTtsSideSources) es.close();
     chatTtsSideSources = [];
     chatTtsSideUserIds = [];
-    // A broken/reconnecting SSE can never deliver chat_tts audio; hide the
-    // speaking chip so it cannot get stuck in "speaking" state.
-    chatTtsActive(false);
 }
 
 /// Open the TTS-only side channel for the paired Discord context (if any).
 /// The main chat stream stays untouched; this connection only feeds
 /// chatPlayTts so Discord-generated replies are spoken in the dashboard too.
 async function startTtsSideChannel() {
+    const generation = ++chatTtsSideGeneration;
+    const uid = chatUserId;
     // Close previous side channels when switching sessions.
     for (const es of chatTtsSideSources) es.close();
     chatTtsSideSources = [];
@@ -1012,11 +1045,12 @@ async function startTtsSideChannel() {
         if (!res || !res.ok) return;
         pairings = (await res.json()).pairings || [];
     } catch (_) { return; }
+    if (generation !== chatTtsSideGeneration || uid !== chatUserId || !authToken) return;
     // Subscribe to ALL pairings except the active session (the active one
     // already receives chat_tts via the main stream). The side channel is
     // TTS-only, so this cannot duplicate chat content — it just makes sure
     // replies generated for ANY Discord pairing are spoken in the dashboard.
-    const targets = pairings.map(p => p.user_id).filter(id => id !== chatUserId);
+    const targets = [...new Set(pairings.map(p => p.user_id).filter(id => id && id !== uid))];
     if (targets.length === 0) return;
     for (const pairedUserId of targets) {
         chatTtsSideUserIds.push(pairedUserId);
@@ -1028,22 +1062,11 @@ async function startTtsSideChannel() {
                 const d = JSON.parse(e.data);
                 // Same envelope as the main stream: audio lives in d.data.audio.
                 const inner = (typeof d.data === 'string') ? JSON.parse(d.data) : (d.data || d);
-                if (inner.audio) {
-                    console.log('[SSE-TTS] chat_tts from side channel', pairedUserId);
-                    chatPlayTts(inner.audio);
-                } else if (d.audio) {
-                    chatPlayTts(d.audio);
-                }
+                if (generation === chatTtsSideGeneration) chatReceiveTts(inner, pairedUserId);
             } catch (err) { console.error('[SSE-TTS chat_tts error]', err); }
         });
         es.onerror = () => {
-            console.warn('[SSE-TTS] side channel error for', pairedUserId, '; retrying in 5s');
-            es.close();
-            const idx = chatTtsSideSources.indexOf(es);
-            if (idx >= 0) chatTtsSideSources.splice(idx, 1);
-            setTimeout(() => {
-                if (chatTtsSideUserIds.includes(pairedUserId)) startTtsSideChannel();
-            }, 5000);
+            console.warn('[SSE-TTS] side channel interrupted for', pairedUserId, '; reconnecting automatically');
         };
         chatTtsSideSources.push(es);
     }
@@ -1052,16 +1075,15 @@ async function startTtsSideChannel() {
 async function pollChatMessages() {
     const myGen = chatPollGen;
     try {
-        const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}`);
-        if (myGen !== chatPollGen) return; // stale response for a different session
+        const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}?chat_only=1`);
         const data = await res.json();
-        if (data.messages && data.messages.length > 0) {
-            for (const m of data.messages) {
-                const id = m.role + ':' + (m.content || '').slice(0, 80);
-                if (!chatSeenIds.has(id)) {
-                    chatSeenIds.add(id);
-                    renderChatMessage(m);
-                }
+        if (myGen !== chatPollGen) return; // also guard the async JSON read
+        for (const m of data.messages || []) {
+            const id = m.role + ':' + (m.content || '').slice(0, 80);
+            // Revisit known replies too: audio can become ready after the text.
+            if (m.role === 'assistant' || !chatSeenIds.has(id)) {
+                chatSeenIds.add(id);
+                renderChatMessage(m, true);
             }
         }
         await loadCLStatus();
@@ -1080,13 +1102,14 @@ async function loadChatHistory() {
     chatSeenIds.clear();
 
     const mySessionId = chatSessionId;
+    const myGen = chatPollGen;
     console.log('[HISTORY] loading history for session', chatSessionId, 'user_id', chatUserId);
     try {
         // chat_only=1: hide rows up to the /clear marker. The Messages tab
         // keeps the full history; a chat clear never deletes anything.
         const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}?chat_only=1`);
-        if (chatSessionId !== mySessionId) return; // switched away while loading
         const data = await res.json();
+        if (chatSessionId !== mySessionId || chatPollGen !== myGen) return;
         const msgs = data.messages || [];
         console.log('[HISTORY] got', msgs.length, 'messages');
         const welcome = container && container.querySelector('.chat-welcome');
@@ -1106,7 +1129,7 @@ async function loadChatHistory() {
     } catch (err) { console.error('[HISTORY] load error:', err); }
 }
 
-function renderChatMessage(m) {
+function renderChatMessage(m, autoplayAudio = false) {
     // Discord-mirror rows from history: render with the same badge as live
     // discord_message SSE events so the chat looks identical after a reload.
     if ((m.role === 'discord_user' || m.role === 'discord_bot') && m.discord_meta) {
@@ -1130,11 +1153,22 @@ function renderChatMessage(m) {
                 const suggLines = lines.filter(l => l.match(/^\d+\s/));
                 const suggestions = suggLines.map(l => l.replace(/^\d+\s/, ''));
                 const questionText = lines.slice(0, lines.indexOf(suggLines[0] || '')).join('\n');
-                if (suggestions.length > 0) addChatQuestionCard(qid, questionText, suggestions);
+                if (suggestions.length > 0 && !document.getElementById('qcard-' + qid)) addChatQuestionCard(qid, questionText, suggestions);
                 return;
             }
         }
-        addChatMessage('assistant', m.content);
+        const replies = [...document.querySelectorAll('#chat-messages .chat-msg.assistant')];
+        // Streamed bubbles don't have a DB id until assistant_saved arrives.
+        // Match the full text only for such provisional identities, never the
+        // old 80-character dedup key (two replies can share the same prefix).
+        let div = m.id != null && replies.find(el => el.dataset.messageId === String(m.id));
+        if (!div) div = replies.find(el => !el.dataset.messageId && el.chatText === m.content);
+        if (!div) div = addChatMessage('assistant', m.content);
+        if (m.id != null) {
+            div.dataset.messageId = String(m.id);
+            if (m.audio_mime) chatReceiveTts({ message_id: m.id, mime: m.audio_mime }, chatUserId, autoplayAudio);
+            chatAttachTtsButton(div, chatTtsClips.get(chatTtsKey(chatUserId, m.id)));
+        }
         stopChatTimer();
     }
     if (m.role === 'user' && m.content) {
@@ -1222,8 +1256,10 @@ function addChatMessage(type, content, extra = null) {
         div.textContent = content;
     }
 
+    if (type === 'assistant') div.chatText = content;
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
+    return div;
 }
 
 /// Render a visual banner showing that the agent loop has started or stopped.
@@ -1478,7 +1514,10 @@ async function switchChatSession(id) {
     document.body.classList.remove('chat-conversations-open');
     console.log('[SESSION] switching to session:', id, '(from', chatUserId, ')');
     stopChatPolling();
-    chatPollGen++;
+    stopChatStream();
+    chatTtsActive(false);
+    chatTtsOn = false;
+    const generation = ++chatPollGen;
     chatUserId = id;
     chatSessionId = id;
     localStorage.setItem('praxis_chat_active_session', id);
@@ -1491,9 +1530,13 @@ async function switchChatSession(id) {
     }
     renderChatSessionList();
     await loadChatUserInfo();
+    if (generation !== chatPollGen) return;
     await loadChatHistory();
-    await loadChatStatus();
+    if (generation !== chatPollGen) return;
     await loadTtsSwitchState();
+    if (generation !== chatPollGen) return;
+    await loadChatStatus();
+    if (generation !== chatPollGen) return;
     // Always open the SSE stream for the active session so agent_start /
     // streaming-token events arrive even before user interaction.
     startChatStream();
@@ -2814,75 +2857,4 @@ async function chatToggleMic() {
   }
 }
 
-// Browser autoplay policy: audio started outside a user gesture is blocked.
-// Unlock once per session on the first real user interaction (clicking the
-// TTS button) by playing a tiny silent clip; later SSE-triggered playback
-// is then allowed.
-let chatTtsUnlocked = false;
-function chatTtsUnlock() {
-  if (chatTtsUnlocked) return;
-  try {
-    const a = new Audio('data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjYwLjE2LjEwMQAAAAAAAAAAAAAAAAAA//uwxAAAACYzIEQAAACAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAEAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAACAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAAIAAAAAAAAAAAAAAAAAAAAAAAD/+7DEAAA-');
-    a.volume = 0;
-    const p = a.play();
-    if (p) p.then(() => { chatTtsUnlocked = true; console.log('[TTS] audio unlocked'); }).catch(() => {});
-  } catch (_) { /* unlock is best-effort */ }
-}
-
-async function chatToggleTts() {
-  const btn = document.getElementById('chat-tts-btn');
-  chatTtsOn = !chatTtsOn;
-  btn.setAttribute('aria-pressed', chatTtsOn ? 'true' : 'false');
-  btn.classList.toggle('tts-on', chatTtsOn);
-  btn.textContent = chatTtsOn ? '🔊' : '🔉';
-  if (chatTtsOn) chatTtsUnlock(); // user gesture: unlock autoplay for later SSE playback
-  try {
-    await apiFetch(`/api/contexts/${encodeURIComponent(chatUserId)}`, {
-      method: 'PUT',
-      body: JSON.stringify({ settings: { web_chat_tts: chatTtsOn } })
-    });
-    addChatMessage('system', chatTtsOn ? '🔊 Replies will be read aloud.' : '🔉 TTS off.');
-  } catch (err) {
-    addChatMessage('feedback', 'Could not save TTS setting: ' + err.message);
-  }
-}
-
-function chatPlayTts(dataUrl) {
-  if (!chatTtsOn) {
-    console.warn('[TTS] chat_tts received but TTS switch is OFF — not playing');
-    return; // respect the switch
-  }
-  console.log('[TTS] playing audio,', Math.round(dataUrl.length / 1024), 'KB payload');
-  if (chatTtsAudio) { chatTtsAudio.pause(); }
-  chatTtsAudio = new Audio(dataUrl);
-  chatTtsAudio.onended = () => chatTtsActive(false);
-  chatTtsAudio.onerror = (e) => { console.error('[TTS] audio error', e); chatTtsActive(false); };
-  chatTtsActive(true);
-  chatTtsAudio.play().catch((err) => {
-    // Autoplay policy blocked playback (no user gesture yet). Show a
-    // click-to-play state on the indicator instead of failing silently.
-    console.warn('[TTS] play blocked by autoplay policy', err);
-    const chip = document.getElementById('chat-tts-indicator');
-    if (chip) {
-      chip.style.display = '';
-      chip.innerHTML = '🔊 Voice ready – <span class="tts-stop-hint">▶ click to play</span>';
-      chip.onclick = () => {
-        chatTtsUnlock();
-        chip.innerHTML = '🔊 Praxis is speaking… <span class="tts-stop-hint">■ stop</span>';
-        chip.onclick = () => chatTtsActive(false);
-        chatTtsAudio.play().catch((e2) => { console.error('[TTS] manual play failed', e2); chatTtsActive(false); });
-      };
-    }
-  });
-}
-
-// Visible "Praxis is speaking" indicator in the chat header. Clicking it
-// stops playback immediately.
-function chatTtsActive(on) {
-  const chip = document.getElementById('chat-tts-indicator');
-  if (!chip) return;
-  chip.style.display = on ? '' : 'none';
-  const btn = document.getElementById('chat-tts-btn');
-  if (btn) btn.classList.toggle('tts-speaking', on);
-  if (!on && chatTtsAudio) { try { chatTtsAudio.pause(); } catch (_) {} chatTtsAudio = null; }
-}
+// Reply playback and replay controls live in chat-audio.js.

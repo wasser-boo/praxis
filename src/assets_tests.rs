@@ -36,6 +36,7 @@ fn onboarding_assets_install_every_bundled_file_and_executable() {
         "templates/shared/runtime.poml",
         "static/logo.png",
         "static/favicon.ico",
+        "static/chat-audio.js",
         "skills/poml_templates/reference.md",
         "skills/mnemodim-palace/references/MNEMODIM_IMPORT_GUIDE.md",
     ] {
@@ -144,6 +145,46 @@ fn onboarding_assets_dashboard_update_is_explicit_and_backed_up() {
             .as_slice(),
         include_bytes!("../static/app.js").as_slice()
     );
+}
+
+#[test]
+fn onboarding_assets_dashboard_audio_upgrade_is_complete_and_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    install(dir.path(), false).unwrap();
+    // Simulate a pre-audio-player installation with an existing dashboard.
+    std::fs::remove_file(dir.path().join("static/chat-audio.js")).unwrap();
+    let old_dashboard = ["static/index.html", "static/style.css", "static/app.js"];
+    for name in old_dashboard {
+        std::fs::write(dir.path().join(name), "previous dashboard").unwrap();
+    }
+    std::fs::create_dir_all(dir.path().join("data")).unwrap();
+    let protected = [".env", "secrets.enc2", ".secrets_salt", "data/praxis.db", "templates/standard.poml"];
+    for name in protected {
+        std::fs::write(dir.path().join(name), "synthetic user data; preserve exactly").unwrap();
+    }
+
+    let report = install(dir.path(), true).unwrap();
+    assert_eq!(report.created, vec!["static/chat-audio.js"]);
+    assert_eq!(report.updated, old_dashboard);
+    for name in old_dashboard {
+        assert_eq!(
+            std::fs::read_to_string(report.backup_dir.as_ref().unwrap().join(name)).unwrap(),
+            "previous dashboard"
+        );
+    }
+    for name in protected {
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(name)).unwrap(),
+            "synthetic user data; preserve exactly"
+        );
+    }
+    for asset in BUNDLED_ASSETS.iter().filter(|asset| asset.path.starts_with("static/")) {
+        assert_eq!(std::fs::read(dir.path().join(asset.path)).unwrap(), asset.bytes);
+    }
+    assert!(std::fs::read_to_string(dir.path().join("static/index.html")).unwrap().contains("/static/chat-audio.js?"));
+    let again = install(dir.path(), true).unwrap();
+    assert!(again.created.is_empty() && again.updated.is_empty());
+    assert!(again.backup_dir.is_none());
 }
 
 #[cfg(unix)]

@@ -256,10 +256,7 @@ pub async fn compact_history(
             })
             .collect();
 
-        let _ = state.db.clear_messages(user_id);
-        for msg in &filtered {
-            let _ = state.db.add_message(user_id, msg);
-        }
+        state.db.retain_chat_messages(user_id, &filtered)?;
         tracing::info!(user_id = %user_id, kept = filtered.len(), "Manual compaction: kept recent messages, deleted older ones");
     }
 

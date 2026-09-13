@@ -43,6 +43,7 @@ async fn unregister_active_loop(user_id: &str) {
 #[derive(Debug)]
 pub struct AgentLoopResult {
     pub response: String,
+    pub response_message_id: Option<i64>,
     pub turns_used: i32,
     pub tag_execution: Option<TagExecution>,
     pub completed: bool,
@@ -128,6 +129,11 @@ pub(crate) async fn run_agent_loop_in_task(
     let result = run_agent_loop_inner(state, user_id, user_message_input, config, feedback_tx).await;
     // Strict rendering/DB errors must not leave a ghost active loop behind.
     unregister_active_loop(user_id).await;
+    if let Ok(reply) = &result {
+        if let Some(id) = reply.response_message_id {
+            crate::dashboard::stream::assistant_saved(user_id, id, &reply.response);
+        }
+    }
     crate::dashboard::stream::send(user_id, "agent_stop", "{}");
     result
 }
@@ -145,6 +151,7 @@ async fn run_agent_loop_inner(
     let mut last_tag_execution = None;
     let mut user_message = user_message_input.to_string();
     let mut final_response: Option<String> = None;
+    let mut final_message_id = None;
     let mut turn_limit_reached = false;
     let mut current_tool_ids = std::collections::HashSet::new();
 
@@ -843,17 +850,17 @@ async fn run_agent_loop_inner(
 
             if !tag_result.cleaned_response.trim().is_empty() {
                 final_response = Some(tag_result.cleaned_response.clone());
-                state.db.add_message(
+                final_message_id = Some(state.db.add_message(
                     user_id,
                     &crate::db::messages::Message::assistant(tag_result.cleaned_response.clone()),
-                )?;
+                )?);
             }
         } else if !response_text.trim().is_empty() {
             final_response = Some(response_text.clone());
-            state.db.add_message(
+            final_message_id = Some(state.db.add_message(
                 user_id,
                 &crate::db::messages::Message::assistant(response_text.clone()),
-            )?;
+            )?);
         }
 
         if advanced {
@@ -931,10 +938,7 @@ async fn run_agent_loop_inner(
                             })
                             .collect();
 
-                        let _ = state.db.clear_messages(user_id);
-                        for msg in &filtered {
-                            let _ = state.db.add_message(user_id, msg);
-                        }
+                        state.db.retain_chat_messages(user_id, &filtered)?;
                         tracing::info!(user_id = %user_id, kept = filtered.len(), "Compaction: kept recent messages, deleted older ones");
                     }
                 }
@@ -993,6 +997,7 @@ async fn run_agent_loop_inner(
 
     Ok(AgentLoopResult {
         response: final_response,
+        response_message_id: final_message_id,
         turns_used: turn,
         tag_execution: last_tag_execution,
         completed,
@@ -1886,6 +1891,7 @@ mod agent_tests {
     fn test_agent_loop_result_debug() {
         let result = AgentLoopResult {
             response: "test".to_string(),
+            response_message_id: None,
             turns_used: 1,
             tag_execution: None,
             completed: false,

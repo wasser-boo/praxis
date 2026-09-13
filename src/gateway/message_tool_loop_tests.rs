@@ -552,6 +552,7 @@ fn tool_chain_empty_tts_returns_before_spawning_any_task() {
             &Default::default(),
             "no-tts-for-empty-text",
             &db,
+            None,
         );
     }
 }

@@ -94,6 +94,7 @@ const BUNDLED_ASSETS: &[Asset] = &[
     asset!("static/index.html"),
     asset!("static/style.css"),
     asset!("static/app.js"),
+    asset!("static/chat-audio.js"),
     asset!("static/logo.svg"),
     asset!("static/logo.png"),
     asset!("static/favicon.ico"),

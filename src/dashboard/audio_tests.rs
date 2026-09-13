@@ -1,0 +1,45 @@
+use super::*;
+use crate::db::messages::Message;
+
+#[tokio::test]
+async fn audio_endpoint_requires_auth_and_serves_only_the_requested_sessions_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::db::Database::new(dir.path()).unwrap();
+    db.save_context(&db.load_context("alice").unwrap()).unwrap();
+    let id = db.add_message("alice", &Message::assistant("reply".into())).unwrap();
+    db.save_message_audio("alice", id, "audio/wav", b"fixture-wav").unwrap();
+    let state = Arc::new(DashboardState {
+        db: db.clone(),
+        gateway_api_key: "synthetic-audio-test-key".into(),
+        admin_password: "unused".into(),
+    });
+    let app = Router::new()
+        .route("/api/chat/audio/:user_id/:message_id", axum::routing::get(get_chat_audio))
+        .route("/api/messages/:user_id", axum::routing::get(get_messages))
+        .layer(middleware::from_fn_with_state(state.clone(), dashboard_auth_middleware))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+    let url = format!("{base}/api/chat/audio/alice/{id}");
+    assert_eq!(client.get(&url).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(client.get(&url).bearer_auth("wrong").send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    let auth = "synthetic-audio-test-key";
+    let response = client.get(&url).bearer_auth(auth).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "audio/wav");
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"fixture-wav");
+    for path in [format!("/api/chat/audio/bob/{id}"), "/api/chat/audio/alice/9999".into()] {
+        assert_eq!(client.get(format!("{base}{path}")).bearer_auth(auth).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    }
+    let history: serde_json::Value = client.get(format!("{base}/api/messages/alice"))
+        .bearer_auth(auth).send().await.unwrap().json().await.unwrap();
+    assert_eq!(history["messages"][0]["id"], id);
+    assert_eq!(history["messages"][0]["audio_mime"], "audio/wav");
+    assert!(!history.to_string().contains("fixture-wav"));
+    db.clear_messages("alice").unwrap();
+    assert_eq!(client.get(&url).bearer_auth(auth).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    server.abort();
+}

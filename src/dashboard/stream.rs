@@ -76,6 +76,13 @@ pub fn remove(user_id: &str) {
     tracing::info!(user_id = %user_id, "[STREAM] channel removed");
 }
 
+/// Bind a streamed reply to its durable DB identity before delayed TTS arrives.
+pub fn assistant_saved(user_id: &str, id: i64, content: &str) {
+    send(user_id, "assistant_saved", &serde_json::json!({
+        "id": id, "role": "assistant", "content": content,
+    }).to_string());
+}
+
 pub fn send(user_id: &str, event: &str, data: &str) {
     // Build a UTF-8-safe preview without slicing on byte boundaries
     // (slicing a &str at a non-char-boundary panics).
