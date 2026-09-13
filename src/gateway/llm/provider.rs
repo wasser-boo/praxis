@@ -13,6 +13,26 @@ pub struct ChatRequest {
     pub vision_provider: Option<String>,
     #[serde(skip)]
     pub vision_model: Option<String>,
+    /// Extended-reasoning toggle: None = provider default, Some("off") disables,
+    /// Some("on") enables where the model supports it.
+    #[serde(skip)]
+    pub thinking: Option<ThinkingMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThinkingMode {
+    On,
+    Off,
+}
+
+impl ThinkingMode {
+    pub fn from_setting(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "on" | "true" | "1" => Some(Self::On),
+            "off" | "false" | "0" => Some(Self::Off),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

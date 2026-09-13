@@ -25,6 +25,9 @@ pub struct Skill {
     /// Only a human context selection may activate this skill, never use_skill.
     #[serde(default)]
     pub user_only: bool,
+    /// Optional semantic version from the manifest, shown in /skill listings.
+    #[serde(default)]
+    pub version: Option<String>,
     #[serde(skip)]
     pub folder: String,
 }
@@ -54,6 +57,11 @@ impl Skill {
         anyhow::ensure!(!skill.description.trim().is_empty() && skill.description.chars().count() <= 1024, "Skill description must contain 1..1024 characters");
         anyhow::ensure!(skill.required_parameters.len() <= 16, "At most 16 required skill parameters");
         for key in &skill.required_parameters { validate_name(key)?; }
+        if let Some(version) = &skill.version {
+            let v = version.trim();
+            anyhow::ensure!(!v.is_empty() && v.chars().count() <= 32, "Skill version must contain 1..32 characters");
+            skill.version = Some(v.to_string());
+        }
         skill.folder = checked.to_string_lossy().to_string();
         Ok(skill)
     }

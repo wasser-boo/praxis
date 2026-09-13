@@ -253,6 +253,31 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
     background: rgba(0,217,255,0.06);
     border: 1px solid rgba(0,217,255,0.2);
 }
+/* Discord mirror messages: distinct blurple tint + origin badge. */
+.chat-msg.discord .msg-content {
+    background: rgba(88,101,242,0.07);
+    border: 1px solid rgba(88,101,242,0.28);
+    border-top-left-radius: 4px;
+}
+.chat-msg.discord.discord-bot .msg-content {
+    background: linear-gradient(135deg, rgba(88,101,242,0.10), rgba(108,99,255,0.05));
+}
+.discord-badge {
+    font-size: 1.15rem; line-height: 1;
+    filter: grayscale(0.15);
+}
+.discord-meta {
+    display: flex; align-items: center; gap: 0.5rem;
+    margin-bottom: 0.3rem;
+    font-size: 0.68rem; color: var(--text-secondary);
+}
+.discord-channel {
+    font-weight: 700; color: #7289da;
+    background: rgba(88,101,242,0.12);
+    border-radius: 4px; padding: 0.05rem 0.4rem;
+}
+.discord-time { opacity: 0.75; }
+.discord-text { word-wrap: break-word; overflow-wrap: anywhere; }
 .chat-msg.tool .tool-name {
     font-weight: 700; color: var(--accent-cyan); font-size: 0.85rem;
     text-transform: uppercase; letter-spacing: 0.04em;

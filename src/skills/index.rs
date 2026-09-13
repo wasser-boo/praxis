@@ -20,6 +20,7 @@ pub struct SkillSummary {
     pub required_parameters: Vec<String>,
     pub skill_hidden: bool,
     pub user_only: bool,
+    pub version: Option<String>,
 }
 
 impl From<Skill> for SkillSummary {
@@ -30,6 +31,7 @@ impl From<Skill> for SkillSummary {
             required_parameters: skill.required_parameters,
             skill_hidden: skill.skill_hidden,
             user_only: skill.user_only,
+            version: skill.version,
         }
     }
 }

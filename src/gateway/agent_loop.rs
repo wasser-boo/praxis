@@ -1342,15 +1342,22 @@ async fn execute_tool_call(
             .unwrap_or_else(|e| format!("Error: {}", e))
         }
         "discord_upload_file" => {
+            let settings_upload_ch = db
+                .load_context(user_id)
+                .ok()
+                .and_then(|c| c.settings.upload_channel_id.clone())
+                .filter(|s| !s.is_empty());
             let fallback_ch = ctx_data
                 .as_ref()
                 .and_then(|c| c.get("channel_id"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
+                .map(|s| s.to_string())
+                .or(settings_upload_ch)
+                .unwrap_or_default();
             let channel_id = args["channel_id"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(fallback_ch);
+                .unwrap_or(&fallback_ch);
             let filename = args["filename"].as_str().unwrap_or("file");
             let base64_content = args["base64_content"].as_str().unwrap_or("");
             // Decode base64 to temp file, then upload
@@ -1384,15 +1391,22 @@ async fn execute_tool_call(
             }
         }
         "discord_send_message" => {
+            let settings_upload_ch = db
+                .load_context(user_id)
+                .ok()
+                .and_then(|c| c.settings.upload_channel_id.clone())
+                .filter(|s| !s.is_empty());
             let fallback_ch = ctx_data
                 .as_ref()
                 .and_then(|c| c.get("channel_id"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
+                .map(|s| s.to_string())
+                .or(settings_upload_ch)
+                .unwrap_or_default();
             let channel_id = args["channel_id"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(fallback_ch);
+                .unwrap_or(&fallback_ch);
             let message = args["message"].as_str().unwrap_or("");
             match crate::tools::discord_send_message::send_message(channel_id, message).await {
                 Ok(_) => "Message sent".to_string(),

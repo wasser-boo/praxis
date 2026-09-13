@@ -181,6 +181,10 @@ pub struct ContextSettings {
     pub current_template: String,
     #[serde(default)]
     pub tags_enabled: bool,
+    /// Toggle extended-reasoning output for the active model, per provider.
+    /// "auto" (default) leaves provider defaults untouched.
+    #[serde(default)]
+    pub thinking_mode: String,
     #[serde(default)]
     pub llm_turn: i32,
     #[serde(default)]
@@ -215,6 +219,10 @@ pub struct ContextSettings {
     pub feedback_mode: Vec<String>,
     #[serde(default)]
     pub feedback_channel_id: Option<String>,
+    /// Default Discord channel for uploads/messages when the tool call omits
+    /// channel_id and no originating channel is known.
+    #[serde(default)]
+    pub upload_channel_id: Option<String>,
     #[serde(default = "default_feedback_template")]
     pub feedback_template: String,
     #[serde(default)]
@@ -347,6 +355,7 @@ impl Default for ContextSettings {
             active_state: None,
             current_template: String::new(),
             tags_enabled: false,
+            thinking_mode: "auto".to_string(),
             llm_turn: 0,
             compaction_enabled: false,
             compaction_summary: String::new(),
@@ -364,6 +373,7 @@ impl Default for ContextSettings {
             voice_auto_pause_enabled: false,
             feedback_mode: Vec::new(),
             feedback_channel_id: None,
+            upload_channel_id: None,
             feedback_template: default_feedback_template(),
             message_on_toolcalling: false,
             vm_screenshot_enabled: true,

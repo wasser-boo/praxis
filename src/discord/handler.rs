@@ -207,6 +207,28 @@ impl EventHandler for DiscordHandler {
             }
         };
 
+        // Mirror the Discord message into the dashboard chat so the user sees
+        // Discord traffic next to dashboard-originated messages.
+        {
+            let author_name = msg.author.name.clone();
+            let channel_id_str = msg.channel_id.to_string();
+            let content_clone = msg.content.clone();
+            let uid = pairing.user_id.clone();
+            let is_dm = msg.guild_id.is_none();
+            crate::dashboard::stream::send(
+                &uid,
+                "discord_message",
+                &serde_json::json!({
+                    "direction": "user",
+                    "channel_id": channel_id_str,
+                    "channel_kind": if is_dm { "dm" } else { "guild" },
+                    "author": author_name,
+                    "content": content_clone,
+                })
+                .to_string(),
+            );
+        }
+
         // Handle file attachments - download to appropriate folder
         let mut attachment_context = String::new();
         if !msg.attachments.is_empty() {
@@ -330,6 +352,8 @@ impl EventHandler for DiscordHandler {
 
         let mut thinking_msg_ids: Vec<serenity::model::id::MessageId> = Vec::new();
 
+        let mirror_uid = pairing.user_id.clone();
+        let mirror_channel = msg.channel_id.to_string();
         loop {
             match ws_client.recv().await {
                 Ok(IncomingMessage::Response { content, .. }) => {
@@ -343,6 +367,18 @@ impl EventHandler for DiscordHandler {
                         {
                             tracing::error!("Failed to send response: {}", e);
                         }
+                        // Mirror the bot's Discord reply into the dashboard chat.
+                        crate::dashboard::stream::send(
+                            &mirror_uid,
+                            "discord_message",
+                            &serde_json::json!({
+                                "direction": "bot",
+                                "channel_id": mirror_channel,
+                                "author": "bot",
+                                "content": trimmed,
+                            })
+                            .to_string(),
+                        );
                     } else {
                         tracing::warn!("LLM returned empty response, skipping send");
                     }
@@ -352,6 +388,8 @@ impl EventHandler for DiscordHandler {
                     match msg.channel_id.say(&ctx.http, &content).await {
                         Ok(feedback_msg) => {
                             thinking_msg_ids.push(feedback_msg.id);
+                            // Interim status ("Thinking...") is visible in Discord
+                            // only; the dashboard already streams its own feedback.
                         }
                         Err(e) => {
                             tracing::error!("Failed to send feedback: {}", e);
@@ -1310,11 +1348,17 @@ pub fn split_message(content: &str, max_len: usize) -> Vec<String> {
     let mut remaining = content;
 
     while remaining.len() > max_len {
+        // The window must end on a char boundary: `max_len` is a byte count and
+        // multi-byte characters (emoji, kana) must never be cut in half.
+        let mut window_end = max_len;
+        while !remaining.is_char_boundary(window_end) {
+            window_end -= 1;
+        }
         // Try to split at newline
-        let split_pos = remaining[..max_len]
+        let split_pos = remaining[..window_end]
             .rfind('\n')
-            .or_else(|| remaining[..max_len].rfind(' '))
-            .unwrap_or(max_len);
+            .or_else(|| remaining[..window_end].rfind(' '))
+            .unwrap_or(window_end);
 
         let (chunk, rest) = remaining.split_at(split_pos);
         chunks.push(chunk.trim().to_string());
@@ -1344,6 +1388,35 @@ pub async fn send_message_split(
 #[cfg(test)]
 mod discord_tests {
     use super::*;
+
+    #[test]
+    fn test_split_message_multibyte_no_panic() {
+        // Regression: a 4-byte emoji (🔜) straddling the 2000-byte limit used to
+        // panic with "end byte index 2000 is not a char boundary".
+        let emoji = "🔜";
+        let mut content = String::new();
+        while content.len() < 4000 {
+            content.push_str(emoji);
+        }
+        let chunks = split_message(&content, 2000);
+        assert!(!chunks.is_empty());
+        let rejoined: String = chunks.concat();
+        // Nothing lost: every emoji survives the round trip.
+        assert_eq!(rejoined.chars().filter(|c| *c == '🔜').count(), content.chars().count());
+    }
+
+    #[test]
+    fn test_split_message_prefers_newline_and_space() {
+        let content = "a".repeat(1990) + "\n" + &"b".repeat(100);
+        let chunks = split_message(&content, 2000);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], "a".repeat(1990));
+
+        let spaced = "x".repeat(1995) + " yyyyy";
+        let chunks = split_message(&spaced, 2000);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], "x".repeat(1995));
+    }
 
     #[cfg(feature = "songbird")]
     #[tokio::test]

@@ -220,8 +220,11 @@ fn apply_skill_command_from_dir(
         } else { index.browse(name.strip_prefix("list ").unwrap_or(""), 8, true)? };
         // Recheck after index/filesystem access, before any metadata disclosure.
         let ctx = skill_command_context(db, discord_user_id, guild, channel)?;
-        let lines = result.skills.iter().map(|s| format!("{}{}{} — {}", s.name,
-            if s.skill_hidden { " [hidden]" } else { "" }, if s.user_only { " [user-only]" } else { "" },
+        let lines = result.skills.iter().map(|s| format!("{}{}{}{} — {}",
+            s.name,
+            s.version.as_ref().map(|v| format!(" v{v}")).unwrap_or_default(),
+            if s.skill_hidden { " [hidden]" } else { "" },
+            if s.user_only { " [user-only]" } else { "" },
             crate::util::truncate_chars(&s.description, 90))).collect::<Vec<_>>().join("\n");
         let more = result.next_after.map(|cursor| format!("\nNext page: /skill skillname:list {cursor}")).unwrap_or_default();
         return Ok(format!("Active skill: {}\nAvailable skills:\n{}{}\nUse /skill skillname:NAME, off, or search KEYWORDS.", ctx.settings.active_skill.as_deref().unwrap_or("off"), if lines.is_empty() { "(none)" } else { &lines }, more));

@@ -825,6 +825,14 @@ function startChatStream() {
             addChatMessage('tool', `✅ ${escapeHtml(tool)}${escapeHtml(dur)}`, String(result));
         } catch (err) { console.error('[SSE tool_result error]', err); }
     });
+    es.addEventListener('discord_message', (e) => {
+        console.log('[SSE] discord_message event received');
+        try {
+            const d = JSON.parse(e.data);
+            const inner = JSON.parse(d.data);
+            addDiscordMirrorMessage(inner);
+        } catch (err) { console.error('[SSE discord_message error]', err); }
+    });
     es.onerror = (err) => {
         console.error('[SSE] connection error (EventSource readyState=' + es.readyState + '), reconnecting in 3s');
         stopChatStream();
@@ -1030,6 +1038,36 @@ function addChatImage(path, caption) {
         <div class="msg-content">
             ${caption ? `<div style="margin-bottom:0.5rem;font-size:0.85rem;color:var(--text-secondary)">${escapeHtml(caption)}</div>` : ''}
             <img src="${escapeHtml(path)}" style="max-width:100%;border-radius:8px;border:1px solid var(--border);cursor:pointer;" onclick="window.open('${escapeHtml(path)}','_blank')" alt="Screenshot">
+        </div>
+    </div>`;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+// Mirror of Discord traffic (user + bot) inside the dashboard chat. The
+// Discord badge makes the origin obvious next to dashboard-native messages.
+function addDiscordMirrorMessage(inner) {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+    const welcome = container.querySelector('.chat-welcome');
+    if (welcome) welcome.remove();
+
+    const isBot = inner.direction === 'bot';
+    const kind = inner.channel_kind === 'dm' ? 'DM' : '#';
+    const channelLabel = kind === 'DM' ? 'DM' : ('#' + (inner.channel_id || '?'));
+    const author = isBot ? (chatBotName || 'Praxis') : (inner.author || 'Discord-User');
+    const time = new Date().toLocaleTimeString();
+
+    const div = document.createElement('div');
+    div.className = `chat-msg discord ${isBot ? 'discord-bot' : 'discord-user'}`;
+    div.innerHTML = `<div class="msg-row">
+        <div class="msg-col">
+            <span class="discord-badge" title="Nachricht aus Discord">🎮</span>
+            <span class="msg-label">${escapeHtml(author)}</span>
+        </div>
+        <div class="msg-content">
+            <div class="discord-meta"><span class="discord-channel">${escapeHtml(channelLabel)}</span><span class="discord-time">${escapeHtml(time)}</span></div>
+            <div class="discord-text">${renderMarkdown(inner.content || '')}</div>
         </div>
     </div>`;
     container.appendChild(div);
