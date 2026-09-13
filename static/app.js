@@ -820,7 +820,11 @@ function startChatStream() {
         console.log('[SSE] chat_tts event received');
         try {
             const d = JSON.parse(e.data);
-            if (d.audio) chatPlayTts(d.audio);
+            // The server wraps the payload as {event, data:<json-string>};
+            // the audio URL lives in d.data.audio, not d.audio.
+            const inner = (typeof d.data === 'string') ? JSON.parse(d.data) : (d.data || d);
+            if (inner.audio) chatPlayTts(inner.audio);
+            else if (d.audio) chatPlayTts(d.audio); // tolerate unwrapped payloads
         } catch (err) { console.error('[SSE chat_tts error]', err); }
     });
 
@@ -1022,8 +1026,12 @@ async function startTtsSideChannel() {
         es.addEventListener('chat_tts', (e) => {
             try {
                 const d = JSON.parse(e.data);
-                if (d.audio) {
+                // Same envelope as the main stream: audio lives in d.data.audio.
+                const inner = (typeof d.data === 'string') ? JSON.parse(d.data) : (d.data || d);
+                if (inner.audio) {
                     console.log('[SSE-TTS] chat_tts from side channel', pairedUserId);
+                    chatPlayTts(inner.audio);
+                } else if (d.audio) {
                     chatPlayTts(d.audio);
                 }
             } catch (err) { console.error('[SSE-TTS chat_tts error]', err); }

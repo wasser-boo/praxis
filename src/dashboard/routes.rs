@@ -239,7 +239,9 @@ pub fn routes(db: crate::db::Database) -> Router {
             dashboard_auth_middleware,
         ));
 
-    // Static file service
+    // Static file service. A small middleware adds Cache-Control: no-store to
+    // UI files (app.js/index) so browser caches (Brave is aggressive) never
+    // keep stale UI code after an update.
     let static_service = tower_http::services::ServeDir::new("static");
 
     // Authenticated routes that the commit notes flagged as unprotected.
@@ -275,8 +277,23 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/api/upload-file", axum::routing::post(upload_chat_file))
         .nest("/api", protected_extra)
         .nest_service("/static", static_service)
+        .layer(middleware::from_fn(static_no_cache_middleware))
         .nest("/api", protected)
         .with_state(state.clone())
+}
+
+/// Serve static UI files with Cache-Control: no-store so browser caches
+/// (Brave caches aggressively) never keep stale app.js/index after updates.
+async fn static_no_cache_middleware(
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let mut res = next.run(req).await;
+    res.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store, must-revalidate"),
+    );
+    res
 }
 
 async fn dashboard_auth_middleware(
@@ -342,8 +359,17 @@ async fn login_handler(
     Ok(Json(DashboardLoginResponse { token }))
 }
 
-async fn index() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../../static/index.html"))
+async fn index() -> axum::response::Response {
+    // The dashboard HTML embeds the app.js URL with a version query. Always
+    // serve it with no-store so browsers pick up UI updates immediately
+    // instead of keeping a stale cached page (Brave caches aggressively).
+    (
+        [
+            (axum::http::header::CACHE_CONTROL, "no-store, must-revalidate"),
+        ],
+        axum::response::Html(include_str!("../../static/index.html")),
+    )
+        .into_response()
 }
 
 async fn logo_svg() -> impl axum::response::IntoResponse {

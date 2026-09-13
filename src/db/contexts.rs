@@ -245,7 +245,9 @@ fn default_stt() -> String {
     "vosk".to_string()
 }
 fn default_tts() -> String {
-    "windows_sapi".to_string()
+    // ElevenLabs is the primary TTS engine (works headless on Linux).
+    // windows_sapi is Windows-only and unavailable on this deployment.
+    "elevenlabs".to_string()
 }
 fn default_listen_timeout() -> i32 {
     120
