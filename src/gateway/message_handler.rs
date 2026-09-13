@@ -101,6 +101,7 @@ pub(crate) async fn handle_message_inner(
         model: ctx.settings.model.clone(),
         vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
         vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
+        thinking: crate::gateway::llm::provider::ThinkingMode::from_setting(&ctx.settings.thinking_mode),
     };
 
     let mut response = state
@@ -311,6 +312,7 @@ pub(crate) async fn handle_message_inner(
             model: ctx.settings.model.clone(),
             vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
             vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
+            thinking: crate::gateway::llm::provider::ThinkingMode::from_setting(&ctx.settings.thinking_mode),
         };
 
         response = state

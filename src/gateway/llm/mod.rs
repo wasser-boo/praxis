@@ -161,6 +161,7 @@ impl LLMRouter {
                 model: model.map(|m| m.to_string()),
                 vision_provider: None,
                 vision_model: None,
+                thinking: None,
             };
 
             let response = self.chat_controlled(request, provider, None, &cancel).await?;

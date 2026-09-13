@@ -41,6 +41,11 @@ impl OllamaProvider {
             "stream": true,
         });
         add_tools(&mut body, &request);
+        if let Some(super::provider::ThinkingMode::Off) = request.thinking {
+            body["think"] = serde_json::json!(false);
+        } else if let Some(super::provider::ThinkingMode::On) = request.thinking {
+            body["think"] = serde_json::json!(true);
+        }
 
         tracing::debug!(message_count = messages.len(), "Ollama streaming request prepared");
 
@@ -95,6 +100,11 @@ impl LLMProvider for OllamaProvider {
             "stream": false,
         });
         add_tools(&mut body, &request);
+        if let Some(super::provider::ThinkingMode::Off) = request.thinking {
+            body["think"] = serde_json::json!(false);
+        } else if let Some(super::provider::ThinkingMode::On) = request.thinking {
+            body["think"] = serde_json::json!(true);
+        }
 
         tracing::debug!(message_count = messages.len(), "Ollama request prepared");
 

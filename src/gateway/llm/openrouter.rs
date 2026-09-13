@@ -79,13 +79,24 @@ impl LLMProvider for OpenRouterProvider {
             messages.push(msg);
         }
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
             "tools": request.tools,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
         });
+        // Extended reasoning: OpenRouter normalizes `reasoning.exclude` (hide
+        // the trace) and `reasoning.enabled` for capable models.
+        match request.thinking {
+            Some(super::provider::ThinkingMode::Off) => {
+                body["reasoning"] = serde_json::json!({ "exclude": true, "enabled": false });
+            }
+            Some(super::provider::ThinkingMode::On) => {
+                body["reasoning"] = serde_json::json!({ "enabled": true });
+            }
+            None => {}
+        }
 
         let resp = self
             .client

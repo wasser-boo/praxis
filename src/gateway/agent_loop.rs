@@ -360,6 +360,7 @@ async fn run_agent_loop_inner(
             model: ctx.settings.model.clone(),
             vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
             vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
+            thinking: crate::gateway::llm::provider::ThinkingMode::from_setting(&ctx.settings.thinking_mode),
         };
 
         // Log LLM request details
@@ -1049,6 +1050,7 @@ pub async fn generate_compaction_summary(
         model: None,
         vision_provider: None,
         vision_model: None,
+        thinking: None,
     };
 
     let cancel = crate::gateway::task_control::cancellation(user_id).unwrap_or_default();

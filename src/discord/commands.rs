@@ -170,6 +170,19 @@ pub async fn setup_commands(http: &serenity::http::Http) -> anyhow::Result<()> {
         .dm_permission(true);
     http.create_global_command(&skill_cmd).await?;
 
+    let thinking_cmd = serenity::builder::CreateCommand::new("thinking")
+        .description("Toggle extended reasoning (thinking) for your model")
+        .add_option(serenity::builder::CreateCommandOption::new(
+            serenity::model::application::CommandOptionType::String,
+            "mode", "on, off, or auto (provider default)"
+        )
+        .required(true)
+        .add_string_choice("on — enable extended reasoning", "on")
+        .add_string_choice("off — disable extended reasoning", "off")
+        .add_string_choice("auto — provider default", "auto"))
+        .dm_permission(true);
+    http.create_global_command(&thinking_cmd).await?;
+
     tracing::info!("All discord commands registered");
     Ok(())
 }
@@ -495,6 +508,15 @@ pub fn register_commands() -> Vec<serde_json::Value> {
             "name": "skill",
             "description": "Activate a skill; use off to disable or list to browse",
             "options": [{"type": 3, "name": "skillname", "description": "Registered name, off, or list", "required": false}]
+        }),
+        serde_json::json!({
+            "name": "thinking",
+            "description": "Toggle extended reasoning (thinking) for your model",
+            "options": [{"type": 3, "name": "mode", "description": "on, off, or auto (provider default)", "required": true, "choices": [
+                {"name": "on", "value": "on"},
+                {"name": "off", "value": "off"},
+                {"name": "auto", "value": "auto"}
+            ]}]
         }),
     ]
 }

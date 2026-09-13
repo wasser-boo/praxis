@@ -120,6 +120,7 @@ fn request() -> ChatRequest {
         model: None,
         vision_provider: None,
         vision_model: None,
+        thinking: None,
     }
 }
 fn policy() -> ResilienceConfig {

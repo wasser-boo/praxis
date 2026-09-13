@@ -433,6 +433,45 @@ impl EventHandler for DiscordHandler {
                         tracing::error!(%error, "Skill command response failed");
                     }
                 }
+                "thinking" => {
+                    let discord_user_id = command.user.id.to_string();
+                    let mode = command.data.options.iter()
+                        .find(|o| o.name == "mode")
+                        .and_then(|o| o.value.as_str())
+                        .unwrap_or("auto")
+                        .to_ascii_lowercase();
+                    let reply = match self.db.get_pairing_by_discord(&discord_user_id) {
+                        Ok(Some(pairing)) => {
+                            let valid = matches!(mode.as_str(), "on" | "off" | "auto");
+                            if !valid {
+                                "Invalid mode. Use on, off, or auto.".to_string()
+                            } else {
+                                match crate::context_cmd::parse(&format!("/context set settings.thinking_mode={mode}")) {
+                                    Ok(op) => {
+                                        let result = crate::context_cmd::apply(&self.db, &pairing.user_id, &op);
+                                        if result.starts_with("✓") {
+                                            let suffix = if mode == "auto" { " (provider default)" } else { "" };
+                                            format!("🧠 Thinking mode set to **{mode}**{suffix}")
+                                        } else {
+                                            result
+                                        }
+                                    }
+                                    Err(e) => format!("error: {e}"),
+                                }
+                            }
+                        }
+                        _ => "You are not paired with this bot.".to_string(),
+                    };
+                    let _ = command
+                        .create_response(
+                            &ctx.http,
+                            serenity::builder::CreateInteractionResponse::Message(
+                                serenity::builder::CreateInteractionResponseMessage::new()
+                                    .content(reply),
+                            ),
+                        )
+                        .await;
+                }
                 "pair" => {
                     if let Err(e) =
                         crate::discord::commands::handle_pair_command(&self.db, &ctx, &command)

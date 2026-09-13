@@ -32,6 +32,7 @@ fn request() -> ChatRequest {
         model: Some("synthetic-thinking-model".into()),
         vision_provider: None,
         vision_model: None,
+        thinking: None,
     }
 }
 

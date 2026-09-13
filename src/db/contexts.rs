@@ -183,7 +183,7 @@ pub struct ContextSettings {
     pub tags_enabled: bool,
     /// Toggle extended-reasoning output for the active model, per provider.
     /// "auto" (default) leaves provider defaults untouched.
-    #[serde(default)]
+    #[serde(default = "default_thinking_mode")]
     pub thinking_mode: String,
     #[serde(default)]
     pub llm_turn: i32,
@@ -278,6 +278,9 @@ fn default_elevenlabs_speed() -> Option<f32> {
 }
 fn default_feedback_template() -> String {
     "tasks/feedback".to_string()
+}
+fn default_thinking_mode() -> String {
+    "auto".to_string()
 }
 fn default_true() -> bool {
     true
