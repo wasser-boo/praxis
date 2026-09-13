@@ -2,11 +2,11 @@ const API_BASE = '';
 let authToken = localStorage.getItem('praxis_token');
 let chatPollInterval = null;
 let chatEventSource = null;
-// TTS-only side channel: receives chat_tts events from the paired Discord
-// context so replies generated for Discord are also spoken in the dashboard
-// while another session is active. No chat content flows through it.
-let chatTtsSideSource = null;
-let chatTtsSideUserId = null;
+// TTS-only side channels: receive chat_tts events from ALL paired Discord
+// contexts so replies generated for Discord are also spoken in the dashboard
+// while another session is active. No chat content flows through them.
+let chatTtsSideSources = [];
+let chatTtsSideUserIds = [];
 // Per chat-session unique identifier. Each session has its OWN user_id at
 // the storage layer (separate context + separate messages). Sessions are
 // created by forking a parent context (see chatNewSession).
@@ -230,6 +230,7 @@ async function initChatTab() {
 
 const SLASH_COMMANDS = [
     { name: '/clear', desc: 'Clear the chat view (history stays in Messages)', action: clearChatMessages },
+    { name: '/deletemessages', desc: 'Delete ALL messages (chat + Messages tab; Discord untouched)', action: deleteAllMessages },
     { name: '/start', desc: 'Start the agent loop', action: chatStartAgent },
     { name: '/stop', desc: 'Stop the agent loop', action: chatStopAgent },
     { name: '/new', desc: 'Start a new chat session', action: chatNewSession },
@@ -964,11 +965,9 @@ function stopChatStream() {
         chatEventSource.close();
         chatEventSource = null;
     }
-    if (chatTtsSideSource) {
-        chatTtsSideSource.close();
-        chatTtsSideSource = null;
-        chatTtsSideUserId = null;
-    }
+    for (const es of chatTtsSideSources) es.close();
+    chatTtsSideSources = [];
+    chatTtsSideUserIds = [];
     // A broken/reconnecting SSE can never deliver chat_tts audio; hide the
     // speaking chip so it cannot get stuck in "speaking" state.
     chatTtsActive(false);
@@ -978,47 +977,48 @@ function stopChatStream() {
 /// The main chat stream stays untouched; this connection only feeds
 /// chatPlayTts so Discord-generated replies are spoken in the dashboard too.
 async function startTtsSideChannel() {
-    // Close the previous side channel when switching sessions.
-    if (chatTtsSideSource) {
-        chatTtsSideSource.close();
-        chatTtsSideSource = null;
-        chatTtsSideUserId = null;
-    }
+    // Close previous side channels when switching sessions.
+    for (const es of chatTtsSideSources) es.close();
+    chatTtsSideSources = [];
+    chatTtsSideUserIds = [];
     if (!authToken) return;
-    let pairedUserId = null;
+    let pairings = [];
     try {
         const res = await apiGet('/api/pairings');
         if (!res || !res.ok) return;
-        const data = await res.json();
-        const pairings = data.pairings || [];
-        // Prefer the pairing that is NOT the active session (the active one
-        // already receives chat_tts via the main stream).
-        const other = pairings.find(p => p.user_id !== chatUserId);
-        pairedUserId = other ? other.user_id : null;
+        pairings = (await res.json()).pairings || [];
     } catch (_) { return; }
-    if (!pairedUserId) return;
-    chatTtsSideUserId = pairedUserId;
-    const url = `/api/chat/stream/${encodeURIComponent(pairedUserId)}/tts?token=${encodeURIComponent(authToken)}`;
-    console.log('[SSE-TTS] opening side channel for', pairedUserId);
-    const es = new EventSource(url);
-    es.addEventListener('chat_tts', (e) => {
-        try {
-            const d = JSON.parse(e.data);
-            if (d.audio) {
-                console.log('[SSE-TTS] chat_tts from side channel');
-                chatPlayTts(d.audio);
-            }
-        } catch (err) { console.error('[SSE-TTS chat_tts error]', err); }
-    });
-    es.onerror = () => {
-        console.warn('[SSE-TTS] side channel error; retrying in 5s');
-        es.close();
-        if (chatTtsSideUserId === pairedUserId) {
-            chatTtsSideSource = null;
-            setTimeout(() => { if (chatTtsSideUserId === pairedUserId) startTtsSideChannel(); }, 5000);
-        }
-    };
-    chatTtsSideSource = es;
+    // Subscribe to ALL pairings except the active session (the active one
+    // already receives chat_tts via the main stream). The side channel is
+    // TTS-only, so this cannot duplicate chat content — it just makes sure
+    // replies generated for ANY Discord pairing are spoken in the dashboard.
+    const targets = pairings.map(p => p.user_id).filter(id => id !== chatUserId);
+    if (targets.length === 0) return;
+    for (const pairedUserId of targets) {
+        chatTtsSideUserIds.push(pairedUserId);
+        const url = `/api/chat/stream/${encodeURIComponent(pairedUserId)}/tts?token=${encodeURIComponent(authToken)}`;
+        console.log('[SSE-TTS] opening side channel for', pairedUserId);
+        const es = new EventSource(url);
+        es.addEventListener('chat_tts', (e) => {
+            try {
+                const d = JSON.parse(e.data);
+                if (d.audio) {
+                    console.log('[SSE-TTS] chat_tts from side channel', pairedUserId);
+                    chatPlayTts(d.audio);
+                }
+            } catch (err) { console.error('[SSE-TTS chat_tts error]', err); }
+        });
+        es.onerror = () => {
+            console.warn('[SSE-TTS] side channel error for', pairedUserId, '; retrying in 5s');
+            es.close();
+            const idx = chatTtsSideSources.indexOf(es);
+            if (idx >= 0) chatTtsSideSources.splice(idx, 1);
+            setTimeout(() => {
+                if (chatTtsSideUserIds.includes(pairedUserId)) startTtsSideChannel();
+            }, 5000);
+        };
+        chatTtsSideSources.push(es);
+    }
 }
 
 async function pollChatMessages() {
@@ -1282,6 +1282,34 @@ async function clearChatMessages() {
     }
     const container = document.getElementById('chat-messages');
     container.innerHTML = '<div class="chat-welcome">Chat cleared. Your history stays in the Messages tab — new messages appear here again.</div>';
+    chatSeenIds.clear();
+}
+
+// /deletemessages: hard-delete ALL messages of the CURRENT user/session from
+// the database (chat view + Messages tab + LLM history). Discord itself is
+// never touched — only the local copies/mirrors for this user_id. The
+// context (settings, memory, pairing) is kept.
+async function deleteAllMessages() {
+    if (!confirm(`Delete ALL messages for this session (${chatUserId})?\n\nThis removes the local chat history, the Messages-tab history and the LLM conversation history. Discord itself is NOT affected. This cannot be undone.`)) {
+        return;
+    }
+    try {
+        const res = await apiFetch(`/api/messages/${encodeURIComponent(chatUserId)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Delete failed');
+    } catch (err) {
+        console.error('[DELETE] message delete failed:', err);
+        addChatMessage('feedback', 'Failed to delete messages');
+        return;
+    }
+    // Reset the clear marker too, so the view starts fresh at zero.
+    try {
+        await apiFetch(`/api/contexts/${encodeURIComponent(chatUserId)}`, {
+            method: 'PUT',
+            body: JSON.stringify({ custom_data: { chat_cleared_message_id: 0 } })
+        });
+    } catch (_) { /* marker reset is best-effort */ }
+    const container = document.getElementById('chat-messages');
+    container.innerHTML = '<div class="chat-welcome">All messages for this session deleted. Discord was not affected. New messages appear here.</div>';
     chatSeenIds.clear();
 }
 

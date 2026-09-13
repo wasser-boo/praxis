@@ -1169,6 +1169,11 @@ fn spawn_tts(
         // Discord voice users receive the audio through the voice pipeline.
         if web_chat_tts {
             use base64::Engine;
+            // The dashboard (main stream + TTS side channels) may still be
+            // connecting when the reply finishes; wait briefly for a receiver
+            // so the audio is not dropped as "no receivers" during startup or
+            // a reconnect.
+            crate::dashboard::stream::wait_for_subscriber(&user_id, 3000).await;
             let data_url = format!(
                 "data:audio/mpeg;base64,{}",
                 base64::engine::general_purpose::STANDARD.encode(&final_audio)

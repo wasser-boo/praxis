@@ -444,6 +444,22 @@ mod db_tests {
     }
 
     #[test]
+    fn test_clear_messages_is_per_user() {
+        // /deletemessages deletes only the target user's rows; other users
+        // (other pairings/sessions) keep their messages.
+        let (db, _dir) = test_db();
+        ensure_context(&db, "user1");
+        ensure_context(&db, "user2");
+        db.add_message("user1", &Message::user("mine".into())).unwrap();
+        db.add_message("user2", &Message::user("theirs".into())).unwrap();
+        db.clear_messages("user1").unwrap();
+        assert!(db.get_messages("user1", 10).unwrap().is_empty());
+        let other = db.get_messages("user2", 10).unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].content, "theirs");
+    }
+
+    #[test]
     fn test_message_order() {
         let (db, _dir) = test_db();
         ensure_context(&db, "user1");
