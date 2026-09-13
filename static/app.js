@@ -866,6 +866,9 @@ function stopChatStream() {
         chatEventSource.close();
         chatEventSource = null;
     }
+    // A broken/reconnecting SSE can never deliver chat_tts audio; hide the
+    // speaking chip so it cannot get stuck in "speaking" state.
+    chatTtsActive(false);
 }
 
 async function pollChatMessages() {
