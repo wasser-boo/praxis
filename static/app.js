@@ -46,9 +46,18 @@ function getAuthHeaders() {
 }
 
 async function apiFetch(path, options = {}) {
+    // FormData/Blob bodies set their own Content-Type (multipart boundary /
+    // blob type). A forced JSON Content-Type would clobber that boundary and
+    // the server rejects the request ("Invalid `boundary` …"), so drop the
+    // default header for those bodies.
+    const isFormDataBody = typeof FormData !== 'undefined' && options.body instanceof FormData;
+    const isBlobBody = typeof Blob !== 'undefined' && options.body instanceof Blob;
+    const defaultHeaders = (isFormDataBody || isBlobBody)
+        ? { 'Authorization': `Bearer ${authToken}` }
+        : getAuthHeaders();
     const res = await fetch(`${API_BASE}${path}`, {
         ...options,
-        headers: { ...getAuthHeaders(), ...options.headers }
+        headers: { ...defaultHeaders, ...options.headers }
     });
     if (res.status === 401) { logout(); throw new Error('Session expired'); }
     return res;
@@ -2568,7 +2577,13 @@ async function chatToggleMic() {
         const fd = new FormData();
         fd.append('audio', blob, 'speech.webm');
         const res = await apiFetch(`/api/stt?user_id=${encodeURIComponent(chatUserId)}`, { method: 'POST', body: fd });
-        const data = await res.json();
+        const raw = await res.text();
+        let data = null;
+        try { data = JSON.parse(raw); } catch (_) { /* non-JSON response */ }
+        if (!data) {
+          addChatMessage('feedback', `STT failed: server returned ${res.status} ${raw.slice(0, 120)}`);
+          return;
+        }
         if (data.error) { addChatMessage('feedback', 'STT failed: ' + data.error); return; }
         const ta = document.getElementById('chat-input');
         ta.value = (ta.value ? ta.value + ' ' : '') + (data.text || '');
