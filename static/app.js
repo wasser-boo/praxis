@@ -196,6 +196,25 @@ function quickStartAgent(userId) {
 
 // ═══ Chat Tab ════════════════════════════════════════════════════════════════════
 
+// Load the TTS switch state from the user's settings. Called on every
+// session load/switch — otherwise chatTtsOn stays false after a page reload
+// and chatPlayTts silently drops every incoming chat_tts event (audio sent
+// by the server but never played).
+async function loadTtsSwitchState() {
+    try {
+        const res = await apiGet(`/api/contexts/${encodeURIComponent(chatUserId)}`);
+        const ctxData = await res.json();
+        const on = !!(ctxData && ctxData.settings && ctxData.settings.web_chat_tts);
+        chatTtsOn = on;
+        const btn = document.getElementById('chat-tts-btn');
+        if (btn) {
+            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            btn.classList.toggle('tts-on', on);
+            btn.textContent = on ? '🔊' : '🔉';
+        }
+    } catch (_) { /* switch state stays default */ }
+}
+
 async function initChatTab() {
     const input = document.getElementById('chat-input');
     input.addEventListener('input', () => {
@@ -219,6 +238,7 @@ async function initChatTab() {
     // their previous conversation, not just an empty welcome banner.
     await loadChatHistory();
     await loadChatStatus();
+    await loadTtsSwitchState();
     // Always open the SSE stream so we can react to agent_start events even
     // before any user interaction in this session.
     startChatStream();
@@ -1465,6 +1485,7 @@ async function switchChatSession(id) {
     await loadChatUserInfo();
     await loadChatHistory();
     await loadChatStatus();
+    await loadTtsSwitchState();
     // Always open the SSE stream for the active session so agent_start /
     // streaming-token events arrive even before user interaction.
     startChatStream();
@@ -2819,11 +2840,15 @@ async function chatToggleTts() {
 }
 
 function chatPlayTts(dataUrl) {
-  if (!chatTtsOn) return; // respect the switch
+  if (!chatTtsOn) {
+    console.warn('[TTS] chat_tts received but TTS switch is OFF — not playing');
+    return; // respect the switch
+  }
+  console.log('[TTS] playing audio,', Math.round(dataUrl.length / 1024), 'KB payload');
   if (chatTtsAudio) { chatTtsAudio.pause(); }
   chatTtsAudio = new Audio(dataUrl);
   chatTtsAudio.onended = () => chatTtsActive(false);
-  chatTtsAudio.onerror = () => chatTtsActive(false);
+  chatTtsAudio.onerror = (e) => { console.error('[TTS] audio error', e); chatTtsActive(false); };
   chatTtsActive(true);
   chatTtsAudio.play().catch((err) => {
     // Autoplay policy blocked playback (no user gesture yet). Show a
