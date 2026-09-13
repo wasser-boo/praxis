@@ -182,6 +182,10 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/contexts/:user_id/fork", axum::routing::post(fork_context_route))
         .route("/messages/:user_id", axum::routing::get(get_messages))
         .route("/messages/:user_id", axum::routing::delete(clear_messages))
+        .route("/messages/:user_id/clear-chat", axum::routing::post(clear_chat_view))
+        .route("/messages/:user_id/compact", axum::routing::post(compact_messages))
+        .route("/skills", axum::routing::get(list_skills))
+        .route("/delegations/:user_id", axum::routing::get(list_delegations_route))
         .route("/templates", axum::routing::get(list_templates))
         .route("/templates", axum::routing::post(create_template))
         .route("/templates/:name", axum::routing::get(get_template))
@@ -483,10 +487,28 @@ async fn context_exec(
 async fn get_messages(
     State(state): State<Arc<DashboardState>>,
     Path(user_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let budget = 500000usize;
-    tracing::debug!(user_id = %user_id, "[MESSAGES] fetching messages");
-    match state.db.get_chat_messages_with_token_budget(&user_id, budget) {
+    let chat_only = params.get("chat_only").map(|v| v == "1" || v == "true").unwrap_or(false);
+    tracing::debug!(user_id = %user_id, chat_only, "[MESSAGES] fetching messages");
+    let result = if chat_only {
+        // Chat view: hide rows up to the clear marker (kept in Messages tab).
+        let marker = state
+            .db
+            .load_context(&user_id)
+            .ok()
+            .and_then(|ctx| {
+                ctx.custom_data
+                    .get("chat_cleared_message_id")
+                    .and_then(|v| v.as_i64())
+            })
+            .unwrap_or(0);
+        state.db.get_chat_messages_after(&user_id, budget, marker)
+    } else {
+        state.db.get_chat_messages_with_token_budget(&user_id, budget)
+    };
+    match result {
         Ok((messages, total_tokens)) => {
             let msgs: Vec<serde_json::Value> = messages
                 .iter()
@@ -536,6 +558,91 @@ async fn clear_messages(
         Ok(()) => Ok(Json(serde_json::json!({ "success": true }))),
         Err(e) => {
             tracing::error!(user_id = %user_id, error = %e, "[MESSAGES] clear failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Chat-only clear: hides everything up to the newest message id from the
+/// CHAT view (custom_data.chat_cleared_message_id marker) without deleting
+/// any rows. The Messages tab keeps showing the full history; new messages
+/// (and new Discord mirrors) appear in the chat again after the marker.
+async fn clear_chat_view(
+    State(state): State<Arc<DashboardState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let max_id = state
+        .db
+        .max_message_id(&user_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = state.db.merge_context(
+        &user_id,
+        serde_json::json!({ "custom_data": { "chat_cleared_message_id": max_id } }),
+    );
+    tracing::info!(user_id = %user_id, marker = max_id, "[MESSAGES] chat view cleared (rows kept)");
+    Ok(Json(serde_json::json!({ "success": true, "cleared_before_id": max_id })))
+}
+
+/// Manual compaction (dashboard /compact): generate a summary, then replace
+/// the message history with the recent kept rows. Same logic as the
+/// WebSocket /compact command.
+async fn compact_messages(
+    State(state): State<Arc<DashboardState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let gw = crate::gateway::state_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    tracing::info!(user_id = %user_id, "[MESSAGES] compacting history");
+    match crate::gateway::ws_handler::compact_history(gw, &user_id).await {
+        Ok(summary) => Ok(Json(serde_json::json!({
+            "success": true,
+            "summary": summary,
+        }))),
+        Err(e) => {
+            tracing::error!(user_id = %user_id, error = %e, "[MESSAGES] compact failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// List registered skills (dashboard /skill with no argument).
+async fn list_skills(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let mut registry = crate::skills::SkillRegistry::new();
+    let dir = std::path::Path::new("skills");
+    if dir.exists() {
+        registry
+            .load_from_dir(dir)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    let skills: Vec<serde_json::Value> = registry
+        .list()
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "description": s.description,
+                "user_only": s.user_only,
+            })
+        })
+        .collect();
+    let active = state
+        .db
+        .load_context("default")
+        .ok()
+        .and_then(|c| c.settings.active_skill.clone());
+    Ok(Json(serde_json::json!({ "skills": skills, "active_skill": active })))
+}
+
+/// Delegation records for a user (dashboard /delegations).
+async fn list_delegations_route(
+    State(state): State<Arc<DashboardState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match crate::gateway::delegation::list_delegations(&state.db, &user_id) {
+        Ok(list) => Ok(Json(serde_json::json!({ "delegations": list }))),
+        Err(e) => {
+            tracing::error!(user_id = %user_id, error = %e, "[DELEGATIONS] list failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

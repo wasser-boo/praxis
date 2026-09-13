@@ -207,7 +207,14 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
     }
 }
 
-async fn compact_user_history(state: &GatewayState, user_id: &str) -> anyhow::Result<String> {
+/// Compact the conversation history for a user: generate a summary, store it
+/// in the context and replace the message history with the recent (kept)
+/// rows. Shared by the WebSocket `/compact` command and the dashboard
+/// POST /api/messages/:user_id/compact endpoint.
+pub async fn compact_history(
+    state: &crate::gateway::GatewayState,
+    user_id: &str,
+) -> anyhow::Result<String> {
     let mut ctx = state.db.load_context(user_id)?;
     let summary = crate::gateway::agent_loop::generate_compaction_summary(
         state,
@@ -257,6 +264,10 @@ async fn compact_user_history(state: &GatewayState, user_id: &str) -> anyhow::Re
     }
 
     Ok(summary)
+}
+
+async fn compact_user_history(state: &GatewayState, user_id: &str) -> anyhow::Result<String> {
+    compact_history(state, user_id).await
 }
 
 #[cfg(test)]

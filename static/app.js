@@ -229,10 +229,15 @@ async function initChatTab() {
 }
 
 const SLASH_COMMANDS = [
-    { name: '/clear', desc: 'Clear chat messages', action: clearChatMessages },
+    { name: '/clear', desc: 'Clear the chat view (history stays in Messages)', action: clearChatMessages },
     { name: '/start', desc: 'Start the agent loop', action: chatStartAgent },
     { name: '/stop', desc: 'Stop the agent loop', action: chatStopAgent },
     { name: '/new', desc: 'Start a new chat session', action: chatNewSession },
+    { name: '/sessions', desc: 'Open the conversations sidebar', action: () => {
+        const sidebar = document.querySelector('.chat-sidebar');
+        if (sidebar) sidebar.scrollIntoView({ behavior: 'smooth' });
+        toggleChatConversations();
+    } },
     { name: '/status', desc: 'Check agent status', action: async () => {
         const active = await checkAgentActive(chatUserId);
         addChatMessage('system', `Agent is ${active ? 'active' : 'inactive'} for ${chatUserId}`);
@@ -243,10 +248,97 @@ const SLASH_COMMANDS = [
         takesArgs: true,
         action: chatContextCommand,
     },
+    { name: '/compact', desc: 'Summarize history, keep recent messages', action: chatCompactCommand },
+    { name: '/skill', desc: 'List skills / activate: /skill NAME | off', takesArgs: true, action: chatSkillCommand },
+    { name: '/thinking', desc: 'Thinking mode: /thinking on|off|auto', takesArgs: true, action: chatThinkingCommand },
+    { name: '/delegations', desc: 'Show delegated subtasks (status + result)', action: chatDelegationsCommand },
     { name: '/avatar', desc: 'Change your avatar', action: () => showAvatarModal('user') },
     { name: '/botavatar', desc: 'Change bot avatar', action: () => showAvatarModal('bot') },
     { name: '/help', desc: 'Show available commands', action: showSlashHelp },
 ];
+
+// /compact: summarize the history server-side, keep recent messages.
+async function chatCompactCommand() {
+    addChatMessage('system', '⏳ Compacting conversation…');
+    try {
+        const res = await apiFetch(`/api/messages/${encodeURIComponent(chatUserId)}/compact`, { method: 'POST' });
+        const data = await res.json();
+        if (data.error) { addChatMessage('feedback', '/compact failed: ' + data.error); return; }
+        const summary = String(data.summary || '').slice(0, 400);
+        addChatMessage('system', `✅ Compacted. Summary saved.\n${summary}`);
+        await loadChatHistory();
+    } catch (err) {
+        addChatMessage('feedback', '/compact failed: ' + err.message);
+    }
+}
+
+// /skill: list skills or activate/deactivate one.
+async function chatSkillCommand(rawLine) {
+    const arg = (typeof rawLine === 'string' ? rawLine.replace(/^\/skill\b/i, '').trim() : '');
+    try {
+        if (!arg || arg === 'list') {
+            const res = await apiGet('/api/skills');
+            const data = await res.json();
+            const lines = (data.skills || []).map(s => `${s.name}${s.user_only ? ' [user-only]' : ''} — ${s.description || ''}`);
+            addChatMessage('system', `Active skill: ${data.active_skill || 'off'}\nAvailable skills:\n${lines.join('\n') || '(none)'}\nUse /skill NAME or /skill off.`);
+            return;
+        }
+        if (arg.toLowerCase() === 'off') {
+            await apiFetch(`/api/contexts/${encodeURIComponent(chatUserId)}`, {
+                method: 'PUT',
+                body: JSON.stringify({ settings: { active_skill: null } })
+            });
+            addChatMessage('system', 'Active skill disabled.');
+            return;
+        }
+        await apiFetch(`/api/contexts/${encodeURIComponent(chatUserId)}`, {
+            method: 'PUT',
+            body: JSON.stringify({ settings: { active_skill: arg } })
+        });
+        addChatMessage('system', `Skill '${arg}' is active for your messages.`);
+    } catch (err) {
+        addChatMessage('feedback', '/skill failed: ' + err.message);
+    }
+}
+
+// /thinking on|off|auto: set settings.thinking_mode via context exec.
+async function chatThinkingCommand(rawLine) {
+    const arg = (typeof rawLine === 'string' ? rawLine.replace(/^\/thinking\b/i, '').trim().toLowerCase() : '');
+    if (!['on', 'off', 'auto'].includes(arg)) {
+        addChatMessage('system', 'Usage: /thinking on|off|auto');
+        return;
+    }
+    try {
+        const res = await apiFetch('/api/context/exec', {
+            method: 'POST',
+            body: JSON.stringify({ user_id: chatUserId, line: `/context set settings.thinking_mode=${arg}` })
+        });
+        const data = await res.json();
+        if (data.error) { addChatMessage('feedback', '/thinking: ' + data.error); return; }
+        addChatMessage('system', `Thinking mode set to ${arg}.`);
+    } catch (err) {
+        addChatMessage('feedback', '/thinking failed: ' + err.message);
+    }
+}
+
+// /delegations: show delegated subtasks for this session.
+async function chatDelegationsCommand() {
+    try {
+        const res = await apiGet('/api/delegations/' + encodeURIComponent(chatUserId));
+        const data = await res.json();
+        const list = data.delegations || [];
+        if (list.length === 0) { addChatMessage('system', 'No delegations yet.'); return; }
+        const lines = list.map(d => {
+            const icon = d.status === 'done' ? '✅' : (d.status === 'failed' ? '❌' : '⏳');
+            const task = String(d.task || '').slice(0, 80);
+            const result = String(d.result || '').replace(/\n/g, ' ').slice(0, 120);
+            return `${icon} ${d.id} [${d.status}] ${task}\n    result: ${result}`;
+        });
+        addChatMessage('system', '🤝 Delegations:\n' + lines.join('\n'));
+    } catch (err) {
+        addChatMessage('feedback', '/delegations failed: ' + err.message);
+    }
+}
 
 function showSlashHelp() {
     const list = SLASH_COMMANDS.map(c => `<b>${escapeHtml(c.name)}</b> - ${escapeHtml(c.desc)}`).join('<br>');
@@ -962,7 +1054,9 @@ async function loadChatHistory() {
     const mySessionId = chatSessionId;
     console.log('[HISTORY] loading history for session', chatSessionId, 'user_id', chatUserId);
     try {
-        const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}`);
+        // chat_only=1: hide rows up to the /clear marker. The Messages tab
+        // keeps the full history; a chat clear never deletes anything.
+        const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}?chat_only=1`);
         if (chatSessionId !== mySessionId) return; // switched away while loading
         const data = await res.json();
         const msgs = data.messages || [];
@@ -1176,17 +1270,18 @@ function addAgentLoopBanner(kind) {
 }
 
 async function clearChatMessages() {
-    // Also delete messages on the backend for the current session
+    // Chat-only clear: hide everything up to now from the CHAT view. Rows are
+    // kept (Messages tab still shows them); new messages appear again.
     try {
-        const res = await apiFetch(`/api/messages/${encodeURIComponent(chatUserId)}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('Delete failed');
+        const res = await apiFetch(`/api/messages/${encodeURIComponent(chatUserId)}/clear-chat`, { method: 'POST' });
+        if (!res.ok) throw new Error('Clear failed');
     } catch (err) {
-        console.error('[CLEAR] backend delete failed:', err);
-        addChatMessage('feedback', 'Failed to clear messages on server');
+        console.error('[CLEAR] chat clear failed:', err);
+        addChatMessage('feedback', 'Failed to clear the chat view');
         return;
     }
     const container = document.getElementById('chat-messages');
-    container.innerHTML = '<div class="chat-welcome">Start an agent to begin chatting. Your messages appear here with tool calls visible inline.</div>';
+    container.innerHTML = '<div class="chat-welcome">Chat cleared. Your history stays in the Messages tab — new messages appear here again.</div>';
     chatSeenIds.clear();
 }
 

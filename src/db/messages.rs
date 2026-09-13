@@ -288,37 +288,54 @@ impl Database {
         user_id: &str,
         token_budget: usize,
     ) -> anyhow::Result<(Vec<Message>, usize)> {
+        self.get_chat_messages_after(user_id, token_budget, 0)
+    }
+
+    /// Chat transcript with an `after_id` filter: rows with id <= after_id are
+    /// skipped. Used by the dashboard chat so `/clear` can hide everything up
+    /// to the clear marker while the Messages tab keeps showing the full
+    /// history (messages are never deleted by a chat clear).
+    pub fn get_chat_messages_after(
+        &self,
+        user_id: &str,
+        token_budget: usize,
+        after_id: i64,
+    ) -> anyhow::Result<(Vec<Message>, usize)> {
         let conn = self.conn();
         let key = self.resolve_user_key(&conn, user_id);
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta FROM messages WHERE user_id = ?1 ORDER BY id DESC",
+            "SELECT id, role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta FROM messages WHERE user_id = ?1 ORDER BY id DESC",
         )?;
 
         let mut messages = Vec::new();
         let mut total_tokens = 0usize;
         let rows = stmt.query_map(rusqlite::params![key], |row| {
-            let tool_calls_json: Option<String> = row.get(4)?;
+            let id: i64 = row.get(0)?;
+            let tool_calls_json: Option<String> = row.get(5)?;
             let tool_calls: Option<Vec<ToolCallData>> =
                 tool_calls_json.and_then(|json| serde_json::from_str(&json).ok());
-            let content_parts_json: Option<String> = row.get(5)?;
+            let content_parts_json: Option<String> = row.get(6)?;
             let content_parts: Option<Vec<serde_json::Value>> =
                 content_parts_json.and_then(|json| serde_json::from_str(&json).ok());
-            let discord_meta_json: Option<String> = row.get(6)?;
+            let discord_meta_json: Option<String> = row.get(7)?;
             let discord_meta: Option<serde_json::Value> =
                 discord_meta_json.and_then(|json| serde_json::from_str(&json).ok());
-            Ok(Message {
-                role: row.get(0)?,
-                content: row.get(1)?,
-                tool_call_id: row.get(2)?,
-                tool_name: row.get(3)?,
+            Ok((id, Message {
+                role: row.get(1)?,
+                content: row.get(2)?,
+                tool_call_id: row.get(3)?,
+                tool_name: row.get(4)?,
                 tool_calls,
                 content_parts,
                 discord_meta,
-            })
+            }))
         })?;
 
         for row in rows {
-            let msg = row?;
+            let (id, msg) = row?;
+            if id <= after_id {
+                continue;
+            }
             let tokens = estimate_message_tokens(&msg);
             if total_tokens + tokens > token_budget && !messages.is_empty() {
                 break;
@@ -329,6 +346,22 @@ impl Database {
 
         messages.reverse();
         Ok((messages, total_tokens))
+    }
+
+    /// Highest message id for a user (0 when the table is empty). Used as the
+    /// clear marker: everything at or below it stays in the Messages tab but
+    /// is hidden from the chat view.
+    pub fn max_message_id(&self, user_id: &str) -> anyhow::Result<i64> {
+        let conn = self.conn();
+        let key = self.resolve_user_key(&conn, user_id);
+        let val: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(id) FROM messages WHERE user_id = ?1",
+                rusqlite::params![key],
+                |row| row.get(0),
+            )
+            .unwrap_or(None);
+        Ok(val.unwrap_or(0))
     }
 
     pub fn count_messages(&self, user_id: &str) -> anyhow::Result<usize> {
@@ -488,5 +521,29 @@ mod db_tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].content, "real user msg");
         assert_eq!(history[1].content, "real reply");
+    }
+
+    #[test]
+    fn test_chat_clear_marker_hides_but_keeps_rows() {
+        let (db, _dir) = test_db();
+        ensure_context(&db, "user1");
+        db.add_message("user1", &Message::user("old one".into())).unwrap();
+        db.add_message("user1", &Message::assistant("old two".into())).unwrap();
+        let marker = db.max_message_id("user1").unwrap();
+        assert!(marker > 0);
+
+        // New messages after the clear marker.
+        db.add_message("user1", &Message::user("new one".into())).unwrap();
+        db.add_message("user1", &Message::assistant("new two".into())).unwrap();
+
+        // Chat view after /clear: only rows above the marker.
+        let (chat, _) = db.get_chat_messages_after("user1", usize::MAX, marker).unwrap();
+        assert_eq!(chat.len(), 2);
+        assert_eq!(chat[0].content, "new one");
+        assert_eq!(chat[1].content, "new two");
+
+        // Full transcript (Messages tab): all four rows still there.
+        let (full, _) = db.get_chat_messages_with_token_budget("user1", usize::MAX).unwrap();
+        assert_eq!(full.len(), 4);
     }
 }
