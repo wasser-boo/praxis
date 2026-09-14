@@ -80,8 +80,23 @@ async function commandShown(page, command) {
         assert.equal(await page.locator('.terminal-command').evaluate(el => getComputedStyle(el).maxHeight), 'none');
         assert(await page.locator('.terminal-command').evaluate(el => el.scrollHeight <= el.clientHeight + 1), 'full command must not be clipped');
         assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'long commands must wrap on mobile');
-        await page.locator('.terminal-command-copy').click();
+        const copy = page.locator('.terminal-command-copy');
+        assert(await copy.evaluate(el => el.classList.contains('btn-secondary')), 'copy button should use dashboard styling');
+        assert(await copy.evaluate(el => parseFloat(getComputedStyle(el).borderRadius) >= 6));
+        await copy.focus();
+        assert.equal(await copy.evaluate(el => getComputedStyle(el).outlineStyle), 'solid', 'keyboard focus must be visible');
+        await copy.click();
         assert.equal(await page.evaluate(() => window.copiedCommand), longCommand);
+        for (const theme of ['dark', 'light']) {
+            await page.evaluate(theme => document.documentElement.setAttribute('data-theme', theme), theme);
+            assert(await copy.evaluate(el => {
+                const swatch = document.createElement('span');
+                swatch.style.color = 'var(--text-primary)'; el.append(swatch);
+                const matches = getComputedStyle(el).color === getComputedStyle(swatch).color;
+                swatch.remove(); return matches;
+            }), `copy text should follow ${theme} theme`);
+        }
+        await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
 
         // Old servers send only 200 characters of JSON; load the saved original immediately.
         const live = longCommand + '\nprintf "LIVE_END"';

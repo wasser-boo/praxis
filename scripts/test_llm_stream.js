@@ -27,7 +27,7 @@ const context = {
     getElementById: () => container,
     createElement() {
       const content = { innerHTML: '', classList: { remove() {} } };
-      return { content, querySelector: () => content, remove() { nodes.splice(nodes.indexOf(this), 1); } };
+      return { content, get isConnected() { return nodes.includes(this); }, querySelector: () => content, remove() { nodes.splice(nodes.indexOf(this), 1); } };
     }
   },
   stopChatStream() {}, stopChatTimer() {}, autoScrollChat() {},

@@ -20,8 +20,9 @@ let chatUsername = localStorage.getItem('praxis_chat_username') || 'User';
 let chatSessionId = chatUserId; // legacy alias
 let chatAttachments = [];
 let vmRefreshInterval = null;
-let chatSeenIds = new Set();
 let chatPollGen = 0;
+let chatHistoryRequestId = 0;
+let chatHistoryAppliedId = 0;
 let isAgentActive = false;
 let chatSessions = [];
 let chatBotName = 'Praxis';
@@ -153,7 +154,11 @@ async function loadTabData(tab) {
     try {
         switch (tab) {
             case 'overview': await loadOverview(); break;
-            case 'chat': await loadChatStatus(); break;
+            case 'chat':
+                // SSE may have been missed while this view was hidden/idle.
+                // Opening history is not a request to autoplay old replies.
+                await Promise.all([loadChatStatus(), pollChatMessages(false)]);
+                break;
             case 'vm': await loadVM(); break;
             case 'contexts': await loadContexts(); break;
             case 'templates': await loadTemplates(); break;
@@ -637,7 +642,6 @@ async function chatSendMessage() {
 
     // Show user message immediately (optimistic)
     addChatMessage('user', displayMsg);
-    chatSeenIds.add('user:' + displayMsg);
     autoScrollChat();
 
     try {
@@ -811,6 +815,7 @@ function startChatStream() {
     let streamMsg = null;
     let completedMsg = null;
     let terminalRecovery = null;
+    const current = () => chatEventSource === es && chatUserId === uid && !!authToken;
 
     es.onopen = async () => {
         if (chatEventSource !== es || chatUserId !== uid) return;
@@ -827,10 +832,12 @@ function startChatStream() {
     });
 
     es.addEventListener('typing', (e) => {
+        if (!current()) return;
         console.log('[SSE] typing event:', e.data);
     });
 
     es.addEventListener('agent_start', (e) => {
+        if (!current()) return;
         console.log('[SSE] agent_start event');
         addAgentLoopBanner('start');
         updateAgentUI(true);
@@ -838,11 +845,13 @@ function startChatStream() {
     });
 
     es.addEventListener('agent_stop', (e) => {
+        if (!current()) return;
         console.log('[SSE] agent_stop event');
         addAgentLoopBanner('stop');
         updateAgentUI(false);
         document.body.classList.remove('agent-loop-running');
         stopChatTimer();
+        pollChatMessages(); // Also recover text from tool-bearing final responses.
     });
 
     es.addEventListener('chat_tts', (e) => {
@@ -858,20 +867,22 @@ function startChatStream() {
     });
 
     es.addEventListener('assistant_saved', (e) => {
+        if (!current()) return;
         try {
             const d = JSON.parse(e.data);
             const m = typeof d.data === 'string' ? JSON.parse(d.data) : (d.data || d);
-            if (completedMsg) {
-                completedMsg.dataset.messageId = String(m.id);
-                completedMsg.chatText = m.content;
-                completedMsg.querySelector('.msg-content').innerHTML = renderMarkdown(m.content);
+            const div = renderChatMessage(m);
+            // A history poll can win the race against this notification. Never
+            // overwrite another reply or give two bubbles the same saved ID.
+            if (completedMsg && completedMsg.chatText === m.content) {
+                if (completedMsg !== div && !completedMsg.dataset.messageId) completedMsg.remove();
                 completedMsg = null;
             }
-            renderChatMessage(m);
         } catch (err) { console.error('[SSE assistant_saved error]', err); }
     });
 
     es.addEventListener('feedback', (e) => {
+        if (!current()) return;
         console.log('[SSE] feedback event received');
         try {
             const d = JSON.parse(e.data);
@@ -879,6 +890,7 @@ function startChatStream() {
         } catch (err) { console.error('[SSE feedback error]', err); }
     });
     es.addEventListener('stream_abort', () => {
+        if (!current()) return;
         // A failed/cancelled generation is never a completed reply. Remove its
         // provisional bubble so a subsequent call cannot append duplicate text.
         if (streamMsg) streamMsg.remove();
@@ -887,11 +899,12 @@ function startChatStream() {
         stopChatTimer();
     });
     es.addEventListener('char', (e) => {
+        if (!current()) return;
         const t0 = performance.now();
         try {
             const d = JSON.parse(e.data);
             if (d.data) {
-                if (!streamMsg) {
+                if (!streamMsg || !streamMsg.isConnected) {
                     console.log('[SSE] first char received, creating stream message element');
                     streamMsg = document.createElement('div');
                     // Tag streamed messages produced inside an agent loop so
@@ -926,12 +939,12 @@ function startChatStream() {
         } catch (err) { console.error('[SSE char error]', err, e.data); }
     });
     es.addEventListener('assistant', (e) => {
+        if (!current()) return;
         console.log('[SSE] assistant (final) event received');
         try {
             const d = JSON.parse(e.data);
             if (d.data) {
-                chatSeenIds.add('assistant:' + d.data.slice(0, 80));
-                if (streamMsg) {
+                if (streamMsg && streamMsg.isConnected) {
                     console.log('[SSE] finalizing stream message, buffer length:', streamBuffer.length);
                     const contentEl = streamMsg.querySelector('.msg-content');
                     if (contentEl) {
@@ -952,6 +965,7 @@ function startChatStream() {
         } catch (err) { console.error('[SSE assistant error]', err); }
     });
     es.addEventListener('question', (e) => {
+        if (!current()) return;
         console.log('[SSE] question event received');
         try {
             const d = JSON.parse(e.data);
@@ -960,6 +974,7 @@ function startChatStream() {
         } catch (err) { console.error('[SSE question error]', err); }
     });
     es.addEventListener('image', (e) => {
+        if (!current()) return;
         console.log('[SSE] image event received');
         try {
             const d = JSON.parse(e.data);
@@ -968,6 +983,7 @@ function startChatStream() {
         } catch (err) { console.error('[SSE image error]', err); }
     });
     es.addEventListener('chat_image', (e) => {
+        if (!current()) return;
         console.log('[SSE] chat_image event received');
         try {
             const d = JSON.parse(e.data);
@@ -1004,6 +1020,7 @@ function startChatStream() {
         } catch (err) { console.error('[SSE tool_call error]', err); }
     });
     es.addEventListener('tool_result', (e) => {
+        if (!current()) return;
         console.log('[SSE] tool_result event received');
         try {
             const d = JSON.parse(e.data);
@@ -1011,10 +1028,12 @@ function startChatStream() {
             const tool = inner.tool || '?';
             const dur = inner.duration_ms != null ? ` (${inner.duration_ms} ms)` : '';
             const result = inner.result || '';
-            addChatMessage('tool', `✅ ${escapeHtml(tool)}${escapeHtml(dur)}`, String(result));
+            const div = addChatMessage('tool', `✅ ${escapeHtml(tool)}${escapeHtml(dur)}`, String(result));
+            if (inner.call_id != null) div.dataset.toolResultCallId = String(inner.call_id);
         } catch (err) { console.error('[SSE tool_result error]', err); }
     });
     es.addEventListener('discord_message', (e) => {
+        if (!current()) return;
         console.log('[SSE] discord_message event received');
         try {
             const d = JSON.parse(e.data);
@@ -1023,6 +1042,7 @@ function startChatStream() {
         } catch (err) { console.error('[SSE discord_message error]', err); }
     });
     es.addEventListener('delegation_update', (e) => {
+        if (!current()) return;
         console.log('[SSE] delegation_update event received');
         try {
             const d = JSON.parse(e.data);
@@ -1103,61 +1123,88 @@ async function startTtsSideChannel() {
     }
 }
 
-async function pollChatMessages() {
-    const myGen = chatPollGen;
-    try {
-        const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}?chat_only=1`);
-        const data = await res.json();
-        if (myGen !== chatPollGen) return; // also guard the async JSON read
-        for (const m of data.messages || []) {
-            const id = m.role + ':' + (m.content || '').slice(0, 80);
-            // Revisit known replies too: audio can become ready after the text.
-            if (m.role === 'assistant' || !chatSeenIds.has(id)) {
-                chatSeenIds.add(id);
-                renderChatMessage(m, true);
-            }
-        }
-        await loadCLStatus();
-    } catch {}
+async function pollChatMessages(autoplayAudio = true) {
+    return refreshChatMessages(autoplayAudio, false);
 }
 
 async function loadChatHistory() {
-    // Only clear the DOM — do NOT delete messages on the backend! The previous
-    // implementation called clearChatMessages() here, which has the side effect
-    // of issuing DELETE /api/messages/:user_id, wiping the user's history every
-    // time the chat tab opened or a session was switched.
-    const container = document.getElementById('chat-messages');
-    if (container) {
-        container.innerHTML = '<div class="chat-welcome">Loading messages...</div>';
-    }
-    chatSeenIds.clear();
+    return refreshChatMessages(false, true);
+}
 
-    const mySessionId = chatSessionId;
-    const myGen = chatPollGen;
-    console.log('[HISTORY] loading history for session', chatSessionId, 'user_id', chatUserId);
+async function refreshChatMessages(autoplayAudio, reconcile) {
+    const uid = chatUserId;
+    const generation = chatPollGen;
+    const requestId = ++chatHistoryRequestId;
+    const container = document.getElementById('chat-messages');
+    if (!container || !authToken) return;
+    // Keep visible/live nodes while fetching. Only a successful current
+    // snapshot may prune rows that already existed when this reload started.
+    const before = reconcile ? [...container.children].map(div => ({
+        div, id: div.dataset.messageId || div.dataset.toolMessageId,
+    })) : [];
+    const current = () => uid === chatUserId && generation === chatPollGen && !!authToken;
     try {
-        // chat_only=1: hide rows up to the /clear marker. The Messages tab
-        // keeps the full history; a chat clear never deletes anything.
-        const res = await apiGet(`/api/messages/${encodeURIComponent(chatUserId)}?chat_only=1`);
+        const res = await apiGet(`/api/messages/${encodeURIComponent(uid)}?chat_only=1`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        if (chatSessionId !== mySessionId || chatPollGen !== myGen) return;
-        const msgs = data.messages || [];
-        console.log('[HISTORY] got', msgs.length, 'messages');
-        const welcome = container && container.querySelector('.chat-welcome');
-        if (welcome) welcome.remove();
-        if (msgs.length === 0) {
-            if (container) {
-                container.innerHTML = '<div class="chat-welcome">No messages yet. Start typing or run /start to begin.</div>';
-            }
-            return;
+        if (!current() || requestId < chatHistoryAppliedId) return;
+        if (!Array.isArray(data.messages)) throw new Error('Invalid history response');
+        chatHistoryAppliedId = requestId;
+        const ids = new Set(data.messages.filter(m => m.id != null).map(m => String(m.id)));
+        for (const { div, id } of before) {
+            // A provisional node can receive its saved ID during this fetch;
+            // use the identity captured at request start, not its newer one.
+            if (id && !ids.has(id) && (div.dataset.messageId || div.dataset.toolMessageId) === id) div.remove();
         }
-        for (const m of msgs) {
-            const id = m.role + ':' + (m.content || '').slice(0, 80);
-            chatSeenIds.add(id);
-            renderChatMessage(m);
+        // Stable DB identities, not text prefixes, handle both repeated text
+        // and overlap between SSE, regular polling and explicit reloads.
+        for (const m of data.messages) renderChatMessage(m, autoplayAudio);
+        const welcome = container.querySelector('.chat-welcome');
+        if (welcome) {
+            if (container.querySelector('.chat-msg')) welcome.remove();
+            else welcome.textContent = 'No messages yet. Start typing or run /start to begin.';
         }
-        if (container) container.scrollTop = container.scrollHeight;
-    } catch (err) { console.error('[HISTORY] load error:', err); }
+        if (!container.children.length) container.innerHTML = '<div class="chat-welcome">No messages yet. Start typing or run /start to begin.</div>';
+        if (reconcile) container.scrollTop = container.scrollHeight;
+        await loadCLStatus();
+    } catch (err) {
+        if (!current() || requestId < chatHistoryAppliedId) return;
+        console.warn('[HISTORY] refresh failed:', err);
+        const welcome = container.querySelector('.chat-welcome');
+        if (welcome) welcome.textContent = 'Verlauf konnte nicht geladen werden. Bitte erneut versuchen.';
+    }
+}
+
+function chatSavedMessage(id) {
+    if (id == null) return null;
+    return [...document.querySelectorAll('#chat-messages .chat-msg')]
+        .find(div => div.dataset.messageId === String(id)) || null;
+}
+
+function chatOrderSavedMessage(div, id, command = false) {
+    const container = document.getElementById('chat-messages');
+    if (!container || !div || id == null) return;
+    const key = el => {
+        const value = el.dataset.messageId || el.dataset.toolMessageId;
+        return value == null ? null : [Number(value), el.classList.contains('chat-terminal-call') ? 1 : 0];
+    };
+    const compare = (a, b) => a[0] - b[0] || a[1] - b[1];
+    const target = [Number(id), command ? 1 : 0];
+    const children = [...container.children];
+    const index = children.indexOf(div);
+    const saved = children.filter(el => el !== div && key(el));
+    const misplaced = children.some((el, position) => el !== div && key(el) && (position < index
+        ? compare(key(el), target) > 0 : compare(key(el), target) < 0));
+    if (!misplaced) return;
+    const next = saved.find(el => compare(key(el), target) > 0);
+    if (next) container.insertBefore(div, next);
+    else if (saved.length) saved[saved.length - 1].after(div);
+}
+
+function chatBindSavedMessage(div, id) {
+    if (!div || id == null || div.dataset.messageId === String(id)) return;
+    div.dataset.messageId = String(id);
+    chatOrderSavedMessage(div, id);
 }
 
 function chatIsTerminalTool(tool) {
@@ -1183,13 +1230,13 @@ function chatRenderTerminalCall(callId, tool, command, messageId = null) {
         : matches.find(el => el.dataset.toolMessageId === savedId)
             || matches.find(el => !el.dataset.toolMessageId);
     if (!div) {
-        div = addChatMessage('tool', `🔧 <b>${escapeHtml(tool)}</b>`);
+        div = addChatMessage('tool', `<div class="terminal-command-header"><span>🔧 <b>${escapeHtml(tool)}</b></span></div>`);
         div.classList.add('chat-terminal-call');
         div.dataset.toolCallId = id;
         const content = div.querySelector('.msg-content');
         const copy = document.createElement('button');
         copy.type = 'button';
-        copy.className = 'terminal-command-copy';
+        copy.className = 'btn btn-sm btn-secondary terminal-command-copy';
         copy.textContent = 'Befehl kopieren';
         copy.disabled = true;
         const pre = document.createElement('pre');
@@ -1201,9 +1248,13 @@ function chatRenderTerminalCall(callId, tool, command, messageId = null) {
                 copy.textContent = 'Kopiert';
             } catch (_) { copy.textContent = 'Bitte manuell kopieren'; }
         };
-        content.append(copy, pre);
+        content.querySelector('.terminal-command-header').append(copy);
+        content.append(pre);
     }
-    if (savedId != null) div.dataset.toolMessageId = savedId;
+    if (savedId != null && div.dataset.toolMessageId !== savedId) {
+        div.dataset.toolMessageId = savedId;
+        chatOrderSavedMessage(div, savedId, true);
+    }
     // Never let a late/duplicate preview replace a complete saved command.
     if (savedId != null || div.dataset.commandResolved !== 'true') {
         const complete = typeof command === 'string';
@@ -1219,22 +1270,16 @@ function chatRenderTerminalCall(callId, tool, command, messageId = null) {
 }
 
 function renderChatMessage(m, autoplayAudio = false) {
-    // Discord-mirror rows from history: render with the same badge as live
-    // discord_message SSE events so the chat looks identical after a reload.
+    if (!m) return null;
+    let div = chatSavedMessage(m.id);
+    // Discord-mirror rows keep their origin, but use DB IDs for dedup too.
     if ((m.role === 'discord_user' || m.role === 'discord_bot') && m.discord_meta) {
-        addDiscordMirrorMessage({ ...m.discord_meta, content: m.content });
-        return;
-    }
-    // Show saved terminal arguments, but keep intermediate assistant prose
-    // and other tools' potentially huge/private argument bodies hidden.
-    if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
-        for (const tc of m.tool_calls) {
-            const fn = tc && (tc.function || tc);
-            if (fn && chatIsTerminalTool(fn.name)) {
-                chatRenderTerminalCall(tc.id, fn.name, chatTerminalCommand(fn.arguments), m.id);
-            }
-        }
-        return;
+        if (!div) div = [...document.querySelectorAll('#chat-messages .chat-msg.discord')]
+            .find(el => !el.dataset.messageId && el.chatRole === m.role && el.chatText === m.content
+                && el.chatChannel === m.discord_meta.channel_id);
+        if (!div) div = addDiscordMirrorMessage({ ...m.discord_meta, content: m.content });
+        chatBindSavedMessage(div, m.id);
+        return div;
     }
     if (m.role === 'assistant' && m.content) {
         // Check for web question
@@ -1257,26 +1302,45 @@ function renderChatMessage(m, autoplayAudio = false) {
         // Streamed bubbles don't have a DB id until assistant_saved arrives.
         // Match the full text only for such provisional identities, never the
         // old 80-character dedup key (two replies can share the same prefix).
-        let div = m.id != null && replies.find(el => el.dataset.messageId === String(m.id));
         if (!div) div = replies.find(el => !el.dataset.messageId && el.chatText === m.content);
         if (!div) div = addChatMessage('assistant', m.content);
+        if (div.chatText !== m.content) {
+            div.querySelector('.msg-content').innerHTML = renderMarkdown(m.content);
+            div.chatText = m.content;
+        }
         if (m.id != null) {
-            div.dataset.messageId = String(m.id);
+            chatBindSavedMessage(div, m.id);
             if (m.audio_mime) chatReceiveTts({ message_id: m.id, mime: m.audio_mime }, chatUserId, autoplayAudio);
             chatAttachTtsButton(div, chatTtsClips.get(chatTtsKey(chatUserId, m.id)));
         }
         stopChatTimer();
     }
+    // A reply can contain useful/final text AND tool calls (agent_complete,
+    // feedback, etc.). Render the text above; never hide it due to tool_calls.
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+        for (const tc of m.tool_calls) {
+            const fn = tc && (tc.function || tc);
+            if (fn && chatIsTerminalTool(fn.name)) {
+                chatRenderTerminalCall(tc.id, fn.name, chatTerminalCommand(fn.arguments), m.id);
+            }
+        }
+    }
     if (m.role === 'user' && m.content) {
-        addChatMessage('user', m.content);
+        if (!div) div = [...document.querySelectorAll('#chat-messages .chat-msg.user')]
+            .find(el => !el.dataset.messageId && el.chatText === m.content);
+        if (!div) div = addChatMessage('user', m.content);
     }
     if (m.role === 'tool' && m.content) {
         const toolName = m.tool_name || 'tool';
-        addChatMessage('tool', `<span class="tool-name">${escapeHtml(toolName)}</span>`, m.content);
+        if (!div && m.tool_call_id != null) div = [...document.querySelectorAll('#chat-messages .chat-msg.tool')]
+            .find(el => !el.dataset.messageId && el.dataset.toolResultCallId === String(m.tool_call_id));
+        if (!div) div = addChatMessage('tool', `<span class="tool-name">${escapeHtml(toolName)}</span>`, m.content);
+        const output = div.querySelector('.tool-out');
+        if (output && output.textContent !== m.content) output.textContent = m.content;
     }
-    if (m.role === 'system' && m.content) {
-        addChatMessage('system', m.content);
-    }
+    if (m.role === 'system' && m.content && !div) div = addChatMessage('system', m.content);
+    chatBindSavedMessage(div, m.id);
+    return div;
 }
 
 // ═══ Chat Timer ════════════════════════════════════════════════════════════════
@@ -1352,7 +1416,7 @@ function addChatMessage(type, content, extra = null) {
         div.textContent = content;
     }
 
-    if (type === 'assistant') div.chatText = content;
+    if (type === 'assistant' || type === 'user') div.chatText = content;
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
     return div;
@@ -1410,8 +1474,12 @@ function addDiscordMirrorMessage(inner) {
             <div class="discord-text">${renderMarkdown(inner.content || '')}</div>
         </div>
     </div>`;
+    div.chatText = inner.content || '';
+    div.chatRole = isBot ? 'discord_bot' : 'discord_user';
+    div.chatChannel = inner.channel_id;
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
+    return div;
 }
 
 function addAgentLoopBanner(kind) {
@@ -1443,7 +1511,6 @@ async function clearChatMessages() {
     chatPollGen++; // Ignore history/command recovery that began before /clear.
     const container = document.getElementById('chat-messages');
     container.innerHTML = '<div class="chat-welcome">Chat cleared. Your history stays in the Messages tab — new messages appear here again.</div>';
-    chatSeenIds.clear();
 }
 
 // /deletemessages: hard-delete ALL messages of the CURRENT user/session from
@@ -1472,7 +1539,6 @@ async function deleteAllMessages() {
     chatPollGen++; // A pending history request must not restore deleted rows.
     const container = document.getElementById('chat-messages');
     container.innerHTML = '<div class="chat-welcome">All messages for this session deleted. Discord was not affected. New messages appear here.</div>';
-    chatSeenIds.clear();
 }
 
 // ═══ Chat Sessions ══════════════════════════════════════════════════════════════
@@ -1620,8 +1686,6 @@ async function switchChatSession(id) {
     chatUserId = id;
     chatSessionId = id;
     localStorage.setItem('praxis_chat_active_session', id);
-    // Reset the seen-id set; it tracks dedup keys that are session-local.
-    chatSeenIds = new Set();
     // Clear the chat view (DOM only — does NOT delete messages on the server).
     const container = document.getElementById('chat-messages');
     if (container) {

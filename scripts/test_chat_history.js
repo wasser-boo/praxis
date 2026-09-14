@@ -1,0 +1,195 @@
+#!/usr/bin/env node
+// Real dashboard with synthetic stored messages and controllable SSE/HTTP races.
+// No live service, private history, credentials or provider calls.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const http = require('node:http');
+let chromium;
+for (const mod of ['playwright', '/tmp/praxis-ui-browser/node_modules/playwright']) {
+    try { ({ chromium } = require(mod)); break; } catch (_) {}
+}
+assert(chromium, 'Playwright required');
+const root = process.env.PRAXIS_STATIC_DIR || path.resolve(__dirname, '../static');
+const streams = new Set();
+let messages, delayNext, delayed, failNext, audioRequests;
+const assistant = (id, content, tool_calls) => ({ id, role: 'assistant', content, ...(tool_calls ? { tool_calls } : {}) });
+const complete = [{ id: 'complete', name: 'agent_complete', arguments: '{}' }];
+function json(res, data, status = 200) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); }
+const server = http.createServer((req, res) => {
+    const p = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (p === '/' || p.startsWith('/static/') || p.startsWith('/api/avatar/') || p === '/logo.png') {
+        const name = p === '/' ? 'index.html' : p.startsWith('/api/avatar/') ? 'logo.png' : path.basename(p);
+        res.writeHead(200, { 'content-type': { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png' }[path.extname(name)] || 'application/octet-stream' });
+        return res.end(fs.readFileSync(path.join(root, name)));
+    }
+    if (p === '/api/status') return json(res, { version: 'history-fixture' });
+    if (p === '/api/contexts') return json(res, { contexts: [{ user_id: 'default' }, { user_id: 'other' }] });
+    if (p === '/api/pairings') return json(res, { pairings: [] });
+    if (p === '/api/pairings/pending') return json(res, { pending_pairings: [] });
+    let m;
+    if ((m = p.match(/^\/api\/contexts\/(\w+)$/))) return json(res, { user_id: m[1], username: 'Fixture', settings: { web_chat_tts: true } });
+    if ((m = p.match(/^\/api\/messages\/(\w+)$/))) {
+        assert.equal(req.headers.authorization, 'Bearer synthetic-history-token');
+        if (failNext) { failNext = false; return json(res, { error: 'synthetic unavailable' }, 503); }
+        const data = JSON.parse(JSON.stringify({ messages: messages[m[1]] || [] }));
+        if (m[1] === 'default' && delayNext) { delayNext = false; delayed = { res, data }; return; }
+        return json(res, data);
+    }
+    if (/^\/api\/chat\/audio\//.test(p)) { audioRequests++; return json(res, {}, 404); }
+    if (/^\/api\/agent\/status\//.test(p)) return json(res, { active: false });
+    if (/^\/api\/(sm|cl)\//.test(p)) return json(res, {});
+    if ((m = p.match(/^\/api\/chat\/stream\/(\w+)$/))) {
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' }); res.write(': ready\n\n');
+        const s = { uid: m[1], res }; streams.add(s); req.on('close', () => streams.delete(s)); return;
+    }
+    json(res, {}, 404);
+});
+function emit(event, payload) {
+    for (const s of streams) if (s.uid === 'default') {
+        const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
+        s.res.write(`event: ${event}\ndata: ${JSON.stringify({ event, data })}\n\n`);
+    }
+}
+async function until(predicate) {
+    const start = Date.now();
+    while (!predicate()) {
+        if (Date.now() - start > 10000) throw new Error('fixture wait timed out');
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+}
+const row = (page, id) => page.locator(`#chat-messages .chat-msg[data-message-id="${id}"]`);
+async function visible(page, id) { await row(page, id).waitFor({ state: 'attached', timeout: 8000 }); }
+function releaseHistory() { const d = delayed; delayed = null; json(d.res, d.data); }
+(async () => {
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const browser = await chromium.launch({ headless: true });
+    const failures = [];
+    async function check(name, seed, run) {
+        if (process.env.CASE && process.env.CASE !== name) return;
+        messages = { default: seed, other: [] }; delayNext = false; delayed = null; failNext = false; audioRequests = 0;
+        const page = await browser.newPage({ viewport: { width: 980, height: 820 } });
+        const errors = []; page.on('pageerror', e => errors.push(e.message));
+        try {
+            await page.route('**/*', route => new URL(route.request().url()).origin === base ? route.continue() : route.abort());
+            await page.addInitScript(() => {
+                localStorage.setItem('praxis_token', 'synthetic-history-token');
+                localStorage.setItem('praxis_chat_sessions', JSON.stringify([{ id: 'default', name: 'Default' }, { id: 'other', name: 'Other' }]));
+            });
+            await page.goto(base, { waitUntil: 'domcontentloaded' });
+            await page.waitForFunction(() => chatEventSource?.readyState === EventSource.OPEN && chatTtsSettings.has('default'));
+            await page.evaluate(async () => { showTab('chat'); await pollChatMessages(); stopChatPolling(); });
+            await run(page);
+            assert.deepEqual(errors, []);
+            console.log('PASS', name);
+        } catch (e) { failures.push(name); console.error('FAIL', name, e.message); }
+        finally {
+            if (delayed) { delayed.res.end(); delayed = null; }
+            await page.close();
+        }
+    }
+    try {
+        const prefix = 'Identical prefix '.repeat(8);
+        await check('stored-responses', [
+            assistant(1, 'Complete answer alongside a tool call.', complete),
+            assistant(2, prefix + 'FIRST'), assistant(3, prefix + 'SECOND'),
+            assistant(4, 'Repeated answer'), assistant(5, 'Repeated answer'),
+            { id: 6, role: 'user', content: prefix + 'user one' }, { id: 7, role: 'user', content: prefix + 'user two' },
+            { id: 8, role: 'tool', content: 'same result', tool_name: 'execute_terminal', tool_call_id: 'one' },
+            { id: 9, role: 'tool', content: 'same result', tool_name: 'execute_terminal', tool_call_id: 'two' },
+            assistant(10, '', [{ id: 'command', name: 'execute_terminal', arguments: '{"command":"printf fixture"}' }]),
+        ], async page => {
+            await visible(page, 1);
+            for (let id = 1; id <= 9; id++) { await visible(page, id); assert.equal(await row(page, id).count(), 1); }
+            assert.equal(await page.locator('.chat-msg.assistant').count(), 5);
+            assert.equal(await page.locator('.chat-terminal-call').count(), 1);
+            await page.evaluate(async () => { await pollChatMessages(); await loadChatHistory(); await pollChatMessages(); });
+            for (let id = 1; id <= 9; id++) assert.equal(await row(page, id).count(), 1, `stable identity ${id}`);
+        });
+        await check('return-to-chat', [], async page => {
+            await page.evaluate(() => showTab('overview'));
+            messages.default.push({ ...assistant(20, 'Reply received while another tab was open.', complete), audio_mime: 'audio/wav' });
+            // Intentionally no SSE/reconnect: returning to chat must refresh even while idle.
+            await page.evaluate(() => showTab('chat'));
+            await visible(page, 20);
+            assert.equal(audioRequests, 0, 'opening history must not autoplay old replies');
+            assert.equal(await row(page, 20).locator('.chat-audio-play').count(), 1);
+        });
+        await check('reload-during-stream', [], async page => {
+            emit('char', 'Live ');
+            await page.waitForFunction(() => document.querySelector('.stream-live')?.textContent === 'Live ');
+            delayNext = true;
+            await page.evaluate(() => { window.loadingHistory = loadChatHistory(); });
+            await until(() => delayed);
+            assert.equal(await page.locator('.stream-live').count(), 1, 'loading must not detach the active stream');
+            emit('char', 'answer'); emit('assistant', 'Live answer');
+            messages.default.push(assistant(30, 'Live answer', complete));
+            await page.waitForFunction(() => [...document.querySelectorAll('.assistant')].some(n => n.chatText === 'Live answer'));
+            releaseHistory(); await page.evaluate(() => window.loadingHistory);
+            assert.equal(await page.locator('.chat-msg.assistant').count(), 1, 'stale empty history must not erase a new response');
+            await page.evaluate(() => pollChatMessages()); await visible(page, 30);
+            failNext = true; await page.evaluate(() => loadChatHistory());
+            assert.equal(await row(page, 30).count(), 1, 'HTTP failure must preserve the visible history');
+        });
+        await check('saved-during-reload', [], async page => {
+            emit('char', 'Saving ');
+            await page.waitForFunction(() => document.querySelector('.stream-live'));
+            delayNext = true;
+            await page.evaluate(() => { window.pendingReload = loadChatHistory(); }); await until(() => delayed);
+            messages.default.push(assistant(31, 'Saving answer'));
+            emit('char', 'answer'); emit('assistant', 'Saving answer'); emit('assistant_saved', messages.default[0]);
+            await visible(page, 31);
+            releaseHistory(); await page.evaluate(() => window.pendingReload);
+            assert.equal(await row(page, 31).count(), 1, 'a provisional node bound during reload is still a new reply');
+        });
+        await check('saved-stream-races', [], async page => {
+            emit('char', 'Race ');
+            await page.waitForFunction(() => document.querySelector('.stream-live'));
+            messages.default.push(assistant(40, 'Race reply'));
+            await page.evaluate(() => pollChatMessages());
+            emit('char', 'reply'); emit('assistant', 'Race reply'); emit('assistant_saved', messages.default[0]);
+            await visible(page, 40);
+            await page.waitForFunction(() => document.querySelectorAll('.stream-live').length === 0);
+            assert.equal(await row(page, 40).count(), 1, 'poll-before-save must not duplicate a streamed answer');
+            emit('assistant', 'Older unsaved reply'); emit('assistant', 'Newer unsaved reply');
+            await page.waitForFunction(() => [...document.querySelectorAll('.assistant')].some(n => n.chatText === 'Newer unsaved reply'));
+            emit('assistant_saved', assistant(41, 'Older unsaved reply'));
+            await visible(page, 41);
+            assert(await page.locator('#chat-messages').textContent().then(t => t.includes('Newer unsaved reply')), 'late save must not overwrite a different reply');
+            emit('assistant_saved', assistant(42, 'Newer unsaved reply'));
+            await visible(page, 42);
+            for (const id of [40, 41, 42]) assert.equal(await row(page, id).count(), 1);
+        });
+        await check('out-of-order-reload', [assistant(60, 'Already visible')], async page => {
+            await visible(page, 60);
+            messages.default = []; delayNext = true;
+            await page.evaluate(() => { window.firstReload = loadChatHistory(); }); await until(() => delayed);
+            messages.default = [assistant(60, 'Already visible'), assistant(61, 'Newer snapshot')];
+            await page.evaluate(() => loadChatHistory()); await visible(page, 61);
+            releaseHistory(); await page.evaluate(() => window.firstReload);
+            assert.equal(await row(page, 60).count(), 1); assert.equal(await row(page, 61).count(), 1);
+            // A current successful snapshot still reconciles genuinely pruned history.
+            messages.default = [assistant(61, 'Newer snapshot')];
+            await page.evaluate(() => loadChatHistory());
+            assert.equal(await row(page, 60).count(), 0); assert.equal(await row(page, 61).count(), 1);
+        });
+        await check('stale-session-events', [], async page => {
+            messages.default = [assistant(50, 'Private old-session reply')]; delayNext = true;
+            await page.evaluate(() => { window.oldStream = chatEventSource; window.oldLoad = loadChatHistory(); }); await until(() => delayed);
+            await page.evaluate(() => switchChatSession('other'));
+            releaseHistory(); await page.evaluate(() => window.oldLoad);
+            await page.evaluate(() => {
+                for (const [event, payload] of [['char', 'STALE'], ['assistant', 'STALE'], ['assistant_saved', { id: 50, role: 'assistant', content: 'STALE' }]]) {
+                    window.oldStream.dispatchEvent(new MessageEvent(event, { data: JSON.stringify({ data: typeof payload === 'string' ? payload : JSON.stringify(payload) }) }));
+                }
+            });
+            assert.equal(await page.locator('.chat-msg.assistant').count(), 0);
+        });
+        assert.deepEqual(failures, [], 'history regressions');
+        console.log('test_chat_history: ok; local fixtures only');
+    } finally {
+        await browser.close(); for (const s of streams) s.res.end();
+        server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    }
+})().catch(e => { console.error(e); process.exitCode = 1; });
