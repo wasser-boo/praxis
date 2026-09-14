@@ -83,6 +83,15 @@ pub fn assistant_saved(user_id: &str, id: i64, content: &str) {
     }).to_string());
 }
 
+/// Keep connected players in sync with context edits from any frontend/tool.
+/// Never publish the full context: it can contain private provider settings.
+/// Disconnected clients reload this permission on reconnect/before autoplay.
+pub fn chat_tts_settings(user_id: &str, enabled: bool) {
+    if has_subscriber(user_id) {
+        send(user_id, "chat_tts_settings", &serde_json::json!({ "enabled": enabled }).to_string());
+    }
+}
+
 pub fn send(user_id: &str, event: &str, data: &str) {
     // Build a UTF-8-safe preview without slicing on byte boundaries
     // (slicing a &str at a non-char-boundary panics).

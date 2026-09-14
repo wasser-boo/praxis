@@ -1887,8 +1887,8 @@ async fn chat_stream_auth(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-/// TTS-only side channel for the dashboard chat: forwards ONLY `chat_tts`
-/// events from the given user's stream. Used by the frontend to also hear
+/// TTS-only side channel for the dashboard chat: forwards `chat_tts` and
+/// `chat_tts_settings` events from the given user's stream. Used by the frontend to also hear
 /// TTS generated for a different session (e.g. Discord traffic on the paired
 /// user_id) while another chat session is active. All other events are
 /// dropped here so the main stream stays the single source for chat content.
@@ -1919,10 +1919,10 @@ async fn chat_stream_tts_only(
             loop {
                 match r.recv().await {
                     Ok(ev) => {
-                        if ev.event != "chat_tts" {
-                            continue; // TTS-only channel: drop everything else
+                        if !matches!(ev.event.as_str(), "chat_tts" | "chat_tts_settings") {
+                            continue; // Never mirror chat/context contents here.
                         }
-                        tracing::debug!(user_id = %uid, "[SSE-TTS] forwarding chat_tts");
+                        tracing::debug!(user_id = %uid, event = %ev.event, "[SSE-TTS] forwarding audio event");
                         let data = serde_json::to_string(&ev).unwrap_or_default();
                         let event = Event::default().event(ev.event).data(data);
                         return Some((Ok(event), r));

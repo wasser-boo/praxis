@@ -540,6 +540,39 @@ async fn tool_chain_completion_stops_current_task_but_not_next_direct_agent_run(
     assert_paired_history(&state, &user, 2);
 }
 
+#[tokio::test]
+#[ignore = "Requires Node and POML_CLI; local synthetic LLM and TTS only"]
+async fn audio_web_tts_off_blocks_discord_flag_and_explicit_feedback_on_both_paths() {
+    use wiremock::{matchers::{method, path}, Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/tts"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0).mount(&server).await;
+    for max_turns in [1, 4] {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, user, _) = fixture(dir.path(), vec![
+            Step::Reply(reply(Some("Checking the context."), vec![call(
+                "context", "get_context", serde_json::json!({}),
+            )])),
+            Step::Reply(reply(Some("Silent web reply."), vec![])),
+        ]);
+        state.db.merge_context(&user, serde_json::json!({
+            "settings.max_llm_turns": max_turns,
+            "settings.use_tts": true,
+            "settings.web_chat_tts": false,
+            "settings.feedback_mode": ["tts"],
+            "settings.message_on_toolcalling": true,
+            "settings.voice_tts_type": "qwen_tts",
+            "settings.qwen_tts_server": server.uri(),
+        })).unwrap();
+        let response = handle_message(&state, &user, "offline audio gate test", Some("web")).await.unwrap();
+        assert_eq!(response, "Silent web reply.");
+    }
+    // Allow detached feedback/final synthesis tasks to reach the local mock.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    server.verify().await;
+}
+
 #[test]
 fn tool_chain_empty_tts_returns_before_spawning_any_task() {
     // No Tokio runtime: trying to spawn even a doomed TTS task must fail this test.
@@ -553,6 +586,7 @@ fn tool_chain_empty_tts_returns_before_spawning_any_task() {
             "no-tts-for-empty-text",
             &db,
             None,
+            Some("web"),
         );
     }
 }

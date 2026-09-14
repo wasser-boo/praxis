@@ -106,7 +106,8 @@ pub struct ContextSettings {
     pub elevenlabs_tts_language: Option<String>,
     #[serde(default)]
     pub use_tts: bool,
-    /// Speak agent replies in the web dashboard chat (ElevenLabs TTS event).
+    /// Independent web-reply synthesis/autoplay permission; use_tts cannot override OFF.
+    /// Manual replay of already stored audio remains available.
     #[serde(default)]
     pub web_chat_tts: bool,
     #[serde(default = "default_true")]
@@ -486,6 +487,9 @@ impl Database {
                 rusqlite::params![ctx.user_id, data],
             )?;
         }
+        // Publish while the DB lock still orders saves. Only the public web-
+        // speech flag is sent, never credentials or other context contents.
+        crate::dashboard::stream::chat_tts_settings(&ctx.user_id, ctx.settings.web_chat_tts);
         Ok(())
     }
 
@@ -557,6 +561,7 @@ impl Database {
             )?;
         }
         tx.commit()?;
+        crate::dashboard::stream::chat_tts_settings(user_id, false);
         Ok(())
     }
 

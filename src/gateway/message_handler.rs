@@ -333,10 +333,7 @@ pub(crate) async fn handle_message_inner(
     state.db.increment_turn(&mut updated_ctx);
     state.db.save_context(&updated_ctx)?;
 
-    if updated_ctx.settings.use_tts
-        || channel_id.is_some_and(|ch| ch.starts_with("voice:"))
-        || (channel_id == Some("web") && updated_ctx.settings.web_chat_tts)
-    {
+    if reply_tts_enabled(&updated_ctx.settings, channel_id) {
         spawn_tts(
             reply.clone(),
             &updated_ctx.settings,
@@ -344,6 +341,7 @@ pub(crate) async fn handle_message_inner(
             user_id,
             &state.db,
             Some(message_id),
+            channel_id,
         );
     }
 
@@ -373,7 +371,6 @@ async fn handle_message_agent_loop(
         .or_else(|| channel_id.map(|s| s.to_string()));
     let user_id_owned = user_id.to_string();
     let secrets = state.secrets.clone();
-    let settings = ctx.settings.clone();
 
     // Inject channel_id into custom_data so tools can use it.
     // Always overwrite with the CURRENT channel so replies/tools follow the user
@@ -446,29 +443,32 @@ async fn handle_message_agent_loop(
 
     let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    let use_tts = ctx.settings.use_tts;
-    let is_voice_input = channel_id.map_or(false, |ch| ch.starts_with("voice:"));
-    let tts_for_feedback = use_tts || is_voice_input;
-
     // Spawn feedback routing task (always for web stream)
     let is_web = channel_id.map_or(true, |ch| ch == "web" || ch.is_empty());
     let feedback_modes = feedback_modes.clone();
     let uid = user_id_owned.clone();
     let ch = feedback_channel.clone();
-    let tts_settings = settings.clone();
-    let tts_secrets = secrets.clone();
+    let tts_secrets = secrets;
     let tts_db = state.db.clone();
+    let tts_channel_id = channel_id.map(str::to_owned);
 
     tokio::spawn(async move {
         while let Some(msg) = feedback_rx.recv().await {
             if is_web {
                 crate::dashboard::stream::send(&uid, "feedback", &msg);
             }
+            // A context command/tool can disable speech during the agent loop.
+            let Ok(current_ctx) = tts_db.load_context(&uid) else { continue };
+            let tts_settings = &current_ctx.settings;
+            let tts_for_feedback = tts_settings.use_tts
+                || tts_channel_id.as_deref().is_some_and(|ch| ch.starts_with("voice:"));
             let mut handled = false;
             for mode in &feedback_modes {
                 match mode.as_str() {
                     "tts" => {
-                        spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid, &tts_db, None);
+                        // Explicit feedback TTS may override Discord use_tts,
+                        // but spawn_tts never overrides the web OFF setting.
+                        spawn_tts(msg.clone(), tts_settings, &tts_secrets, &uid, &tts_db, None, tts_channel_id.as_deref());
                         handled = true;
                     }
                     "dm" => {
@@ -497,7 +497,7 @@ async fn handle_message_agent_loop(
                 }
             }
             if !handled && tts_for_feedback {
-                spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid, &tts_db, None);
+                spawn_tts(msg.clone(), tts_settings, &tts_secrets, &uid, &tts_db, None, tts_channel_id.as_deref());
             }
         }
     });
@@ -517,12 +517,8 @@ async fn handle_message_agent_loop(
     state.db.increment_turn(&mut updated_ctx);
     state.db.save_context(&updated_ctx)?;
 
-    // Final response TTS: always speak if use_tts is on, or if input came from voice.
-    // Web chat: speak only when the dashboard switch (web_chat_tts) is enabled.
-    let is_voice_input = channel_id.map_or(false, |ch| ch.starts_with("voice:"));
-    let is_web_chat = channel_id.map_or(false, |ch| ch == "web");
-    let web_tts_on = updated_ctx.settings.web_chat_tts;
-    if updated_ctx.settings.use_tts || is_voice_input || (is_web_chat && web_tts_on) {
+    // Web speech has its own permission; Discord use_tts cannot enable it.
+    if reply_tts_enabled(&updated_ctx.settings, channel_id) {
         spawn_tts(
             reply.clone(),
             &updated_ctx.settings,
@@ -530,6 +526,7 @@ async fn handle_message_agent_loop(
             user_id,
             &state.db,
             result.response_message_id,
+            channel_id,
         );
     }
 
@@ -959,6 +956,14 @@ async fn execute_tool_call(
     }
 }
 
+fn reply_tts_enabled(settings: &crate::db::contexts::ContextSettings, channel_id: Option<&str>) -> bool {
+    if channel_id == Some("web") {
+        settings.web_chat_tts
+    } else {
+        settings.use_tts || channel_id.is_some_and(|ch| ch.starts_with("voice:"))
+    }
+}
+
 fn spawn_tts(
     text: String,
     settings: &crate::db::contexts::ContextSettings,
@@ -966,10 +971,17 @@ fn spawn_tts(
     user_id: &str,
     db: &crate::db::Database,
     message_id: Option<i64>,
+    channel_id: Option<&str>,
 ) {
     // Tool-only turns, empty tag output and whitespace are not speech. Return
     // before spawning a task or constructing/contacting any TTS provider.
     if text.trim().is_empty() {
+        return;
+    }
+    let is_web = channel_id == Some("web");
+    // Also guard explicit feedback and stale settings snapshots before making
+    // a provider call. A failed context lookup must not enable web synthesis.
+    if is_web && !db.load_context(user_id).is_ok_and(|ctx| ctx.settings.web_chat_tts) {
         return;
     }
     let tts_type = settings.voice_tts_type.clone();
@@ -1005,13 +1017,16 @@ fn spawn_tts(
     let qwen_voice_clone_enabled = settings.qwen_voice_clone_enabled;
     let qwen_voice_clone_prompt = settings.qwen_voice_clone_prompt.clone();
     let audio_output_path = settings.voice_audio_output_path.clone();
-    let web_chat_tts = settings.web_chat_tts;
     let user_id = user_id.to_string();
     let tts_db = db.clone();
 
     tracing::trace!(user_id = %user_id, tts_type = %tts_type, "TTS: Spawning task");
 
     tokio::task::spawn(async move {
+        // The task may not have been scheduled until after an OFF edit.
+        if is_web && !tts_db.load_context(&user_id).is_ok_and(|ctx| ctx.settings.web_chat_tts) {
+            return;
+        }
         let audio_bytes = match tts_type.as_str() {
             "windows_sapi" => {
                 let tts_engine = tts::windows_sapi::WindowsSAPI::new();
@@ -1191,6 +1206,10 @@ fn spawn_tts(
         };
         // Never resurrect a deleted reply (or a changed storage session) as an
         // anonymous audio clip. Inline fallback is only for transient feedback.
+        // Synthesis can finish after the user disables web TTS. Keep the paid-
+        // for bytes available for manual replay, but do not announce/autoplay.
+        let web_chat_tts = tts_db.load_context(&user_id)
+            .is_ok_and(|ctx| ctx.settings.web_chat_tts);
         if web_chat_tts && (stored || message_id.is_none())
             && crate::dashboard::stream::has_subscriber(&user_id)
         {
@@ -1208,7 +1227,9 @@ fn spawn_tts(
             tracing::info!(user_id = %user_id, message_id, "Reply audio saved for dashboard replay");
         }
 
-        crate::event_channel::broadcast_voice_tts(&user_id, final_audio);
+        if !is_web || web_chat_tts {
+            crate::event_channel::broadcast_voice_tts(&user_id, final_audio);
+        }
     });
 }
 

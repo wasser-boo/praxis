@@ -58,7 +58,9 @@ If the entire `settings` object is absent, the new-context defaults are used ins
 
 ## Voice: input, output, and Discord
 
-The working Discord STT gate is **`voice_enabled && use_stt`**, plus a joined, non-deafened bot and a paired speaker. The normal reply-TTS gate is **`use_tts`**, not `voice_tts_enabled`. In the agent-loop path, a `voice:` input also enables reply TTS even when `use_tts` is false.
+The working Discord STT gate is **`voice_enabled && use_stt`**, plus a joined, non-deafened bot and a paired speaker. The normal **Discord** reply-TTS gate is **`use_tts`**, not `voice_tts_enabled`. A `voice:` input also enables reply TTS even when `use_tts` is false.
+
+**Web dashboard speech is independent:** `settings.web_chat_tts` (boolean, default `false`) controls web-reply synthesis and automatic browser playback. Disable it for the active context with `/context set settings.web_chat_tts=false` or the chat speaker button. `use_tts=true` and explicit TTS feedback cannot override this web OFF setting. Context edits update connected dashboards immediately and cancel current/queued autoplay; reconnects and new automatic clips recheck the setting. Discord side-channel autoplay requires both the active chat and the source context to enable `web_chat_tts`. Saved audio remains available through manual replay buttons, without another provider call.
 
 | Variable | Type | Allowed values / operational constraints | Default | Effect |
 |---|---|---|---|---|
@@ -72,7 +74,7 @@ The working Discord STT gate is **`voice_enabled && use_stt`**, plus a joined, n
 | `settings.voice_tts_enabled` | boolean | `true`, `false` | `false` | **Legacy/stored flag:** setting it alone does not enable spoken replies. Use `settings.use_tts`. |
 | `settings.voice_tts_type` | string | Exact values `"elevenlabs"`, `"windows_sapi"`, `"minimax"`, `"mimo_tts"`, `"qwen_tts"` | `"windows_sapi"` | TTS backend. Windows SAPI cannot work on this Linux host. Other backends require their own configured service/key. |
 | `settings.voice_elevenlabs_voice_id` | string or null | Non-empty voice ID available to your ElevenLabs account; `null` means unconfigured | `null` | Required for ElevenLabs TTS, not STT. A voice's display name is not its ID. |
-| `settings.use_tts` | boolean | `true`, `false` | `false` | Enables normal reply TTS; `/tts` toggles it. Agent-loop voice inputs also enable final/eligible feedback TTS independently of this flag. Audio is broadcast to the active Discord playback channel. |
+| `settings.use_tts` | boolean | `true`, `false` | `false` | Enables normal non-web reply TTS; Discord `/tts` toggles it. Voice inputs also enable final/eligible feedback TTS independently of this flag. Does not override `web_chat_tts=false` for web input. Audio is broadcast to the active Discord playback channel. |
 | `settings.use_stt` | boolean | `true`, `false` | `true` | Enables STT together with `voice_enabled`; false skips provider transcription. |
 | `settings.voice_muted` | boolean | `true`, `false` | `false` | **Stored only:** not synchronized with the handler's separate runtime mute state. `/mute` and `/unmute` currently control a runtime transcription gate, not this field or the TTS queue. |
 | `settings.voice_deafened` | boolean | `true`, `false` | `true` | Applied to the actual Songbird call when `/join` runs. Set false and rejoin to receive audio. Also check Discord server/self-deafen controls; changing this stored value alone is not a live call update. |

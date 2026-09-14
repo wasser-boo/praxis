@@ -25,6 +25,9 @@ let audioRequests = 0;
 let delayedAudio = null;
 let delayId = null;
 let failId = null;
+let delayContextUid = null;
+let delayedContext = null;
+let failContextUid = null;
 function json(res, obj, status = 200) {
     res.writeHead(status, { 'content-type': 'application/json' });
     res.end(JSON.stringify(obj));
@@ -51,10 +54,17 @@ const server = http.createServer((req, res) => {
             let data = '';
             req.on('data', c => data += c);
             req.on('end', () => {
-                ttsOn[uid] = JSON.parse(data).settings.web_chat_tts;
+                setTts(uid, JSON.parse(data).settings.web_chat_tts);
                 json(res, { success: true });
             });
-        } else json(res, { user_id: uid, username: 'Fixture', settings: { web_chat_tts: ttsOn[uid] } });
+        } else {
+            if (uid === failContextUid) return json(res, { error: 'fixture context failure' }, 503);
+            const body = { user_id: uid, username: 'Fixture', settings: { web_chat_tts: ttsOn[uid] } };
+            if (uid === delayContextUid) {
+                delayContextUid = null;
+                delayedContext = { res, body };
+            } else json(res, body);
+        }
         return;
     }
     if ((m = p.match(/^\/api\/messages\/(\w+)$/))) return json(res, { messages: messages[m[1]] || [] });
@@ -83,8 +93,12 @@ const server = http.createServer((req, res) => {
 function emit(uid, event, payload) {
     const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
     for (const s of streams) {
-        if (s.uid === uid && (!s.side || event === 'chat_tts')) s.res.write(`event: ${event}\ndata: ${JSON.stringify({ event, data })}\n\n`);
+        if (s.uid === uid && (!s.side || ['chat_tts', 'chat_tts_settings'].includes(event))) s.res.write(`event: ${event}\ndata: ${JSON.stringify({ event, data })}\n\n`);
     }
+}
+function setTts(uid, on, notify = true) {
+    ttsOn[uid] = on;
+    if (notify) emit(uid, 'chat_tts_settings', { enabled: on });
 }
 function reply(id, content) {
     const m = { id, role: 'assistant', content };
@@ -236,6 +250,105 @@ function button(page, id) { return page.locator(`.assistant[data-message-id="${i
         await playing(page, 107);
         await idle(page);
 
+        // Context changes outside the chat toggle must immediately cancel
+        // pending bytes AND queued autoplay, without removing replay controls.
+        delayId = 108;
+        const disabling = reply(108, 'Disabled during audio fetch');
+        ready(disabling);
+        await page.waitForFunction(() => chatTtsState === 'loading' && chatTtsCurrent.messageId === 108);
+        while (!delayedAudio) await new Promise(resolve => setTimeout(resolve, 10));
+        ready(reply(109, 'Queued before context disable'));
+        await page.waitForFunction(() => chatTtsQueue.length === 1);
+        setTts('default', false);
+        await page.waitForFunction(() => !chatTtsOn && chatTtsState === 'idle', null, { timeout: 3000 });
+        assert.equal(await page.evaluate(() => chatTtsQueue.length), 0);
+        assert.equal(await page.locator('#chat-tts-btn').getAttribute('aria-pressed'), 'false');
+        delayedAudio.end(wav);
+        delayedAudio = null;
+        delayId = null;
+        const afterDisable = audioRequests;
+        ready(reply(110, 'Late notification after context disable'));
+        await page.evaluate(() => pollChatMessages());
+        await page.waitForTimeout(150);
+        assert.equal(audioRequests, afterDisable, 'OFF blocks late SSE and history autoplay');
+        await button(page, 108).click();
+        await playing(page, 108);
+        setTts('default', false); // unrelated context saves repeat the same flag
+        await page.waitForTimeout(100);
+        assert.equal(await page.evaluate(() => chatTtsState), 'playing', 'repeated OFF must not interrupt manual replay');
+        await button(page, 108).click();
+        await idle(page);
+
+        // A GET started before an OFF event must not restore its stale ON value.
+        setTts('default', true);
+        await page.waitForFunction(() => chatTtsOn);
+        delayContextUid = 'default';
+        await page.evaluate(() => { window.pendingTtsLoad = loadTtsSwitchState(); });
+        while (!delayedContext) await new Promise(resolve => setTimeout(resolve, 10));
+        assert.equal(delayedContext.body.settings.web_chat_tts, true);
+        setTts('default', false);
+        await page.waitForFunction(() => !chatTtsOn);
+        json(delayedContext.res, delayedContext.body);
+        delayedContext = null;
+        await page.evaluate(() => window.pendingTtsLoad);
+        assert.equal(await page.evaluate(() => chatTtsOn), false, 'stale GET must not undo context disable');
+
+        // A missed settings event is recovered before reconnect/history autoplay.
+        setTts('default', true);
+        await page.waitForFunction(() => chatTtsOn);
+        const beforeMutedReconnect = audioRequests;
+        const beforeMutedOpenings = openings.default;
+        for (const s of streams) if (s.uid === 'default') s.res.end();
+        setTts('default', false, false);
+        messages.default.push({ id: 111, role: 'assistant', content: 'Offline while muted', audio_mime: 'audio/wav' });
+        while (openings.default === beforeMutedOpenings) await new Promise(resolve => setTimeout(resolve, 10));
+        await page.waitForFunction(() => !chatTtsOn && document.querySelector('.assistant[data-message-id="111"] .chat-audio-play'));
+        await page.waitForTimeout(150);
+        assert.equal(audioRequests, beforeMutedReconnect);
+
+        // A paired Discord context has its own web-TTS permission. Disabling it
+        // stops that source without muting the active chat or breaking replay.
+        setTts('default', true);
+        await page.waitForFunction(() => chatTtsOn);
+        const sideReply = { id: 202, role: 'assistant', content: 'Side context disable' };
+        messages.discord.push(sideReply);
+        ready(sideReply, 'discord');
+        await playing(page, 202);
+        setTts('discord', false);
+        await idle(page);
+        assert.equal(await page.evaluate(() => chatTtsOn), true);
+        const beforeMutedSide = audioRequests;
+        const mutedSide = { id: 203, role: 'assistant', content: 'Muted side context' };
+        messages.discord.push(mutedSide);
+        ready(mutedSide, 'discord');
+        await page.waitForTimeout(200);
+        assert.equal(audioRequests, beforeMutedSide, 'side source OFF blocks late notifications');
+        await page.locator(`.chat-audio-play[data-audio-key='${JSON.stringify(['discord', '202'])}']`).click();
+        await playing(page, 202);
+        await page.click('#chat-tts-indicator');
+        await idle(page);
+
+        // Even without an SSE setting notification, autoplay must check the
+        // persisted context. A failed permission lookup must fail closed too.
+        const beforeUncheckedAudio = audioRequests;
+        setTts('default', false, false);
+        ready(reply(112, 'Permission changed without a notification'));
+        await page.waitForFunction(() => !chatTtsOn && chatTtsState === 'idle');
+        assert.equal(audioRequests, beforeUncheckedAudio);
+        setTts('default', true);
+        await page.waitForFunction(() => chatTtsOn);
+        failContextUid = 'default';
+        ready(reply(113, 'Permission lookup unavailable'));
+        await page.waitForFunction(() => !chatTtsOn && chatTtsState === 'idle');
+        assert.equal(audioRequests, beforeUncheckedAudio);
+        await button(page, 113).click();
+        await playing(page, 113); // manual replay needs no autoplay permission
+        await page.click('#chat-tts-indicator');
+        await idle(page);
+        failContextUid = null;
+        setTts('default', true);
+        await page.waitForFunction(() => chatTtsOn);
+
         // Switching sessions while bytes are still loading invalidates the old
         // request; the late completion must not start playback in the new chat.
         delayId = 104;
@@ -249,15 +362,23 @@ function button(page, id) { return page.locator(`.assistant[data-message-id="${i
         assert.equal(await page.locator('.assistant .chat-audio-play').count(), 0);
         await page.waitForTimeout(150);
         assert.equal(await page.evaluate(() => chatTtsCurrent), null);
+        delayContextUid = 'other';
+        await page.evaluate(() => { window.pendingTtsLoad = loadTtsSwitchState(); });
+        while (!delayedContext) await new Promise(resolve => setTimeout(resolve, 10));
         await page.evaluate(() => logout());
+        json(delayedContext.res, delayedContext.body);
+        delayedContext = null;
+        await page.evaluate(() => window.pendingTtsLoad);
+        assert.equal(await page.evaluate(() => chatTtsOn), false, 'late context response must not undo logout');
         await page.waitForTimeout(100);
         assert.equal(await page.evaluate(() => chatEventSource), null);
         assert.equal(await page.evaluate(() => chatTtsSideSources.length), 0);
         assert.deepEqual(errors, []);
-        console.log('test_chat_audio: ok (delayed SSE, replay, autoplay policy, history, reconnect, side channel, session isolation)');
+        console.log('test_chat_audio: ok (delayed SSE, replay, autoplay policy, context disable, stale settings, history, reconnect, side channel, session isolation)');
     } finally {
         for (const s of streams) s.res.end();
         delayedAudio?.end();
+        delayedContext?.res.end();
         if (browser) await browser.close();
         server.closeAllConnections();
         server.close();

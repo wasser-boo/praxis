@@ -1,6 +1,9 @@
 // Dashboard reply audio. The server owns the durable bytes; the browser keeps
 // only metadata and one object URL. Replay never calls a TTS provider.
 const chatTtsClips = new Map();
+// Entry identity is also a revision: stale HTTP reads cannot undo a newer
+// settings event or a local toggle (including an ON → OFF → ON transition).
+const chatTtsSettings = new Map();
 let chatTtsQueue = [];
 let chatTtsCurrent = null;
 let chatTtsState = 'idle';
@@ -98,16 +101,44 @@ function chatTtsUnlock() {
     });
 }
 
+function chatApplyTtsSetting(userId, on) {
+    const previous = chatTtsSettings.get(userId);
+    chatTtsSettings.set(userId, { enabled: on });
+    if (userId === chatUserId) {
+        const wasOn = chatTtsOn;
+        chatTtsOn = on;
+        const btn = document.getElementById('chat-tts-btn');
+        if (btn) {
+            btn.setAttribute('aria-pressed', String(on));
+            btn.classList.toggle('tts-on', on);
+            btn.textContent = on ? '🔊' : '🔉';
+        }
+        // Repeated OFF settings (e.g. an unrelated context save) must not
+        // interrupt a manual replay started while automatic speech was OFF.
+        if (!on && wasOn) chatTtsActive(false);
+    } else if (!on) {
+        chatTtsQueue = chatTtsQueue.filter(clip => clip.userId !== userId);
+        if (previous?.enabled && chatTtsCurrent?.userId === userId) {
+            chatTtsStopCurrent();
+            chatTtsUpdateUI();
+            chatTtsPlayNext();
+        }
+    }
+}
+
+function chatReceiveTtsSetting(event, userId) {
+    try {
+        const d = JSON.parse(event.data);
+        const payload = typeof d.data === 'string' ? JSON.parse(d.data) : (d.data || d);
+        if (typeof payload.enabled === 'boolean') chatApplyTtsSetting(userId, payload.enabled);
+    } catch (err) { console.warn('[TTS] invalid settings event:', err); }
+}
+
 async function chatToggleTts() {
     const uid = chatUserId;
     const on = !chatTtsOn;
-    chatTtsOn = on;
-    const btn = document.getElementById('chat-tts-btn');
-    btn.setAttribute('aria-pressed', String(on));
-    btn.classList.toggle('tts-on', on);
-    btn.textContent = on ? '🔊' : '🔉';
+    chatApplyTtsSetting(uid, on);
     if (on) chatTtsUnlock();
-    else chatTtsActive(false);
     try {
         const res = await apiFetch(`/api/contexts/${encodeURIComponent(uid)}`, {
             method: 'PUT', body: JSON.stringify({ settings: { web_chat_tts: on } })
@@ -147,6 +178,21 @@ async function chatPlayTts(clip, manual = false) {
     chatTtsState = 'loading';
     chatTtsUpdateUI();
     try {
+        if (!manual) {
+            // SSE can be delayed or lost. Recheck the active dashboard AND the
+            // source context before fetching/playing each automatic clip.
+            const allowed = await loadTtsSwitchState();
+            if (generation !== chatTtsGeneration) return;
+            const sourceAllowed = clip.userId === chatUserId ? allowed
+                : await loadTtsSwitchState(clip.userId);
+            if (generation !== chatTtsGeneration) return;
+            if (!allowed || !sourceAllowed || !chatTtsOn) {
+                chatTtsStopCurrent();
+                chatTtsUpdateUI();
+                chatTtsPlayNext();
+                return;
+            }
+        }
         if (!retryReady) {
             let src = clip.dataUrl;
             if (!src) {

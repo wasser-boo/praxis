@@ -47,6 +47,7 @@ function logout() {
     stopChatStream();
     chatTtsActive(false);
     chatTtsOn = false;
+    chatTtsSettings.clear();
     chatTtsClips.clear();
     chatPollGen++;
     authToken = null;
@@ -205,25 +206,29 @@ function quickStartAgent(userId) {
 
 // ═══ Chat Tab ════════════════════════════════════════════════════════════════════
 
-// Load the TTS switch state from the user's settings. Called on every
-// session load/switch so a persisted ON setting also enables autoplay after
-// a reload. Replay buttons work independently of this automatic-play switch.
-async function loadTtsSwitchState() {
-    const uid = chatUserId;
+// Sync on session load, SSE reconnect and before automatic playback. Each
+// source has its own permission; manual replay is independent of this switch.
+async function loadTtsSwitchState(uid = chatUserId) {
+    const generation = chatPollGen;
+    const token = authToken;
+    const previous = chatTtsSettings.get(uid);
+    const current = () => generation === chatPollGen && token === authToken && !!authToken;
     try {
         const res = await apiGet(`/api/contexts/${encodeURIComponent(uid)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        if (uid !== chatUserId) return;
-        const ctxData = data.context || data;
-        const on = !!ctxData.settings?.web_chat_tts;
-        chatTtsOn = on;
-        const btn = document.getElementById('chat-tts-btn');
-        if (btn) {
-            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-            btn.classList.toggle('tts-on', on);
-            btn.textContent = on ? '🔊' : '🔉';
+        if (!current()) return false;
+        // A newer SSE setting/toggle wins over an HTTP snapshot taken before it.
+        if (chatTtsSettings.get(uid) === previous) {
+            const ctxData = data.context || data;
+            chatApplyTtsSetting(uid, ctxData.settings?.web_chat_tts === true);
         }
-    } catch (_) { /* switch state stays default */ }
+        return chatTtsSettings.get(uid)?.enabled === true;
+    } catch (_) {
+        // Unknown permission must never enable automatic speech.
+        if (current() && chatTtsSettings.get(uid) === previous) chatApplyTtsSetting(uid, false);
+        return false;
+    }
 }
 
 async function initChatTab() {
@@ -377,7 +382,7 @@ function showSlashHelp() {
     addChatMessage('system', 'Available commands:<br>' + list +
         '<br><br><i>/context examples:</i><br>' +
         '<code>/context set custom_data.device=main settings.max_llm_turns=20</code><br>' +
-        '<code>/context set settings.voice_tts_enabled=true</code><br>' +
+        '<code>/context set settings.web_chat_tts=false</code><br>' +
         '<code>/context get settings.max_llm_turns</code><br>' +
         '<code>/context show settings</code>');
 }
@@ -806,13 +811,19 @@ function startChatStream() {
     let streamMsg = null;
     let completedMsg = null;
 
-    es.onopen = () => {
+    es.onopen = async () => {
         if (chatEventSource !== es || chatUserId !== uid) return;
         console.log('[SSE] connection opened for user', uid);
-        // Recover audio produced while the connection was down. History
-        // registration deduplicates this against live chat_tts notifications.
+        // Recover settings first: an OFF edit may have happened while offline.
+        await loadTtsSwitchState(uid);
+        if (chatEventSource !== es || chatUserId !== uid) return;
+        // History deduplicates recovered audio against live notifications.
         pollChatMessages();
     };
+
+    es.addEventListener('chat_tts_settings', e => {
+        if (chatEventSource === es && chatUserId === uid) chatReceiveTtsSetting(e, uid);
+    });
 
     es.addEventListener('typing', (e) => {
         console.log('[SSE] typing event:', e.data);
@@ -834,6 +845,7 @@ function startChatStream() {
     });
 
     es.addEventListener('chat_tts', (e) => {
+        if (chatEventSource !== es || chatUserId !== uid) return;
         console.log('[SSE] chat_tts event received');
         try {
             const d = JSON.parse(e.data);
@@ -1057,6 +1069,12 @@ async function startTtsSideChannel() {
         const url = `/api/chat/stream/${encodeURIComponent(pairedUserId)}/tts?token=${encodeURIComponent(authToken)}`;
         console.log('[SSE-TTS] opening side channel for', pairedUserId);
         const es = new EventSource(url);
+        es.onopen = () => {
+            if (generation === chatTtsSideGeneration) loadTtsSwitchState(pairedUserId);
+        };
+        es.addEventListener('chat_tts_settings', e => {
+            if (generation === chatTtsSideGeneration) chatReceiveTtsSetting(e, pairedUserId);
+        });
         es.addEventListener('chat_tts', (e) => {
             try {
                 const d = JSON.parse(e.data);
@@ -1517,6 +1535,7 @@ async function switchChatSession(id) {
     stopChatStream();
     chatTtsActive(false);
     chatTtsOn = false;
+    chatTtsSettings.clear();
     const generation = ++chatPollGen;
     chatUserId = id;
     chatSessionId = id;
