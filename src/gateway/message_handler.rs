@@ -82,8 +82,7 @@ pub(crate) async fn handle_message_inner(
         });
     }
 
-    let mut tool_defs = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
-    tool_defs.extend(state.plugins.tool_definitions());
+    let tool_defs = crate::tools::discovery::definitions(&state.db, &state.plugins, user_id)?;
 
     // Clone tool names and definitions for validation before moving tool_defs into request
     let mut tool_names: Vec<String> = tool_defs.iter().map(|t| t.function.name.clone()).collect();
@@ -151,7 +150,9 @@ pub(crate) async fn handle_message_inner(
             // calls could keep a recovery loop running indefinitely.
             tool_calls_used += 1;
             // Validate tool exists before executing
-            if !tool_names.contains(&tc.function.name) {
+            if !tool_names.contains(&tc.function.name)
+                || !crate::tools::discovery::enabled(&state.db, &state.plugins, &tc.function.name)
+            {
                 let result = format!("Error: Unknown tool '{}'. Check the tool name and try again.", tc.function.name);
                 tracing::warn!(user_id = %user_id, tool = %tc.function.name, "Unknown tool called");
                 
@@ -289,8 +290,7 @@ pub(crate) async fn handle_message_inner(
 
         // Keep tools available after use_skill/read_file/etc. Refresh definitions
         // as well as context, so newly disabled tools cannot run next round.
-        let mut tool_defs = crate::db::tools::to_tool_definitions(&state.db)?;
-        tool_defs.extend(state.plugins.tool_definitions());
+        let tool_defs = crate::tools::discovery::definitions(&state.db, &state.plugins, user_id)?;
         tool_names = tool_defs.iter().map(|t| t.function.name.clone()).collect();
         tools_for_validation = tool_defs.clone();
         finalizing = tool_calls_used >= tool_limit;
@@ -556,6 +556,12 @@ async fn execute_tool_call(
     let plugin_secrets = plugins.secrets_for_tool(&tc.function.name, &all_secrets);
 
     match tc.function.name.as_str() {
+        "search_tools" => crate::tools::discovery::search(db, plugins, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_get" => crate::tools::memory::get(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_set" => crate::tools::memory::set(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
         "search_skills" => crate::tools::search_skills::run(db, &args).await
             .unwrap_or_else(|e| format!("Error: {e}")),
         "use_skill" => crate::tools::use_skill::run(db, &args).await

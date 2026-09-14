@@ -43,6 +43,8 @@ const BUNDLED_ASSETS: &[Asset] = &[
     asset!("templates/researcher.poml"),
     asset!("templates/system.poml"),
     asset!("templates/language_learning.poml"),
+    asset!("templates/daily_quiz.poml"),
+    asset!("templates/transcript_check.poml"),
     asset!("templates/user.poml"),
     asset!("templates/compaction.poml"),
     asset!("templates/blueprints/standard.json"),
@@ -107,6 +109,10 @@ const BUNDLED_ASSETS: &[Asset] = &[
     asset!("docs/CONTEXT_VARIABLES.md"),
     asset!("docs/LLM_RESILIENCE.md"),
     asset!("docs/MEDIA_PLUGINS.md"),
+    asset!("docs/TOOL_DISCOVERY.md"),
+    asset!("plugins/brave_search/plugin.json"),
+    asset!("plugins/brave_search/search.py", executable),
+    asset!("plugins/brave_search/README.md"),
 ];
 
 #[derive(Debug, Default)]

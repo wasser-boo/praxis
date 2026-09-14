@@ -144,6 +144,24 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
 fn get_default_tools() -> Vec<Tool> {
     vec![
         Tool {
+            name: "search_tools".into(),
+            description: Some("Search enabled builtin/plugin capabilities by name or keywords and load matching schemas for the NEXT model turn in this task. Start here for web search, memory/SRS, media, Discord, VM, scheduling or other non-core tools. Never enables disabled tools. Use precise queries; do not enumerate the catalog.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":256},"limit":{"type":"integer","minimum":1,"maximum":8,"default":5},"replace":{"type":"boolean","description":"Replace earlier discoveries when the 24 additional-tool limit is reached; core tools stay available","default":false}},"required":["query"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "memory_get".into(),
+            description: Some("Read a typed durable user memory variable, e.g. srs_items, xp or learning_profile. The same data appears in Dashboard Memory Custom Data and POML memory.variables; this is not context custom_data.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string","maxLength":128}},"required":["key"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "memory_set".into(),
+            description: Some("Persist one typed durable user memory variable (SRS srs_items, xp, learning_profile, etc.). Preserve unrelated keys/items. Use expected_value from memory_get to avoid stale overwrites. JSON null deletes the key. Never store credentials. Confirm remembering only after success.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string","maxLength":128},"value":{},"expected_value":{"description":"Previously read JSON value; null for an absent variable"}},"required":["key","value"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
             name: "execute_terminal".into(),
             description: Some("Run shell command. Long-running commands: use run_background instead, then poll with background_status (finished jobs also announce themselves).".into()),
             parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}),

@@ -56,6 +56,31 @@ async fn audio_tts_is_saved_without_subscribers_and_notifications_reference_save
     crate::dashboard::stream::remove(&user);
 }
 
+#[tokio::test]
+async fn audio_discord_still_synthesizes_when_web_tts_is_off() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/tts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "audio": base64::engine::general_purpose::STANDARD.encode(b"RIFFxxxxWAVEtest"),
+        }))).expect(2).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::db::Database::new(dir.path()).unwrap();
+    for channel in ["123456789", "voice:123456789"] {
+        let user = format!("discord-independent-{}", uuid::Uuid::new_v4());
+        let ctx = db.merge_context(&user, serde_json::json!({
+            "settings.voice_tts_type":"qwen_tts", "settings.qwen_tts_server":server.uri(),
+            "settings.web_chat_tts":false, "settings.use_tts":true,
+        })).unwrap();
+        let id = db.add_message(&user, &crate::db::messages::Message::assistant("Discord reply".into())).unwrap();
+        spawn_tts("Discord reply".into(), &ctx.settings, &Default::default(), &user, &db, Some(id), Some(channel));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while db.get_message_audio(&user, id).unwrap().is_none() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+    }
+}
+
 #[test]
 fn audio_tts_permission_is_channel_specific() {
     for use_tts in [false, true] {

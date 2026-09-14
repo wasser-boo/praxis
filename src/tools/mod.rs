@@ -1,4 +1,6 @@
 pub mod agent_control;
+pub mod discovery;
+pub mod memory;
 pub mod context_tools;
 pub mod discord_interactive;
 pub mod discord_send_embed;

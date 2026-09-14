@@ -476,7 +476,10 @@ async fn tool_chain_new_task_resets_stale_completion_without_losing_settings() {
         let image = dir.path().join("current.png");
         image::RgbaImage::new(1, 1).save(&image).unwrap();
         let (state, user, requests) = fixture(dir.path(), vec![
-            Step::Reply(reply(None, vec![call("check", "get_context", serde_json::json!({"key":"settings.done"}))])),
+            Step::Reply(reply(None, vec![
+                call("check", "get_context", serde_json::json!({"key":"settings.done"})),
+                call("discover-image", "search_tools", serde_json::json!({"query":"understand_image", "limit":1})),
+            ])),
             Step::Reply(reply(Some("Continuing the current task."), vec![
                 call("write", "write_file", serde_json::json!({"path":output,"content":"fresh task"})),
                 call("current-image", "understand_image", serde_json::json!({"path":image,"prompt":"Inspect this synthetic test pixel."})),
@@ -510,7 +513,9 @@ async fn tool_chain_new_task_resets_stale_completion_without_losing_settings() {
         let check = history.iter().find(|m| m.tool_call_id.as_deref() == Some("check")).unwrap();
         let observed: serde_json::Value = serde_json::from_str(&check.content).unwrap();
         assert_eq!(observed["settings"]["done"], false, "completion must reset BEFORE the first tool call");
-        assert_paired_history(&state, &user, 3);
+        assert!(!requests.lock().unwrap()[0].tools.as_ref().unwrap().iter().any(|t| t.function.name == "understand_image"));
+        assert!(requests.lock().unwrap()[1].tools.as_ref().unwrap().iter().any(|t| t.function.name == "understand_image"));
+        assert_paired_history(&state, &user, 4);
     }
 }
 
@@ -571,6 +576,34 @@ async fn audio_web_tts_off_blocks_discord_flag_and_explicit_feedback_on_both_pat
     // Allow detached feedback/final synthesis tasks to reach the local mock.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     server.verify().await;
+}
+
+#[tokio::test]
+#[ignore = "Requires Node and POML_CLI; synthetic provider and temporary memory only"]
+async fn tool_chain_discovery_loads_memory_only_for_current_task_on_both_paths() {
+    for max_turns in [1, 8] {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, user, requests) = fixture(dir.path(), vec![
+            Step::Reply(reply(None, vec![call("not-discovered", "memory_set", serde_json::json!({"key":"xp","value":999}))])),
+            Step::Reply(reply(None, vec![call("discover", "search_tools", serde_json::json!({"query":"memory"}))])),
+            Step::Reply(reply(None, vec![call("save", "memory_set", serde_json::json!({"key":"xp","value":42,"expected_value":null}))])),
+            Step::Reply(reply(None, vec![call("read", "memory_get", serde_json::json!({"key":"xp"}))])),
+            Step::Reply(reply(Some("Progress saved."), vec![])),
+            Step::Reply(reply(Some("Fresh task."), vec![])),
+        ]);
+        state.db.merge_context(&user, serde_json::json!({"settings.max_llm_turns":max_turns})).unwrap();
+        assert_eq!(handle_message(&state, &user, "save synthetic learning progress", Some("web")).await.unwrap(), "Progress saved.");
+        assert_eq!(crate::db::memory::load_memory(&state.db, &user).unwrap().custom_variables["xp"], 42);
+        assert_eq!(handle_message(&state, &user, "a new task", Some("web")).await.unwrap(), "Fresh task.");
+        let requests = requests.lock().unwrap();
+        for index in [0, 1, 5] {
+            let tools = requests[index].tools.as_ref().unwrap();
+            assert!(tools.len() <= 12);
+            assert!(!tools.iter().any(|t| t.function.name == "memory_set"));
+        }
+        assert!(requests[2].tools.as_ref().unwrap().iter().any(|t| t.function.name == "memory_set"));
+        assert!(requests[1].messages.iter().any(|m| m.tool_call_id.as_deref() == Some("not-discovered") && m.content.as_deref().unwrap_or("").starts_with("Error:")));
+    }
 }
 
 #[test]

@@ -1,4 +1,5 @@
 <poml>
+  <include src="../shared/runtime.poml" />
   <let name="request_text" value="typeof user_prompt === 'string' ? user_prompt : ''" />
   <let name="voice_input" value="typeof voice_last_input === 'string' ? voice_last_input : ''" />
   <let name="target_lang" value="typeof settings !== 'undefined' && settings !== null && settings.elevenlabs_stt_language ? settings.elevenlabs_stt_language : 'unknown'" />

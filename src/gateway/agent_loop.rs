@@ -350,9 +350,8 @@ async fn run_agent_loop_inner(
             });
         }
 
-        // Get tool definitions from database + plugins
-        let mut tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
-        tools.extend(state.plugins.tool_definitions());
+        // Only bootstrap tools and schemas discovered during this owned task.
+        let tools = crate::tools::discovery::definitions(&state.db, &state.plugins, user_id)?;
 
         // Clone tool names and definitions for validation before moving tools into request
         let tool_names: Vec<String> = tools.iter().map(|t| t.function.name.clone()).collect();
@@ -496,7 +495,9 @@ async fn run_agent_loop_inner(
                     Some("Task cancelled; tool not executed".to_string())
                 } else if tool_call_count >= ctx.settings.max_tool_calls.unwrap_or(config.max_tool_calls) {
                     Some("Maximum tool calls reached; tool not executed".to_string())
-                } else if !tool_names.contains(&tc.function.name) {
+                } else if !tool_names.contains(&tc.function.name)
+                    || !crate::tools::discovery::enabled(&state.db, &state.plugins, &tc.function.name)
+                {
                     Some(format!("Unknown tool '{}'; tool not executed", tc.function.name))
                 } else {
                     validate_tool_params(&tc.function.name, &args, &tools_for_validation).err().map(|e| e.to_string())
@@ -1095,6 +1096,12 @@ async fn execute_tool_call(
     let plugin_secrets = plugins.secrets_for_tool(&tc.function.name, &all_secrets);
 
     match tc.function.name.as_str() {
+        "search_tools" => crate::tools::discovery::search(db, plugins, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_get" => crate::tools::memory::get(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_set" => crate::tools::memory::set(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
         "search_skills" => crate::tools::search_skills::run(db, &args).await
             .unwrap_or_else(|e| format!("Error: {e}")),
         "use_skill" => crate::tools::use_skill::run(db, &args).await

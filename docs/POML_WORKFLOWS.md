@@ -64,6 +64,8 @@ Save this object at `custom_data.language_learning` (do not replace unrelated `c
 }
 ```
 
+Durable learning state lives separately in **Memory → Custom Data**: `learning_profile`, `srs_items` and `xp`. The instructor/daily quiz use `memory_get` / `memory_set`, discovered through `search_tools`, with typed JSON and conflict-aware writes. Do not set `memory.variables.*` using context tools. Due cards are filtered using the shared `utc_now` timestamp; other languages/future cards stay stored. See [progressive discovery and SRS memory](TOOL_DISCOVERY.md) for the schema and review policy.
+
 Without overrides, the tutor supports French/Japanese practice with German explanations. The learner's explicit request wins over defaults. Text transcripts are not proof of pronunciation; the template does not claim that audio played or promise medical benefits.
 
 ## Semantic blueprints
@@ -89,7 +91,7 @@ Save overrides at `custom_data.semantic_blueprint`, or use `sm_data.semantic_blu
 
 Templates ask for private planning/checking and concise public plans, assumptions, evidence and results—not exposed chain-of-thought. Simple questions still receive direct answers. This is a structured prompt/task contract, not a modification of the model's underlying inference algorithm or a guarantee of correctness.
 
-`shared/runtime.poml` advertises the current input, selected workflow/template/skill, the bounded metadata candidates chosen by the [POML discovery policy](SKILLS.md#discovery-belongs-to-poml), enabled tools, and **this user's** facts, preferences, topics and memory variables. Only successful memory tool results justify saying information was saved. Tool descriptions and old memories are not new authorization.
+`shared/runtime.poml` advertises the current input, selected workflow/template/skill, the bounded metadata candidates chosen by the [POML discovery policy](SKILLS.md#discovery-belongs-to-poml), the small current task's tool selection, and **this user's** facts, preferences, topics and memory-variable names. Callable schemas are loaded progressively through `search_tools`, not duplicated as a complete catalog in each persona. The user/compaction wrappers stay purpose-specific; all conversational persona/role/task includes share this discovery policy. Only successful memory tool results justify saying information was saved. Tool descriptions and old memories are not new authorization.
 
 ## Actual SM grammar
 
@@ -144,6 +146,9 @@ From the source root:
 export POML_CLI=/absolute/path/to/poml/js/cli.js
 python3 scripts/test_poml_templates.py
 python3 scripts/test_language_learning_poml.py
+python3 scripts/test_prompt_discovery.py
+python3 scripts/test_brave_search.py
+node scripts/test_memory_ui.js
 python3 scripts/test_skills.py
 python3 scripts/check_context_docs.py
 node scripts/test_ui_static.js

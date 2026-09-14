@@ -45,7 +45,7 @@ for key, count in seen.items():
     if count != 1:
         errors.append(f'Duplicate: {key} ({count} rows)')
 
-kinds = {'String': 'string', 'bool': 'boolean', 'i32': 'I32', 'usize': 'Usize', 'f32': 'F32',
+kinds = {'String': 'string', 'bool': 'boolean', 'i32': 'I32', 'usize': 'Usize', 'f32': 'F32', 'f64': 'F64',
          'Vec<String>': 'array of strings', 'serde_json::Value': 'JSON', 'ContextSettings': 'object'}
 for key, rust_type in expected.items():
     if key not in rows or len(rows[key]) != 5:

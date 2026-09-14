@@ -3,14 +3,18 @@
 //! its result. Starting a second task in that interval would risk duplicate effects.
 use dashmap::{mapref::entry::Entry, DashMap};
 use once_cell::sync::Lazy;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::{Arc, Mutex}};
 use tokio_util::sync::CancellationToken;
 
-static TASKS: Lazy<DashMap<String, Arc<CancellationToken>>> = Lazy::new(DashMap::new);
+struct TaskState {
+    token: CancellationToken,
+    tools: Mutex<HashSet<String>>,
+}
+static TASKS: Lazy<DashMap<String, Arc<TaskState>>> = Lazy::new(DashMap::new);
 
 pub struct TaskGuard {
     user: String,
-    token: Arc<CancellationToken>,
+    state: Arc<TaskState>,
 }
 
 pub fn begin(user: &str) -> anyhow::Result<TaskGuard> {
@@ -19,17 +23,17 @@ pub fn begin(user: &str) -> anyhow::Result<TaskGuard> {
             "A task is already running for this user; wait, send agent input, or stop it first"
         ),
         Entry::Vacant(entry) => {
-            let token = Arc::new(CancellationToken::new());
-            entry.insert(token.clone());
-            Ok(TaskGuard {
-                user: user.into(),
-                token,
-            })
+            let state = Arc::new(TaskState {
+                token: CancellationToken::new(),
+                tools: Mutex::new(HashSet::new()),
+            });
+            entry.insert(state.clone());
+            Ok(TaskGuard { user: user.into(), state })
         }
     }
 }
 pub fn cancellation(user: &str) -> Option<CancellationToken> {
-    TASKS.get(user).map(|entry| entry.value().as_ref().clone())
+    TASKS.get(user).map(|entry| entry.token.clone())
 }
 pub fn cancel(user: &str) {
     if let Some(token) = cancellation(user) {
@@ -38,9 +42,25 @@ pub fn cancel(user: &str) {
 }
 impl Drop for TaskGuard {
     fn drop(&mut self) {
-        self.token.cancel();
-        TASKS.remove_if(&self.user, |_, token| Arc::ptr_eq(token, &self.token));
+        self.state.token.cancel();
+        TASKS.remove_if(&self.user, |_, state| Arc::ptr_eq(state, &self.state));
     }
+}
+
+/// Discovered schemas belong to this owned task, never to persisted settings.
+pub fn selected_tools(user: &str) -> HashSet<String> {
+    TASKS.get(user).and_then(|task| task.tools.lock().ok().map(|tools| tools.clone())).unwrap_or_default()
+}
+
+pub fn select_tools(user: &str, names: Vec<String>, replace: bool) -> anyhow::Result<()> {
+    let task = TASKS.get(user).ok_or_else(|| anyhow::anyhow!("Tool discovery requires an active task"))?;
+    anyhow::ensure!(!task.token.is_cancelled(), "Task cancelled");
+    let mut tools = task.tools.lock().map_err(|_| anyhow::anyhow!("Tool selection lock unavailable"))?;
+    let mut next = if replace { HashSet::new() } else { tools.clone() };
+    next.extend(names);
+    anyhow::ensure!(next.len() <= 24, "At most 24 additional tools per task; search again with replace=true to replace earlier discoveries");
+    *tools = next;
+    Ok(())
 }
 
 #[cfg(test)]

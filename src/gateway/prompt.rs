@@ -196,6 +196,7 @@ pub fn base_context(ctx: &Context, input: &str) -> anyhow::Result<Value> {
         ctx.settings.path.clone()
     });
     value["time"] = json!(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+    value["utc_now"] = json!(chrono::Utc::now().to_rfc3339());
     if !value["custom_data"].is_object() {
         value["custom_data"] = json!({});
     }
@@ -243,8 +244,7 @@ pub async fn build_context(
     root: &Path,
 ) -> anyhow::Result<Value> {
     let memory = crate::db::memory::load_memory(db, &ctx.user_id)?;
-    let mut tools = crate::db::tools::to_tool_definitions(db)?;
-    tools.extend(plugins.tool_definitions());
+    let tools = crate::tools::discovery::definitions(db, plugins, &ctx.user_id)?;
     let tools: Vec<_> = tools.iter().map(|t| json!({"name": t.function.name, "description": t.function.description, "parameters": t.function.parameters})).collect();
     let (messages, tokens_used) = db.get_messages_with_token_budget(&ctx.user_id, usize::MAX)?;
     let token_limit = ctx.settings.history_token_limit.unwrap_or(500000);

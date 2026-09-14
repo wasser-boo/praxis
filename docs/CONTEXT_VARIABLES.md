@@ -1,6 +1,6 @@
 # Context variables — complete reference
 
-This reference covers all **11 `Context` fields and 82 `ContextSettings` fields** in `src/db/contexts.rs`, plus the built-in POML/runtime variables. It describes the implemented behavior, not just dashboard labels. See [Discord voice setup](DISCORD_VOICE_SETUP.md) for microphone → STT → reply → TTS → Discord playback.
+This reference covers all **11 `Context` fields and 86 `ContextSettings` fields** in `src/db/contexts.rs`, plus the built-in POML/runtime variables. It describes the implemented behavior, not just dashboard labels. See [Discord voice setup](DISCORD_VOICE_SETUP.md) for microphone → STT → reply → TTS → Discord playback.
 
 ## Storage, types, defaults, and safe editing
 
@@ -24,6 +24,7 @@ Use the dashboard context editor or `/context` rather than editing SQLite while 
 - **Defaults below are for newly created contexts.** Defaults apply when fields are absent, not when an explicit value is present. Four partial-JSON exceptions are listed below.
 - **Allowed values:** Rust enforces JSON types and integer representability. Most strings and numeric settings have no additional central validation. A listed operational choice/range can therefore be required by the consumer even if the editor accepts other values. Provider-specific models, voices, languages, and credentials are validated by that provider, not by saving the context.
 - `I32` means integer **−2,147,483,648 through 2,147,483,647**. `Usize` means integer **0 through 18,446,744,073,709,551,615 on this 64-bit deployment**; use practical small values. JSON numbers passed through a browser may lose precision above 2^53−1.
+- `F64` means a finite representable 64-bit floating-point number.
 - `F32` means a finite representable 32-bit floating-point number. JSON does not support NaN or infinity. ElevenLabs ranges below are also checked before sending TTS requests.
 - Relative filesystem paths resolve from Praxis's working directory. Run the deployed binary from `/workspace/release`. Never put API keys, passwords, or other secrets into context/POML: context can be sent to the LLM and included in logs.
 
@@ -51,7 +52,7 @@ If the entire `settings` object is absent, the new-context defaults are used ins
 | `sm_file` | string or null | Relative workflow name under `contexts/`, or `null`; `.sm`/`.cl` extension may be omitted | `null` → `standard` | Fallback workflow selection if `settings.sm_file` is null. Runs before rendering on both runtime paths. Legacy `cl_file` is accepted on input, never emitted. |
 | `active_state` | string or null | State name defined by the selected workflow, or `null` | `null` | Root workflow state used by the SM engine and dashboard. Distinct from the duplicate field under settings. |
 | `active_templates` | array of strings | Template names, e.g. `["tasks/plan"]`; `[]` allowed | `[]` | Root list exposed by dashboard workflow endpoints. Not the same as the settings template stack; neither replaces `settings.system_template`. |
-| `settings` | object | The 82 documented settings below; do not set to null | New-context defaults | Typed per-context configuration. Prefer dotted updates to individual fields. |
+| `settings` | object | The 86 documented settings below; do not set to null | New-context defaults | Typed per-context configuration. Prefer dotted updates to individual fields. |
 | `custom_data` | JSON | Prefer an object, or `null`; arbitrary extension keys/JSON values | `null` | Application/plugin data and tool history. Exposed to POML; null is normalized to `{}` for system rendering. Non-object values can break consumers. |
 | `sm_data` | JSON | Prefer an object, or `null`; arbitrary workflow-specific JSON | `null` | Canonical statemachine data namespace; supports dotted updates and POML. Legacy `cl_data`/`cl_data.*` inputs are accepted; canonical values win conflicts. |
 | `session_id` | string | `""` or `"default"`, or a session ID created through session commands; avoid the reserved `:::` separator | `""` | Selects the session. Non-default rows use `user_id:::session_id`; the base row points to the current session. Use session commands rather than manually editing IDs. |
@@ -75,6 +76,8 @@ The working Discord STT gate is **`voice_enabled && use_stt`**, plus a joined, n
 | `settings.voice_tts_type` | string | Exact values `"elevenlabs"`, `"windows_sapi"`, `"minimax"`, `"mimo_tts"`, `"qwen_tts"` | `"windows_sapi"` | TTS backend. Windows SAPI cannot work on this Linux host. Other backends require their own configured service/key. |
 | `settings.voice_elevenlabs_voice_id` | string or null | Non-empty voice ID available to your ElevenLabs account; `null` means unconfigured | `null` | Required for ElevenLabs TTS, not STT. A voice's display name is not its ID. |
 | `settings.use_tts` | boolean | `true`, `false` | `false` | Enables normal non-web reply TTS; Discord `/tts` toggles it. Voice inputs also enable final/eligible feedback TTS independently of this flag. Does not override `web_chat_tts=false` for web input. Audio is broadcast to the active Discord playback channel. |
+| `settings.web_chat_tts` | boolean | `true`, `false` | `false` | Independent web-reply synthesis and browser autoplay permission. False also blocks explicit web TTS feedback, without disabling Discord use_tts/voice replies or manual replay. |
+| `settings.stt_low_confidence_threshold` | F64 | Finite number; practical confidence range 0–1 | `0.70` | Agent voice input marks custom_data.stt_low_confidence when the latest STT confidence is below this threshold; informs transcript clarification. |
 | `settings.use_stt` | boolean | `true`, `false` | `true` | Enables STT together with `voice_enabled`; false skips provider transcription. |
 | `settings.voice_muted` | boolean | `true`, `false` | `false` | **Stored only:** not synchronized with the handler's separate runtime mute state. `/mute` and `/unmute` currently control a runtime transcription gate, not this field or the TTS queue. |
 | `settings.voice_deafened` | boolean | `true`, `false` | `true` | Applied to the actual Songbird call when `/join` runs. Set false and rejoin to receive audio. Also check Discord server/self-deafen controls; changing this stored value alone is not a live call update. |
@@ -130,6 +133,7 @@ These settings do not affect the selected ElevenLabs backend unless RVC is enabl
 |---|---|---|---|---|
 | `settings.provider` | string or null | `null` = `USE_PROVIDER`; registered names `"openai"`, `"anthropic"`, `"ollama"`, `"llamacpp"`, `"minimax"`, `"mimo"`, `"openrouter"` | `null` | Context chat-provider override. Provider must be configured; saving an arbitrary name does not register it. |
 | `settings.model` | string or null | Exact model ID/tag supported by the selected provider, or `null` for its configured default | `null` | Chat model override. Ollama Cloud tags must match your available tag exactly. Not an STT/TTS model selection. |
+| `settings.thinking_mode` | string | `"auto"`, `"on"`, `"off"`; on also accepts true/1 strings, off false/0; unknown values use provider default | `"auto"` | Provider-specific extended-reasoning hint on both message paths, not a token/billing cap or request to expose private reasoning. |
 | `settings.vision_provider` | string or null | Same registered provider names as above, with image-capable provider/model support; `null` falls back to `VISION_PROVIDER` | `null` | Vision-provider hint when requests contain images. Actual support/routing depends on provider and streaming path. |
 | `settings.vision_model` | string or null | Image-capable model ID or `null` → `VISION_MODEL`/provider default | `null` | Vision model override; does not add vision support to a text-only model. |
 | `settings.max_llm_turns` | I32 or null | `null` or ≤1 selects the chat path; **2–I32_MAX** selects multi-turn; use small positive limits | `null` → `1` | Chat supports successive tool-only responses until its tool budget is consumed, then at most one finalization request without tools. Multi-turn counts LLM rounds; exhausting it without a final answer reports a limit, never an older answer. Neither setting is a strict billing cap because provider retries are separate. |
@@ -165,6 +169,7 @@ These settings do not affect the selected ElevenLabs backend unless RVC is enabl
 | `settings.feedback_window_secs` | I32 | Representable integer; positive seconds recommended | `300` | **Stored only:** no current feedback rate limiter consumes it. |
 | `settings.feedback_mode` | array of strings | Any subset of `["tts", "dm", "text"]`; `[]` allowed; unknown entries have no defined routing | `[]` | Agent feedback destinations. `text` uses a valid channel or falls back to DM; `tts` uses the voice backend. Empty/unhandled modes can still trigger fallback TTS for voice input/use_tts. |
 | `settings.feedback_channel_id` | string or null | Discord text-channel numeric ID **as a string**, or `null` | `null` | Feedback channel override and fallback for tool `channel_id`. `voice:<guild>` is an internal input marker, not a valid text channel. |
+| `settings.upload_channel_id` | string or null | Discord channel numeric ID as a string, or null | `null` | Agent-loop upload fallback when no tool argument/originating channel is available; does not override an explicit tool channel. |
 | `settings.feedback_template` | string | Intended POML template name; any string is stored | `"tasks/feedback"` | **Stored only:** the current feedback router does not render it. |
 | `settings.message_on_toolcalling` | boolean | `true`, `false` | `false` | Enables pre-tool feedback when agent feedback is enabled through `feedback_mode`. Not ordinary final reply TTS. |
 | `settings.allowed_guilds` | array of strings | `["*"]` = all; guild numeric IDs as strings; `[]` = no guild matches | `["*"]` | Allow-list checked for ordinary paired Discord text messages. DMs bypass the guild check. Not a global/voice ACL; voice authorization is pairing-based. |
@@ -209,10 +214,11 @@ The complete synthetic render fixture is [`examples/poml-test-context.json`](../
 | `user_message` | Current message string | Alias of `user_prompt` in the shared builder. |
 | `system_info` | String | Both system paths; `Praxis v<version>`. |
 | `time` | Local datetime string | Both system paths; `YYYY-MM-DD HH:MM:SS`. |
+| `utc_now` | ISO UTC datetime string | Shared builder timestamp for deterministic SRS due-date comparisons and scheduling; not a saved setting. |
 | `path` | Path string | Non-empty `settings.path`, otherwise process cwd, consistently across the shared builder. Metadata does not change cwd. |
 | `skills` | Array of bounded metadata summaries | Candidates selected by the POML discovery plan, at most 20; default `[]`, **not the complete catalog**. Contains name, description, required_parameters, skill_hidden and user_only. Instructions load only on use. See [Skills](SKILLS.md). |
 | `skill_discovery_instructions` | String | Discovery guidance rendered from `templates/discovery/skills.poml` (or the context-selected variant). Shown by the shared runtime include in agent mode. |
-| `tools` | Array of `{name, description, parameters}` | Enabled DB tools plus registered plugin tools, shared by both runtime paths and preview. Schemas describe capabilities, not permission to perform arbitrary actions. |
+| `tools` | Array of `{name, description, parameters}` | Enabled core tools plus at most 24 task-local discoveries from search_tools, shared by provider schemas/runtime/preview. Not the complete catalog. See [Tool discovery and memory](TOOL_DISCOVERY.md). Discovery grants no permission to act. |
 | `active_skill` | Skill-name string | Selected skill, or `""` when off. |
 | `active_skill_instructions` | String | Strictly rendered instructions using the current task, or `""`. Runtime also appends these separately so a custom system template cannot accidentally omit them. Loading does not mean execution. |
 | `skills[].name` | Skill-name string | Identifier loaded from a valid local skill definition. |

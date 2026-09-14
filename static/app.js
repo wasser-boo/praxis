@@ -2199,13 +2199,17 @@ async function loadMemory() {
         const res = await apiGet(`/api/memory/${encodeURIComponent(userId)}`);
         if (!res.ok) { container.innerHTML = `<div class="data-item"><span style="color:var(--error)">Error ${res.status}</span></div>`; return; }
         const data = await res.json();
+        if (document.getElementById('memory-user-id').value !== userId) return;
         container.innerHTML = `
             <h3>Learned Facts</h3>
             <div class="data-list">${(data.learned_facts || []).map(f => `<div class="data-item"><span class="name">${escapeHtml(f)}</span></div>`).join('') || '<div class="data-item"><span class="name">None</span></div>'}</div>
             <h3 style="margin-top:1rem">Last Topics</h3>
             <div class="data-list">${(data.last_topics || []).map(t => `<div class="data-item"><span class="name">${escapeHtml(t)}</span></div>`).join('') || '<div class="data-item"><span class="name">None</span></div>'}</div>
-            <h3 style="margin-top:1rem">Custom Variables</h3>
-            <pre class="code-editor">${JSON.stringify(data.custom_variables || {}, null, 2)}</pre>`;
+            <h3 style="margin-top:1rem">Preferences</h3>
+            <pre class="code-editor">${escapeHtml(JSON.stringify(data.user_preferences || {}, null, 2))}</pre>
+            <h3 style="margin-top:1rem">Custom Data — durable memory</h3>
+            <p>SRS cards (srs_items), XP and learning_profile are stored here by memory_set. Context custom_data is a separate store for lesson configuration.</p>
+            <pre class="code-editor">${escapeHtml(JSON.stringify(data.custom_variables || {}, null, 2))}</pre>`;
     } catch (err) { container.innerHTML = `<div class="data-item"><span style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`; }
 }
 

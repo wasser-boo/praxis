@@ -37,6 +37,8 @@ fn onboarding_assets_install_every_bundled_file_and_executable() {
         "static/logo.png",
         "static/favicon.ico",
         "static/chat-audio.js",
+        "plugins/brave_search/plugin.json",
+        "plugins/brave_search/search.py",
         "skills/poml_templates/reference.md",
         "skills/mnemodim-palace/references/MNEMODIM_IMPORT_GUIDE.md",
     ] {
@@ -85,6 +87,7 @@ fn onboarding_assets_catalog_covers_shipped_runtime_dependencies() {
     collect(&root.join("contexts"), root, &mut found, true);
     collect(&root.join("templates"), root, &mut found, false);
     collect(&root.join("skills"), root, &mut found, false);
+    collect(&root.join("plugins/brave_search"), root, &mut found, false);
     assert!(
         found.is_subset(&catalog),
         "Unbundled shipped files: {:?}",
