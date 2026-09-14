@@ -291,6 +291,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxyge
     white-space: pre-wrap; word-break: break-word;
     color: var(--text-secondary);
 }
+/* Commands are complete, selectable text; only tool OUTPUT stays height-limited. */
+.chat-msg.tool .terminal-command {
+    max-height: none; max-width: 100%; overflow: visible; margin-bottom: 0;
+    overflow-wrap: anywhere;
+}
+.terminal-command-copy {
+    margin-left: 0.7rem; padding: 0.2rem 0.5rem;
+    font-size: 0.72rem; cursor: pointer;
+}
+.terminal-command-copy:disabled { opacity: 0.5; cursor: default; }
 .msg-label {
     font-size: 0.68rem; color: var(--text-secondary);
     text-align: center; white-space: nowrap;

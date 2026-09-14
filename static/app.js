@@ -810,6 +810,7 @@ function startChatStream() {
     let streamBuffer = '';
     let streamMsg = null;
     let completedMsg = null;
+    let terminalRecovery = null;
 
     es.onopen = async () => {
         if (chatEventSource !== es || chatUserId !== uid) return;
@@ -976,18 +977,30 @@ function startChatStream() {
         } catch (err) { console.error('[SSE chat_image error]', err); }
     });
     es.addEventListener('tool_call', (e) => {
+        if (chatEventSource !== es || chatUserId !== uid) return;
         console.log('[SSE] tool_call event received');
         try {
             const d = JSON.parse(e.data);
-            const inner = JSON.parse(d.data);
+            const inner = typeof d.data === 'string' ? JSON.parse(d.data) : (d.data || d);
             const tool = inner.tool || '?';
-            let detail = '';
             const ap = inner.args_preview || {};
-            if (ap.path) detail = escapeHtml(ap.path);
-            else if (ap.query) detail = escapeHtml(String(ap.query));
-            else if (ap.command) detail = escapeHtml(String(ap.command));
-            else if (ap.args) detail = escapeHtml(String(ap.args));
-            addChatMessage('tool', `🔧 <b>${escapeHtml(tool)}</b>`, detail);
+            if (chatIsTerminalTool(tool)) {
+                // Live events intentionally contain only a short preview. The
+                // complete arguments were saved BEFORE this event; recover
+                // them through the existing authenticated history endpoint.
+                chatRenderTerminalCall(inner.call_id, tool, chatTerminalCommand(ap.args || ap));
+                if (!terminalRecovery || terminalRecovery.generation !== chatPollGen) {
+                    const recovery = { generation: chatPollGen };
+                    terminalRecovery = recovery;
+                    pollChatMessages().finally(() => {
+                        if (terminalRecovery === recovery) terminalRecovery = null;
+                    });
+                }
+                return;
+            }
+            const detail = ap.path || ap.query || ap.command || ap.args || '';
+            // addChatMessage escapes extra text exactly once.
+            addChatMessage('tool', `🔧 <b>${escapeHtml(tool)}</b>`, String(detail));
         } catch (err) { console.error('[SSE tool_call error]', err); }
     });
     es.addEventListener('tool_result', (e) => {
@@ -1147,6 +1160,64 @@ async function loadChatHistory() {
     } catch (err) { console.error('[HISTORY] load error:', err); }
 }
 
+function chatIsTerminalTool(tool) {
+    return ['execute_terminal', 'run_background', 'vm_shell'].includes(tool);
+}
+
+function chatTerminalCommand(args) {
+    try {
+        const value = typeof args === 'string' ? JSON.parse(args) : args;
+        return value && typeof value.command === 'string' ? value.command : null;
+    } catch (_) { return null; } // A truncated JSON preview is NOT the command.
+}
+
+function chatRenderTerminalCall(callId, tool, command, messageId = null) {
+    if (callId == null) return;
+    const id = String(callId);
+    const savedId = messageId == null ? null : String(messageId);
+    const matches = [...document.querySelectorAll('#chat-messages .chat-terminal-call')]
+        .filter(el => el.dataset.toolCallId === id);
+    // A provider may reuse its call ID in a different assistant message.
+    // Only adopt a provisional live card once; saved rows keep their identity.
+    let div = savedId == null ? matches[matches.length - 1]
+        : matches.find(el => el.dataset.toolMessageId === savedId)
+            || matches.find(el => !el.dataset.toolMessageId);
+    if (!div) {
+        div = addChatMessage('tool', `🔧 <b>${escapeHtml(tool)}</b>`);
+        div.classList.add('chat-terminal-call');
+        div.dataset.toolCallId = id;
+        const content = div.querySelector('.msg-content');
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.className = 'terminal-command-copy';
+        copy.textContent = 'Befehl kopieren';
+        copy.disabled = true;
+        const pre = document.createElement('pre');
+        pre.className = 'tool-out terminal-command';
+        pre.textContent = 'Vollständiger Befehl wird geladen …';
+        copy.onclick = async () => {
+            try {
+                await navigator.clipboard.writeText(pre.textContent);
+                copy.textContent = 'Kopiert';
+            } catch (_) { copy.textContent = 'Bitte manuell kopieren'; }
+        };
+        content.append(copy, pre);
+    }
+    if (savedId != null) div.dataset.toolMessageId = savedId;
+    // Never let a late/duplicate preview replace a complete saved command.
+    if (savedId != null || div.dataset.commandResolved !== 'true') {
+        const complete = typeof command === 'string';
+        if (complete || savedId != null) {
+            const pre = div.querySelector('.terminal-command');
+            const text = complete ? command : 'Kein gültiger Terminalbefehl in diesem Aufruf gespeichert.';
+            if (pre.textContent !== text) pre.textContent = text; // Keep manual selections during polling.
+            div.querySelector('.terminal-command-copy').disabled = !complete;
+            div.dataset.commandResolved = 'true';
+        }
+    }
+    return div;
+}
+
 function renderChatMessage(m, autoplayAudio = false) {
     // Discord-mirror rows from history: render with the same badge as live
     // discord_message SSE events so the chat looks identical after a reload.
@@ -1154,9 +1225,16 @@ function renderChatMessage(m, autoplayAudio = false) {
         addDiscordMirrorMessage({ ...m.discord_meta, content: m.content });
         return;
     }
-    // Skip intermediate assistant messages that have tool_calls — only show final responses
-    if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
-        return; // intermediate step, not shown
+    // Show saved terminal arguments, but keep intermediate assistant prose
+    // and other tools' potentially huge/private argument bodies hidden.
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+        for (const tc of m.tool_calls) {
+            const fn = tc && (tc.function || tc);
+            if (fn && chatIsTerminalTool(fn.name)) {
+                chatRenderTerminalCall(tc.id, fn.name, chatTerminalCommand(fn.arguments), m.id);
+            }
+        }
+        return;
     }
     if (m.role === 'assistant' && m.content) {
         // Check for web question
@@ -1362,6 +1440,7 @@ async function clearChatMessages() {
         addChatMessage('feedback', 'Failed to clear the chat view');
         return;
     }
+    chatPollGen++; // Ignore history/command recovery that began before /clear.
     const container = document.getElementById('chat-messages');
     container.innerHTML = '<div class="chat-welcome">Chat cleared. Your history stays in the Messages tab — new messages appear here again.</div>';
     chatSeenIds.clear();
@@ -1390,6 +1469,7 @@ async function deleteAllMessages() {
             body: JSON.stringify({ custom_data: { chat_cleared_message_id: 0 } })
         });
     } catch (_) { /* marker reset is best-effort */ }
+    chatPollGen++; // A pending history request must not restore deleted rows.
     const container = document.getElementById('chat-messages');
     container.innerHTML = '<div class="chat-welcome">All messages for this session deleted. Discord was not affected. New messages appear here.</div>';
     chatSeenIds.clear();
