@@ -2,6 +2,8 @@ pub mod minimax_image;
 
 #[cfg(test)]
 mod media_tests;
+#[cfg(test)]
+mod comfyui_tests;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -332,6 +332,10 @@ Plugin manifest (`plugin.json`):
 
 Both are standalone Python 3 plugins with encrypted-secret/environment support and local file output. They make paid API calls only when invoked, without automatic retries. See [setup, parameters and offline tests](docs/MEDIA_PLUGINS.md).
 
+### ComfyUI workflows
+
+`plugins/comfyui/` adds `comfyui_nodes`, `comfyui_workflow`, `comfyui_run`, and `comfyui_result` through the existing plugin system. Discover installed nodes/models, create complete graphs, edit nodes/connections, save/download JSON, and run workflows with explicit prompt, arbitrary local-file, and typed parameter bindings. Configure `COMFYUI_BASE_URL`; no Discord changes or automatic model installation. Editor JSON can be managed, but execution requires API format. Includes complete text-to-image/image-to-image templates and offline tests; live GPU execution still requires a configured server and compatible models. See [installation, API research and examples](plugins/comfyui/README.md).
+
 ## Service (systemd)
 
 ```bash

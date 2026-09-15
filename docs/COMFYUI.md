@@ -14,8 +14,10 @@ setting also works with the optional `comfyui_qwen3` backend; see
 [Qwen3 and shared mixed speech](COMFYUI_QWEN3.md) for installation and examples.
 `single` (default) keeps the previous fixed-language XTTS behavior.
 
-**Image integration is intentionally excluded.** Use your image plugin separately.
-This change adds no image adapter, image workflow, or plugin registry changes.
+**This native TTS adapter remains audio-only.** For creating, editing, validating,
+running and downloading general ComfyUI workflows with arbitrary local-file inputs,
+use the separate [ComfyUI workflow plugin](../plugins/comfyui/README.md). It uses the
+existing plugin registry and does not change native voice behavior.
 
 ## Installation and configuration
 
