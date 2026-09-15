@@ -40,12 +40,33 @@ result. Finalized segments are joined; partial hypotheses are not duplicated.
 Empty finalized text is a valid silence result. JSON/frame and transcript sizes
 are bounded. Vosk word confidence is not treated as ElevenLabs language confidence.
 
-**Browser limitation:** the dashboard STT route can submit PCM WAV without an
-ElevenLabs key, but the current browser MediaRecorder usually produces WebM/Opus
-or Ogg/Opus. Those blobs must be converted to PCM WAV before calling remote Vosk.
-This change does not replace browser recording/audio handling or silently send
-encoded audio as PCM. No local ffmpeg or codec executable is added as a dependency.
-Discord's existing WAV input needs no extra conversion.
+**Dashboard microphone:** when this chat selects `vosk`, the browser decodes its
+MediaRecorder container (for example WebM/Opus), downmixes and resamples it to
+**mono 16 kHz PCM16 WAV** before upload. Vosk browser recordings stop after **60
+seconds**, keeping WAV plus multipart overhead below the existing 2 MiB dashboard
+request limit. Other STT providers keep their original encoded upload format.
+No local ffmpeg or codec executable is required. Discord already supplies WAV.
+
+Recording and transcription stay associated with the chat in which recording
+started; a late result is never inserted into a different chat. The recognized
+text appears in the input box for review: **press Send to get an answer**. Vosk
+itself produces no audible reply; configure TTS separately (for example
+`comfyui_qwen3`), enable reply audio, and allow browser playback. Reload an open
+dashboard after updating its JavaScript.
+
+The `praxis-gpu` companion serves native WebSockets at `/`, `/ws`, `/de`, `/fr`,
+`/ja` and `/ws/LANGUAGE`, while preserving legacy HTTP WAV `/transcribe`.
+Choose a model per context, for example:
+
+```text
+/context set settings.voice_stt_type=vosk settings.voice_vosk_url=ws://100.80.1.2:2700/fr
+```
+
+Use `/de` for German and `/ja` for Japanese. These are companion-server routes,
+not requirements imposed on every third-party vosk-server. Do not use query
+strings with the native Praxis client. Vosk uses a **fixed language model per
+connection**, not reliable automatic DE/FR or DE/JA code-switch detection.
+A successful HTTP `/health` check alone does not establish WebSocket support.
 
 ## Tests and live gate
 
@@ -53,6 +74,11 @@ Discord's existing WAV input needs no extra conversion.
 cargo test --locked --lib vosk_remote
 cargo check --locked --features songbird
 python3 scripts/check_context_docs.py
+node tests/test_browser_wav.js
+node tests/test_browser_mic.js
+# With Playwright/Chromium installed:
+node scripts/test_browser_mic.js
+node scripts/test_chat_audio.js
 ```
 
 Local WebSocket mocks check the standard protocol, transcription without a local
@@ -60,6 +86,12 @@ model/key, sample rate/downmix, partial/final results, malformed/error responses
 disconnects, timeout/cancellation and configuration persistence. Run the tests
 without `voice_vosk` to establish independence from local Vosk.
 
-A real remote Vosk endpoint has not been provided/verified here. Deploy a compatible
-server with the desired language model, verify private reachability, then test
-Discord transcription and language accuracy end-to-end before relying on it.
+The browser codec tests use synthetic MediaRecorder audio and stereo WAV, not a
+microphone or paid service. The GPU companion's DE/FR/JA WebSocket handshake,
+per-chunk acknowledgements and EOF behavior, legacy HTTP, and native dashboard
+DE/FR recognition have also been exercised over a private VPN. This does **not**
+verify a user's microphone permissions, Discord capture, or audible playback.
+For Discord, check pairing, `voice_enabled`, `use_stt`, `voice_deafened=false`,
+and `/join`; server-side recognition success is not proof that the bot is in the
+voice channel. Preserve wake-word preferences rather than enabling all listening
+implicitly.

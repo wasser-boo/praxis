@@ -283,3 +283,61 @@ function chatTtsUpdateUI() {
     }
     document.getElementById('chat-tts-btn')?.classList.toggle('tts-speaking', playing);
 }
+
+// Remote/local Vosk requires PCM WAV, not a MediaRecorder WebM/Opus container.
+// Decode in the browser; no local ffmpeg or extra GPU service is required.
+function chatEncodeMonoWav(samples, sampleRate) {
+    if (!Number.isInteger(sampleRate) || sampleRate < 8000 || sampleRate > 48000 ||
+        !samples.length || samples.length > sampleRate * 300 || samples.length * 2 + 44 > 16 * 1024 * 1024) {
+        throw new Error('Recording must be nonempty and at most five minutes / 16 MiB.');
+    }
+    const bytes = new Uint8Array(44 + samples.length * 2);
+    const view = new DataView(bytes.buffer);
+    for (const [offset, text] of [[0, 'RIFF'], [8, 'WAVE'], [12, 'fmt '], [36, 'data']]) {
+        for (let i = 0; i < text.length; i++) bytes[offset + i] = text.charCodeAt(i);
+    }
+    view.setUint32(4, bytes.length - 8, true);
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    view.setUint32(40, samples.length * 2, true);
+    for (let i = 0; i < samples.length; i++) {
+        if (!Number.isFinite(samples[i])) throw new Error('Invalid recording samples.');
+        const sample = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(44 + i * 2, Math.round(sample * (sample < 0 ? 32768 : 32767)), true);
+    }
+    return new Blob([bytes], {type: 'audio/wav'});
+}
+
+async function chatPrepareSttAudio(blob, settings) {
+    const mime = blob.type.split(';')[0];
+    const extension = {'audio/ogg': 'ogg', 'audio/mp4': 'm4a', 'audio/wav': 'wav'}[mime] || 'webm';
+    if (settings.voice_stt_type !== 'vosk') return {blob, filename: `speech.${extension}`};
+    if (!blob.size || blob.size > 16 * 1024 * 1024) throw new Error('Recording exceeds 16 MiB or is empty.');
+    const DecodeContext = globalThis.AudioContext || globalThis.webkitAudioContext;
+    const RenderContext = globalThis.OfflineAudioContext || globalThis.webkitOfflineAudioContext;
+    if (!DecodeContext || !RenderContext) throw new Error('This browser cannot convert recordings to Vosk PCM WAV.');
+    const context = new DecodeContext();
+    let decoded;
+    try {
+        decoded = await context.decodeAudioData(await blob.arrayBuffer());
+        // A small timer/codec overrun is trimmed; longer recordings are rejected.
+        // 60s at 16kHz/PCM16 fits the unchanged 2 MiB dashboard request limit.
+        if (!Number.isFinite(decoded.duration) || decoded.duration <= 0 || decoded.duration > 61 || ![1, 2].includes(decoded.numberOfChannels)) {
+            throw new Error('Use a mono/stereo Vosk browser recording of at most 60 seconds.');
+        }
+    } finally {
+        await context.close().catch(() => {});
+    }
+    const renderer = new RenderContext(1, Math.ceil(Math.min(decoded.duration, 60) * 16000), 16000);
+    const source = renderer.createBufferSource();
+    source.buffer = decoded;
+    source.connect(renderer.destination);
+    source.start();
+    const rendered = await renderer.startRendering();
+    return {blob: chatEncodeMonoWav(rendered.getChannelData(0), 16000), filename: 'speech.wav'};
+}

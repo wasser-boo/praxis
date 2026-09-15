@@ -2974,33 +2974,55 @@ document.addEventListener('DOMContentLoaded', () => {
 /* ── Web chat speech: mic (STT) + reply TTS toggle ─────────────────────────── */
 let chatMicStream = null;
 let chatMediaRecorder = null;
-let chatMicChunks = [];
 let chatTtsOn = false;
 let chatTtsAudio = null;
 
 async function chatToggleMic() {
   const btn = document.getElementById('chat-mic-btn');
+  if (btn.disabled) return;
   if (chatMediaRecorder && chatMediaRecorder.state === 'recording') {
+    btn.disabled = true;
     chatMediaRecorder.stop();
     return;
   }
+  let stream = null;
+  let stopTimer = null;
+  btn.disabled = true;
   try {
-    chatMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    chatMicChunks = [];
-    chatMediaRecorder = new MediaRecorder(chatMicStream);
-    chatMediaRecorder.ondataavailable = (e) => { if (e.data.size) chatMicChunks.push(e.data); };
-    chatMediaRecorder.onstop = async () => {
-      chatMicStream.getTracks().forEach(t => t.stop());
-      chatMicStream = null;
+    const recordingUserId = chatUserId;
+    const configResponse = await apiGet(`/api/contexts/${encodeURIComponent(recordingUserId)}`);
+    if (!configResponse.ok) throw new Error('Cannot read this chat’s STT configuration.');
+    const recordingSttType = (await configResponse.json()).settings?.voice_stt_type;
+    if (chatUserId !== recordingUserId) throw new Error('Chat changed before recording started.');
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    chatMicStream = stream;
+    const chunks = [];
+    const recorder = new MediaRecorder(stream);
+    chatMediaRecorder = recorder;
+    // 60s of mono 16 kHz PCM stays below the dashboard's 2 MiB upload limit.
+    const maxSeconds = recordingSttType === 'vosk' ? 60 : 300;
+    stopTimer = setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, maxSeconds * 1000);
+    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = async () => {
+      clearTimeout(stopTimer);
+      stream.getTracks().forEach(t => t.stop());
+      if (chatMicStream === stream) chatMicStream = null;
       btn.classList.remove('recording');
       btn.textContent = '🎤';
-      const blob = new Blob(chatMicChunks, { type: 'audio/webm' });
-      if (blob.size < 2000) { addChatMessage('system', '(Recording too short)'); return; }
+      const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+      if (!blob.size) { btn.disabled = false; addChatMessage('system', '(Recording is empty)'); return; }
+      if (chatUserId !== recordingUserId) { btn.disabled = false; addChatMessage('system', 'Chat changed; recording was not submitted.'); return; }
+      btn.disabled = true;
       addChatMessage('system', '⏳ Transcribing...');
       try {
+        const ctxResponse = await apiGet(`/api/contexts/${encodeURIComponent(recordingUserId)}`);
+        if (!ctxResponse.ok) throw new Error('Cannot read this chat’s STT configuration.');
+        const ctx = await ctxResponse.json();
+        if (ctx.settings?.voice_stt_type !== recordingSttType) throw new Error('STT provider changed; please record again.');
+        const prepared = await chatPrepareSttAudio(blob, ctx.settings || {});
         const fd = new FormData();
-        fd.append('audio', blob, 'speech.webm');
-        const res = await apiFetch(`/api/stt?user_id=${encodeURIComponent(chatUserId)}`, { method: 'POST', body: fd });
+        fd.append('audio', prepared.blob, prepared.filename);
+        const res = await apiFetch(`/api/stt?user_id=${encodeURIComponent(recordingUserId)}`, { method: 'POST', body: fd });
         const raw = await res.text();
         let data = null;
         try { data = JSON.parse(raw); } catch (_) { /* non-JSON response */ }
@@ -3009,17 +3031,24 @@ async function chatToggleMic() {
           return;
         }
         if (data.error) { addChatMessage('feedback', 'STT failed: ' + data.error); return; }
+        if (chatUserId !== recordingUserId) { addChatMessage('system', 'Chat changed; transcript was not inserted.'); return; }
         const ta = document.getElementById('chat-input');
         ta.value = (ta.value ? ta.value + ' ' : '') + (data.text || '');
         if (data.low_confidence) addChatMessage('system', '⚠️ Low speech confidence – check the text.');
         ta.focus();
       } catch (err) { addChatMessage('feedback', 'STT failed: ' + err.message); }
+      finally { btn.disabled = false; }
     };
-    chatMediaRecorder.start();
+    recorder.start();
+    btn.disabled = false;
     btn.classList.add('recording');
     btn.textContent = '⏺';
-    addChatMessage('system', '🎙 Recording... click again to send.');
+    addChatMessage('system', `🎙 Recording... click again to transcribe (maximum ${maxSeconds}s).`);
   } catch (err) {
+    clearTimeout(stopTimer);
+    stream?.getTracks().forEach(t => t.stop());
+    if (chatMicStream === stream) chatMicStream = null;
+    btn.disabled = false;
     addChatMessage('feedback', 'Microphone unavailable: ' + err.message);
   }
 }

@@ -87,11 +87,11 @@ but can reduce cloning quality compared with a correct transcript.
 After deployment, select Qwen3 in the **same chat context used for playback**:
 
 ```text
-/context set settings.voice_tts_type=comfyui_qwen3 settings.comfyui_tts_workflow=workflows/tts-qwen3-api.json settings.comfyui_qwen_reference_audio=marvinstimme.wav settings.comfyui_qwen_language=auto settings.comfyui_tts_language_mode=de-ja settings.use_tts=true settings.web_chat_tts=true
+/context set settings.voice_tts_type=comfyui_qwen3 settings.comfyui_tts_workflow=workflows/tts-qwen3-api.json settings.comfyui_qwen_reference_audio=reference.wav settings.comfyui_qwen_language=auto settings.comfyui_tts_language_mode=de-ja settings.use_tts=true settings.web_chat_tts=true
 ```
 
 Set `settings.comfyui_base_url` to your GPU NetBird origin if not already configured.
-The reference above means `/workspace/input/marvinstimme.wav` on the template's
+The reference above means `/workspace/input/reference.wav` on the template's
 GPU server. No new upload is needed if that file is already there. Only use a
 reference voice for which you have permission. Qwen accepts a mono/stereo
 reference of at most 120 seconds and the node enforces a 20 MiB file limit.
@@ -99,7 +99,7 @@ reference of at most 120 seconds and the node enforces a 20 MiB file limit.
 Or keep XTTS and enable mixing:
 
 ```text
-/context set settings.voice_tts_type=comfyui_xtts settings.comfyui_tts_workflow=workflows/tts-api.json settings.comfyui_xtts_reference_audio=marvinstimme.wav settings.comfyui_xtts_language=de settings.comfyui_tts_language_mode=de-ja settings.use_tts=true settings.web_chat_tts=true
+/context set settings.voice_tts_type=comfyui_xtts settings.comfyui_tts_workflow=workflows/tts-api.json settings.comfyui_xtts_reference_audio=reference.wav settings.comfyui_xtts_language=de settings.comfyui_tts_language_mode=de-ja settings.use_tts=true settings.web_chat_tts=true
 ```
 
 Run this **separately** to confirm the saved setting:
@@ -107,6 +107,25 @@ Run this **separately** to confirm the saved setting:
 ```text
 /context get settings.comfyui_tts_language_mode
 ```
+
+## German/French and other Qwen multilingual replies
+
+Do **not** use `de-ja` for French: it deliberately routes Latin-script text to
+German. Keep the same native Qwen provider, API workflow and authorized reference,
+but select Qwen's own multilingual inference:
+
+```text
+/context set settings.comfyui_tts_language_mode=single settings.comfyui_qwen_language=auto
+```
+
+Here `single` disables the explicit DE/JA router; it does not restrict Qwen Auto
+to one spoken language. For strictly French output, use `comfyui_qwen_language=fr`
+instead. Auto is not a deterministic DE/FR segment classifier: listen to ambiguous
+phrases before relying on their pronunciation. No extra `qwen_tts_model` field is
+required by `comfyui_qwen3`: the server node loads its provisioned Base model.
+`qwen_tts_model` belongs to the separate HTTP provider.
+
+Speech recognition is configured independently; see [VOSK_REMOTE.md](VOSK_REMOTE.md).
 
 ## Workflow errors and limits
 
