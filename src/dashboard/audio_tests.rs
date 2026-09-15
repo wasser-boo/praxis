@@ -43,3 +43,38 @@ async fn audio_endpoint_requires_auth_and_serves_only_the_requested_sessions_byt
     assert_eq!(client.get(&url).bearer_auth(auth).send().await.unwrap().status(), StatusCode::NOT_FOUND);
     server.abort();
 }
+
+#[tokio::test]
+async fn vosk_remote_dashboard_wav_uses_context_url_without_elevenlabs_key_or_local_model() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{accept_async, tungstenite::Message as WsMessage};
+    let vosk_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let vosk_url = format!("ws://{}", vosk_listener.local_addr().unwrap());
+    let vosk_server = tokio::spawn(async move {
+        let mut socket = accept_async(vosk_listener.accept().await.unwrap().0).await.unwrap();
+        socket.next().await.unwrap().unwrap(); // configuration
+        assert!(socket.next().await.unwrap().unwrap().is_binary());
+        socket.send(WsMessage::Text(r#"{"partial":""}"#.into())).await.unwrap();
+        assert_eq!(socket.next().await.unwrap().unwrap().into_text().unwrap(), r#"{"eof":1}"#);
+        socket.send(WsMessage::Text(r#"{"text":"remote dashboard"}"#.into())).await.unwrap();
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::db::Database::new(dir.path()).unwrap();
+    db.merge_context("vosk-dashboard", serde_json::json!({
+        "settings.voice_stt_type": "vosk", "settings.voice_vosk_url": vosk_url,
+    })).unwrap();
+    let state = Arc::new(DashboardState {
+        db, gateway_api_key: "synthetic-test-key".into(), admin_password: "unused".into(),
+    });
+    let app = Router::new().route("/stt", axum::routing::post(dashboard_stt)).with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/stt?user_id=vosk-dashboard", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let wav = crate::voice::pcm_to_wav(&[1000, -1000], 16000, 1);
+    let form = reqwest::multipart::Form::new().part("audio", reqwest::multipart::Part::bytes(wav).file_name("input.wav"));
+    let response: serde_json::Value = reqwest::Client::new().post(url).multipart(form)
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(response["text"], "remote dashboard", "{response}");
+    vosk_server.await.unwrap();
+    server.abort();
+}

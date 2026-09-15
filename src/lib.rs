@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod sm;
 pub mod config;
+pub mod comfyui;
 pub mod context_cmd;
 pub mod dashboard;
 pub mod db;

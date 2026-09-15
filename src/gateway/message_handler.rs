@@ -991,6 +991,14 @@ fn spawn_tts(
         return;
     }
     let tts_type = settings.voice_tts_type.clone();
+    // Use the caller's settings snapshot (including workflow overrides), with
+    // compatibility for earlier custom_data configurations and environment defaults.
+    // Never reinterpret other providers' voice IDs/local clone paths.
+    let comfyui_config = (tts_type == "comfyui_xtts").then(|| {
+        db.load_context(user_id).and_then(|ctx| {
+            crate::comfyui::config::ComfyUiConfig::from_settings(settings, Some(&ctx.custom_data))
+        })
+    });
     let rvc_on = settings.rvc_on;
     let rvc_server = settings.rvc_server.clone();
     let rvc_model_path = settings.rvc_model_path.clone();
@@ -1096,6 +1104,26 @@ fn spawn_tts(
                     Ok(bytes) => bytes,
                     Err(e) => {
                         tracing::warn!("TTS FAILED: mimo_tts: {}", e);
+                        return;
+                    }
+                }
+            }
+            "comfyui_xtts" => {
+                let config = match comfyui_config {
+                    Some(Ok(config)) => config,
+                    Some(Err(error)) => {
+                        tracing::warn!("TTS FAILED: comfyui_xtts configuration: {error}");
+                        return;
+                    }
+                    None => return,
+                };
+                // Reply synthesis intentionally outlives its generating task,
+                // just like the existing TTS backends. TaskGuard drop on normal
+                // completion must not cancel the final spoken reply.
+                match crate::voice::comfyui_xtts::speak(&config, &text, None).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        tracing::warn!("TTS FAILED: comfyui_xtts: {error:#}");
                         return;
                     }
                 }
@@ -1266,6 +1294,10 @@ mod message_tool_loop_tests;
 #[cfg(test)]
 #[path = "message_audio_tests.rs"]
 mod message_audio_tests;
+
+#[cfg(test)]
+#[path = "comfyui_tts_tests.rs"]
+mod comfyui_tts_tests;
 
 #[cfg(test)]
 mod gateway_tests {

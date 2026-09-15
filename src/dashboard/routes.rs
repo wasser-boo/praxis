@@ -1625,13 +1625,18 @@ async fn dashboard_stt(
         .elevenlabs_api_key
         .clone()
         .unwrap_or_default();
-    if api_key.is_empty() {
+    if ctx.settings.voice_stt_type == "elevenlabs" && api_key.is_empty() {
         return Ok(Json(serde_json::json!({"error": "ElevenLabs API key not configured"})));
     }
     let stt_config = crate::voice::STTConfig {
         engine: ctx.settings.voice_stt_type.clone(),
-        api_key: Some(api_key),
-        model_path: ctx.settings.voice_whisper_model_path.clone(),
+        api_key: (!api_key.is_empty()).then_some(api_key),
+        model_path: if ctx.settings.voice_stt_type == "vosk" {
+            ctx.settings.voice_vosk_model_path.clone()
+        } else {
+            ctx.settings.voice_whisper_model_path.clone()
+        },
+        vosk_url: ctx.settings.voice_vosk_url.clone(),
         elevenlabs_model: ctx.settings.elevenlabs_stt_model.clone(),
         elevenlabs_language: ctx.settings.elevenlabs_stt_language.clone(),
         elevenlabs_tag_audio_events: ctx.settings.elevenlabs_stt_tag_audio_events,

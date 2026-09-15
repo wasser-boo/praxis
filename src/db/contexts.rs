@@ -66,6 +66,9 @@ pub struct ContextSettings {
     pub voice_stt_type: String,
     #[serde(default)]
     pub voice_vosk_model_path: Option<String>,
+    /// Standard Vosk WebSocket server; bypasses local Vosk/model when set.
+    #[serde(default)]
+    pub voice_vosk_url: Option<String>,
     #[serde(default)]
     pub voice_whisper_model_path: Option<String>,
     #[serde(default)]
@@ -78,6 +81,18 @@ pub struct ContextSettings {
     pub voice_tts_enabled: bool,
     #[serde(default = "default_tts")]
     pub voice_tts_type: String,
+    /// Private ComfyUI origin. Unset fields inherit legacy custom_data/env defaults.
+    #[serde(default)]
+    pub comfyui_base_url: Option<String>,
+    #[serde(default)]
+    pub comfyui_tts_workflow: Option<String>,
+    /// Relative to ComfyUI's SERVER input directory, not a local Praxis path.
+    #[serde(default)]
+    pub comfyui_xtts_reference_audio: Option<String>,
+    #[serde(default)]
+    pub comfyui_xtts_language: Option<String>,
+    #[serde(default)]
+    pub comfyui_timeout_seconds: Option<usize>,
     #[serde(default)]
     pub voice_elevenlabs_voice_id: Option<String>,
     #[serde(default = "default_elevenlabs_stt_model")]
@@ -311,12 +326,18 @@ impl Default for ContextSettings {
             voice_enabled: false,
             voice_stt_type: default_stt(),
             voice_vosk_model_path: None,
+            voice_vosk_url: None,
             voice_whisper_model_path: None,
             voice_last_input: None,
             voice_listen_timeout_secs: default_listen_timeout(),
             voice_owner_id: None,
             voice_tts_enabled: false,
             voice_tts_type: default_tts(),
+            comfyui_base_url: None,
+            comfyui_tts_workflow: None,
+            comfyui_xtts_reference_audio: None,
+            comfyui_xtts_language: None,
+            comfyui_timeout_seconds: None,
             voice_elevenlabs_voice_id: None,
             elevenlabs_stt_model: default_elevenlabs_stt_model(),
             elevenlabs_stt_language: None,

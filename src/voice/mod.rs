@@ -1,4 +1,6 @@
 pub mod handler;
+pub mod comfyui_xtts;
+pub mod vosk_remote;
 pub mod wake_word;
 
 #[cfg(test)]
@@ -1698,6 +1700,7 @@ pub struct STTConfig {
     pub engine: String,
     pub api_key: Option<String>,
     pub model_path: Option<String>,
+    pub vosk_url: Option<String>,
     pub elevenlabs_model: String,
     pub elevenlabs_language: Option<String>,
     pub elevenlabs_tag_audio_events: bool,
@@ -1750,12 +1753,23 @@ pub async fn transcribe_audio(
             .await
         }
         "vosk" => {
-            let model_path = config.model_path.as_deref().ok_or_else(|| {
-                stt::STTError::NotReady("Vosk model path not configured".to_string())
-            })?;
-            let stt = VoskSTT::new(Some(model_path.to_string()));
-            let pcm_data = wav_to_pcm(wav_data)?;
-            stt.transcribe(&pcm_data).await
+            // Vosk does not provide ElevenLabs language_confidence; do not reuse
+            // a stale confidence value from a previous provider invocation.
+            HAS_STT_CONFIDENCE.store(false, std::sync::atomic::Ordering::Relaxed);
+            let remote_url = config.vosk_url.as_ref().filter(|url| !url.is_empty()).cloned()
+                .or_else(|| std::env::var("VOSK_SERVER_URL").ok().filter(|url| !url.is_empty()));
+            if let Some(url) = remote_url {
+                let remote = vosk_remote::VoskRemote::from_url(&url)
+                    .map_err(|error| stt::STTError::NotReady(format!("Vosk remote: {error:#}")))?;
+                remote.transcribe(wav_data, None).await
+            } else {
+                let model_path = config.model_path.as_deref().ok_or_else(|| {
+                    stt::STTError::NotReady("Vosk model path not configured; alternatively set voice_vosk_url for remote Vosk".to_string())
+                })?;
+                let stt = VoskSTT::new(Some(model_path.to_string()));
+                let pcm_data = wav_to_pcm(wav_data)?;
+                stt.transcribe(&pcm_data).await
+            }
         }
         "whisper" => {
             let model_path = config.model_path.as_deref().ok_or_else(|| {
@@ -1985,6 +1999,7 @@ mod voice_tests {
             engine: engine.to_string(),
             api_key: None,
             model_path: None,
+            vosk_url: None,
             elevenlabs_model: "scribe_v2".to_string(),
             elevenlabs_language: None,
             elevenlabs_tag_audio_events: false,

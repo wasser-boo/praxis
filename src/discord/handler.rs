@@ -890,6 +890,7 @@ impl EventHandler for DiscordHandler {
                                                 engine: stt_type,
                                                 api_key,
                                                 model_path,
+                                                vosk_url: ctx.settings.voice_vosk_url.clone(),
                                                 elevenlabs_model: ctx
                                                     .settings
                                                     .elevenlabs_stt_model
