@@ -109,6 +109,8 @@ class AudioTests(unittest.TestCase):
 
 class NodeTests(unittest.TestCase):
     def setUp(self):
+        idle = patch.dict(os.environ, {'PRAXIS_QWEN_TTS_IDLE_SECONDS': '0'})
+        idle.start(); self.addCleanup(idle.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
@@ -126,6 +128,15 @@ class NodeTests(unittest.TestCase):
         for node in (self.node.PraxisXTTS, self.node.PraxisQwen3TTS):
             self.assertIn('de-ja', node.INPUT_TYPES()['required']['language'][0])
         self.assertIn('auto', self.node.PraxisQwen3TTS.INPUT_TYPES()['required']['language'][0])
+
+    def test_qwen_graph_cache_detects_replaced_reference_and_transcript(self):
+        changed = self.node.PraxisQwen3TTS.IS_CHANGED
+        first = changed('Hallo', 'de', 'reference.wav')
+        self.assertEqual(first, changed('Hallo', 'de', 'reference.wav'))
+        (self.root / 'reference.wav').write_bytes(b'changed-synthetic-voice')
+        second = changed('Hallo', 'de', 'reference.wav')
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(second, changed('Hallo', 'de', 'reference.wav', 'Synthetic caption'))
 
     def test_reference_escape_absolute_and_symlink_rejected(self):
         outside = self.root.parent / (self.root.name + '.wav')
@@ -169,7 +180,7 @@ class BundleTests(unittest.TestCase):
     def test_all_server_runtime_companions_are_bundled(self):
         assets = (ROOT.parents[1] / 'src/assets.rs').read_text()
         for name in ['__init__.py', 'node.py', 'worker.py', 'segments.py', 'audio.py',
-                     'download_qwen_model.py', 'qwen-requirements.txt', 'README.md']:
+                     'download_qwen_model.py', 'qwen-requirements.txt', 'README.md', 'protocol.py', 'warm_worker.py']:
             self.assertIn('asset!("integrations/comfyui_audio/' + name + '")', assets)
         self.assertIn('asset!("workflows/tts-qwen3-api.json")', assets)
         self.assertIn('asset!("docs/COMFYUI_QWEN3.md")', assets)
@@ -221,7 +232,8 @@ class WorkerTests(unittest.TestCase):
             for name in ['config.json', 'model.safetensors', 'speech_tokenizer/config.json', 'speech_tokenizer/model.safetensors', 'tokenizer_config.json', 'vocab.json', 'merges.txt']:
                 p = root / name; p.parent.mkdir(parents=True, exist_ok=True); p.touch()
             with patch.dict(os.environ, {'PRAXIS_QWEN_TTS_MODEL_DIR': d}), patch.dict(sys.modules, {'torch': torch, 'soundfile': soundfile, 'qwen_tts': types.SimpleNamespace(Qwen3TTSModel=types.SimpleNamespace(from_pretrained=factory))}):
-                request = {'text': 'Hallo 学校 Ende', 'language': 'de-ja', 'reference': '/reference.wav', 'output': str(root / 'speech.wav')}
+                (root / 'reference.wav').write_bytes(b'synthetic-reference')
+                request = {'text': 'Hallo 学校 Ende', 'language': 'de-ja', 'reference': str(root / 'reference.wav'), 'output': str(root / 'speech.wav')}
                 worker.qwen3(request)
                 self.assertEqual(factory.call_count, 1)
                 self.assertTrue(factory.call_args.kwargs['local_files_only'])

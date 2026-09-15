@@ -21,7 +21,7 @@ def write_speech(output, segments, generate):
     if output.exists() or output.is_symlink():
         raise ValueError('Refusing to replace an existing speech output')
     output.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix='.praxis-audio-', suffix='.part', dir=output.parent)
+    fd, temporary = tempfile.mkstemp(prefix='.praxis-audio-' + output.name + '-', suffix='.part', dir=output.parent)
     temporary = Path(temporary)
     total = 0
     rate = None

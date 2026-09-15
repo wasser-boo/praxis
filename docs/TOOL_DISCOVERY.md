@@ -31,22 +31,30 @@ Finding a paid or consequential tool does not authorize using it.
 - `custom_data.language_learning`: per-context lesson configuration (language,
   level, goal, reply style). Set using normal context controls.
 - `memory.variables`: read-only POML projection of durable Memory custom variables.
-  Dashboard **Memory → Custom Data** displays this same data.
-- `memory_get({"key":"srs_items"})`: read a named JSON value and existence flag.
-- `memory_set({"key":"srs_items", "value":[...], "expected_value":[...]})`:
-  atomically replace just this user's variable. JSON types are preserved; null
+  Dashboard **Memory → Custom Data** displays this same data in the selected
+  [memory profile](MEMORY_PROFILES.md), not one global bucket per persona.
+- Discover `memory_profile_create`, `memory_profile_load`, `memory_profile_list`.
+  Load the relevant category (e.g. `language_instructor`); create it if missing.
+  Existing `standard` data is retained, never bulk-copied into other categories.
+- `memory_get({"key":"srs_items"})`: read a JSON value, existence and profile.
+- `memory_set({"key":"srs_items", "value":[...], "expected_profile":"language_instructor", "expected_value":[...]})`:
+  atomically replace just this user's current-profile variable. JSON types are preserved; null
   deletes that key. `expected_value` is the exact previously read value, null for
   an absent key. Conflicts fail and require a re-read; identical retries succeed.
   Individual values are limited to 64 KiB. Other keys/users remain unchanged.
 
 Search `memory` to load these tools first. **Do not use set_context with
 memory.variables.*:** memory is not a saved Context namespace. Existing
-learn_fact/preference/topic tools remain available through discovery.
+learn_fact/preference/topic tools remain available through discovery and also
+use the current profile. Separate shared memory is user-private and exceptional:
+only authorized name/pronouns/time_zone, explicit scope and reason; no learning
+state or automatic promotions. See [MEMORY_PROFILES.md](MEMORY_PROFILES.md).
 
 ## Language instructor and daily quiz
 
 The instructor and compatibility alias `language_learning`, plus `daily_quiz`,
-use `learning_profile`, `srs_items` and numeric `xp` from durable memory. Context
+use `learning_profile`, `srs_items` and numeric `xp` from the durable
+`language_instructor` profile (or a relevant explicitly selected tutor profile). Context
 configuration wins over the saved profile; the current learner request wins over
 both. The profile can record consent to tracked practice. Do not infer consent
 from merely mentioning a language or silently save sensitive details.

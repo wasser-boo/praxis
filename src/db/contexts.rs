@@ -588,7 +588,13 @@ impl Database {
         let tx = conn.transaction()?;
         // '%' and '_' in user IDs are literal, never SQL wildcard selectors.
         let prefix = format!("{user_id}:::");
-        for table in ["messages", "memory", "contexts"] {
+        for table in [
+            "messages",
+            "memory_profile_selections",
+            "memory_profiles",
+            "memory",
+            "contexts",
+        ] {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE user_id = ?1 OR substr(user_id, 1, length(?2)) = ?2"),
                 rusqlite::params![user_id, prefix],
@@ -714,6 +720,17 @@ impl Database {
 
     pub fn delete_session(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
         let conn = self.conn();
+        conn.execute(
+            "DELETE FROM memory_profile_selections WHERE user_id=?1 AND session_id=?2",
+            rusqlite::params![
+                user_id,
+                if session_id == "default" {
+                    ""
+                } else {
+                    session_id
+                }
+            ],
+        )?;
         conn.execute(
             "DELETE FROM user_sessions WHERE user_id = ?1 AND session_id = ?2",
             rusqlite::params![user_id, session_id],

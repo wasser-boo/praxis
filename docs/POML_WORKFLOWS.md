@@ -64,7 +64,7 @@ Save this object at `custom_data.language_learning` (do not replace unrelated `c
 }
 ```
 
-Durable learning state lives separately in **Memory → Custom Data**: `learning_profile`, `srs_items` and `xp`. The instructor/daily quiz use `memory_get` / `memory_set`, discovered through `search_tools`, with typed JSON and conflict-aware writes. Do not set `memory.variables.*` using context tools. Due cards are filtered using the shared `utc_now` timestamp; other languages/future cards stay stored. See [progressive discovery and SRS memory](TOOL_DISCOVERY.md) for the schema and review policy.
+Durable learning state lives separately in **Memory → language_instructor → Custom Data**: `learning_profile`, `srs_items` and `xp`. Load/create the relevant [memory profile](MEMORY_PROFILES.md) first; other modes do not receive the legacy standard bucket. The instructor/daily quiz use `memory_get` / `memory_set`, discovered through `search_tools`, with typed JSON and conflict-aware writes. Do not set `memory.variables.*` using context tools. Due cards are filtered using the shared `utc_now` timestamp; other languages/future cards stay stored. See [progressive discovery and SRS memory](TOOL_DISCOVERY.md) for the schema and review policy.
 
 Without overrides, the tutor supports French/Japanese practice with German explanations. The learner's explicit request wins over defaults. Text transcripts are not proof of pronunciation; the template does not claim that audio played or promise medical benefits.
 
@@ -91,7 +91,7 @@ Save overrides at `custom_data.semantic_blueprint`, or use `sm_data.semantic_blu
 
 Templates ask for private planning/checking and concise public plans, assumptions, evidence and results—not exposed chain-of-thought. Simple questions still receive direct answers. This is a structured prompt/task contract, not a modification of the model's underlying inference algorithm or a guarantee of correctness.
 
-`shared/runtime.poml` advertises the current input, selected workflow/template/skill, the bounded metadata candidates chosen by the [POML discovery policy](SKILLS.md#discovery-belongs-to-poml), the small current task's tool selection, and **this user's** facts, preferences, topics and memory-variable names. Callable schemas are loaded progressively through `search_tools`, not duplicated as a complete catalog in each persona. The user/compaction wrappers stay purpose-specific; all conversational persona/role/task includes share this discovery policy. Only successful memory tool results justify saying information was saved. Tool descriptions and old memories are not new authorization.
+`shared/runtime.poml` advertises the current input, selected workflow/template/skill, the bounded metadata candidates chosen by the [POML discovery policy](SKILLS.md#discovery-belongs-to-poml), the small current task's tool selection, and **this user's selected profile's** facts, preferences, topics and memory-variable names, plus separate rare shared identity facts. Callable schemas are loaded progressively through `search_tools`, not duplicated as a complete catalog in each persona. The user/compaction wrappers stay purpose-specific; all conversational persona/role/task includes share this discovery policy. Only successful memory tool results justify saying information was saved. Tool descriptions and old memories are not new authorization.
 
 ## Actual SM grammar
 
@@ -161,6 +161,6 @@ PLAYWRIGHT_BROWSERS_PATH=/tmp/praxis-ui-browser-cache node scripts/test_ui_brows
 
 Strict rendering requires Node and the actual Microsoft JavaScript CLI in the service environment. It does not fall back to brace substitution. Templates are trusted local code, not a sandbox; imports need authorization. See [Skills](SKILLS.md) for safe template saves and targeted Rust test commands.
 
-Old absolute workflow paths and the former `contextlanguage/` / `data/contexts/` search roots must be relocated/reselected under the canonical `contexts/` directory. Explicit session helpers now read/write one scoped row without double-appending a session ID or silently changing activation. Durable memory remains shared across one user's sessions, not across different user IDs.
+Old absolute workflow paths and the former `contextlanguage/` / `data/contexts/` search roots must be relocated/reselected under the canonical `contexts/` directory. Explicit session helpers now read/write one scoped row without double-appending a session ID or silently changing activation. Durable profile contents remain shared across one user's sessions, not across different user IDs. Profile selection is session/persona-scoped; see [memory profiles](MEMORY_PROFILES.md).
 
 Changes are **source-only** until rebuilt and deployed. Ship the updated binary and complete `templates/`, `contexts/`, `skills/` and `static/` directories, including blueprint/include dependencies. The cactus/dune `logo.png`, favicon and touch icon all derive from `static/logo-source.png`; `scripts/build_logo.mjs` reproduces the sizes using `sharp`. Normal bot startup registers `/skill`. Do not restart an active service or change user selections merely to run tests.

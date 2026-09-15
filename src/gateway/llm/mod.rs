@@ -307,9 +307,21 @@ impl LLMRouter {
                             Err(e) => format!("Error: {}", e),
                         }
                     }
+                    "memory_profile_create" => {
+                        crate::tools::memory::profile_create(db, user_id, &args)
+                            .unwrap_or_else(|e| format!("Error: {e}"))
+                    }
+                    "memory_profile_load" => crate::tools::memory::profile_load(db, user_id, &args)
+                        .unwrap_or_else(|e| format!("Error: {e}")),
+                    "memory_profile_list" => crate::tools::memory::profile_list(db, user_id)
+                        .unwrap_or_else(|e| format!("Error: {e}")),
+                    "memory_get" => crate::tools::memory::get(db, user_id, &args)
+                        .unwrap_or_else(|e| format!("Error: {e}")),
+                    "memory_set" => crate::tools::memory::set(db, user_id, &args)
+                        .unwrap_or_else(|e| format!("Error: {e}")),
                     "learn_fact" => {
                         let fact = args["fact"].as_str().unwrap_or("");
-                        match db.add_memory(user_id, fact, Some("fact")) {
+                        match crate::db::memory_profiles::learn_fact(db, user_id, fact) {
                             Ok(_) => format!("Learned: {}", fact),
                             Err(e) => format!("Error: {e}"),
                         }
@@ -317,7 +329,7 @@ impl LLMRouter {
                     "learn_preference" => {
                         let key = args["key"].as_str().unwrap_or("");
                         let value = args.get("value").cloned().unwrap_or(serde_json::json!(""));
-                        match crate::db::memory::update_memory(db, user_id, |memory| {
+                        match crate::db::memory_profiles::update_memory(db, user_id, |memory| {
                             crate::db::memory::update_preference(memory, key, &value);
                         }) {
                             Ok(_) => format!("Preference saved: {}", key),
@@ -326,7 +338,7 @@ impl LLMRouter {
                     }
                     "learn_topic" => {
                         let topic = args["topic"].as_str().unwrap_or("");
-                        match db.add_memory(user_id, topic, Some("topic")) {
+                        match crate::db::memory_profiles::learn_topic(db, user_id, topic) {
                             Ok(_) => format!("Topic tracked: {}", topic),
                             Err(e) => format!("Error: {e}"),
                         }

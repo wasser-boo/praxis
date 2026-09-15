@@ -124,12 +124,18 @@ fn load_from(conn: &rusqlite::Connection, user_id: &str) -> anyhow::Result<Memor
     Ok(memory)
 }
 
-fn mark_legacy_imported(conn: &rusqlite::Connection, user_id: &str) -> anyhow::Result<()> {
+pub(super) fn mark_legacy_imported(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+) -> anyhow::Result<()> {
     conn.execute("INSERT INTO memory (user_id, fact, category) SELECT ?1, 'context_preferences_imported', '_praxis_memory_v2' WHERE NOT EXISTS (SELECT 1 FROM memory WHERE user_id = ?1 AND category = '_praxis_memory_v2')", [user_id])?;
     Ok(())
 }
 
-fn load_with_legacy_preferences(conn: &rusqlite::Connection, user_id: &str) -> anyhow::Result<Memory> {
+pub(super) fn load_with_legacy_preferences(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+) -> anyhow::Result<Memory> {
     use rusqlite::OptionalExtension;
     let mut memory = load_from(conn, user_id)?;
     let imported: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM memory WHERE user_id = ?1 AND category = '_praxis_memory_v2')", [user_id], |row| row.get(0))?;
@@ -169,7 +175,11 @@ pub fn load_memory(db: &Database, user_id: &str) -> anyhow::Result<Memory> {
     Ok(memory)
 }
 
-fn save_to(conn: &rusqlite::Connection, user_id: &str, memory: &Memory) -> anyhow::Result<()> {
+pub(super) fn save_to(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    memory: &Memory,
+) -> anyhow::Result<()> {
     // Deterministic desired snapshot; unchanged rows retain IDs/timestamps.
     let mut desired = Vec::new();
     for fact in &memory.learned_facts { desired.push(("learned_fact".to_string(), fact.clone())); }

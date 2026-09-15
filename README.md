@@ -11,7 +11,7 @@ Self-hosted AI agent platform with Discord bot, dashboard, tool-calling, and QEM
 - **QEMU VM**: Full Linux VM controlled by the LLM (keyboard, mouse, screenshots)
 - **Plugin System**: Install custom tools via plugin.json
 - **POML Templates**: Customizable system prompts and workflows
-- **Memory & Learning**: Facts, preferences, topics stored per user
+- **Memory & Learning**: User-private [memory profiles](docs/MEMORY_PROFILES.md) per persona, with separate rare shared identity facts
 - **Encrypted Secrets**: AES-256-GCM encrypted at rest (enc2)
 - **Statemachine (.sm)**: File-driven agent workflows with regex conditions
 - **Voice**: STT (Vosk/Whisper/ElevenLabs) + TTS (SAPI/ElevenLabs/Qwen)

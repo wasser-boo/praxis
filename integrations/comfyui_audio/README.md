@@ -16,6 +16,8 @@ example. Back up the existing `custom_nodes/praxis_xtts` directory **outside**
     __init__.py
     node.py
     worker.py
+    protocol.py
+    warm_worker.py
     segments.py
     audio.py
     ...
@@ -77,6 +79,14 @@ Optional server environment overrides:
 
 - `PRAXIS_QWEN_TTS_PYTHON=/opt/qwen-tts-venv/bin/python`
 - `PRAXIS_QWEN_TTS_MODEL_DIR=/workspace/qwen3-tts/1.7B-Base`
+- `PRAXIS_QWEN_TTS_IDLE_SECONDS=120` opts into a warm model/reference cache;
+  default `0` retains one-shot behavior (integer 0–3600, POSIX only when enabled).
+  First reply stays cold; later replies before idle expiry reuse the model and
+  unchanged reference prompt. Cache contents stay in private child RAM.
+  No TCP listener or quality/precision changes. Errors are not retried.
+  History `outputs["1"].tts_timings[0]` exposes only timing/boolean metadata.
+  If an owned child cannot exit, further warm requests are blocked for operator
+  inspection rather than spawning duplicate GPU workers.
 
 Inference requires local model files, `local_files_only=True`,
 `trust_remote_code=False`, offline Hugging Face/Transformers mode and CUDA. There
@@ -89,12 +99,14 @@ own image/startup provisioning; never bake reference voices or credentials into 
 See [COMFYUI_QWEN3.md](../../docs/COMFYUI_QWEN3.md) for the typed Praxis context
 setting `settings.comfyui_tts_language_mode=de-ja`, provider selection and limits.
 No shared Ollama/ComfyUI GPU lock is added. An isolated worker frees its own VRAM
-when it exits, but simultaneous workloads still require capacity planning.
+when it exits normally; warm mode retains those allocations until idle expiry.
+It is outside ComfyUI's model cache. Simultaneous workloads still require
+capacity planning, and a driver hang can prevent normal process cleanup.
 
 Offline tests from the Praxis repository:
 
 ```sh
-python3 -m unittest discover -s tests -p test_comfyui_audio.py
+python3 -m unittest discover -s tests -p 'test_comfyui*.py'
 ```
 
 GPU synthesis, sound quality, mixed-language pronunciation and native playback

@@ -812,8 +812,8 @@ async fn run_agent_loop_inner(
 
         // Parse and execute tags if enabled
         if config.tags_enabled {
-            let tag_result = tags::parse_tags(&response_text);
-            let tag_exec = tags::execute_tags(&tag_result, &mut ctx);
+            let mut tag_result = tags::parse_tags(&response_text);
+            let mut tag_exec = tags::execute_tags(&tag_result, &mut ctx);
 
             // Send feedback messages
             for msg in &tag_exec.feedback_messages {
@@ -834,7 +834,7 @@ async fn run_agent_loop_inner(
                 || !tag_exec.learned_preferences.is_empty()
                 || !tag_exec.learned_topics.is_empty()
             {
-                crate::db::memory::update_memory(&state.db, user_id, |memory| {
+                let saved = crate::db::memory_profiles::update_for_context(&state.db, &ctx, None, |memory| {
                     for fact in &tag_exec.learned_facts {
                         crate::db::memory::add_learned_fact(memory, fact);
                     }
@@ -844,7 +844,20 @@ async fn run_agent_loop_inner(
                     for topic in &tag_exec.learned_topics {
                         crate::db::memory::add_topic(memory, topic);
                     }
-                })?;
+                    Ok(())
+                });
+                if saved.is_err() {
+                    // Missing categories must not dump into standard or discard
+                    // the answer. Make failed persistence explicit, not claimed.
+                    let notice = "Memory was NOT saved. Inspect/create/load the relevant profile before an explicit retry; no other profile was changed.";
+                    tag_result.cleaned_response.push_str(&format!("\n\n{notice}"));
+                    tag_exec.learned_facts.clear();
+                    tag_exec.learned_preferences.clear();
+                    tag_exec.learned_topics.clear();
+                    tag_exec.feedback_messages.push(notice.to_owned());
+                    if let Some(ref tx) = feedback_tx { let _ = tx.send(notice.to_owned()); }
+                    tracing::warn!("Profile learning write failed; no fallback or automatic retry");
+                }
             }
 
             last_tag_execution = Some(tag_exec);
@@ -1097,6 +1110,12 @@ async fn execute_tool_call(
 
     match tc.function.name.as_str() {
         "search_tools" => crate::tools::discovery::search(db, plugins, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_profile_create" => crate::tools::memory::profile_create(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_profile_load" => crate::tools::memory::profile_load(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_profile_list" => crate::tools::memory::profile_list(db, user_id)
             .unwrap_or_else(|e| format!("Error: {e}")),
         "memory_get" => crate::tools::memory::get(db, user_id, &args)
             .unwrap_or_else(|e| format!("Error: {e}")),
@@ -1476,7 +1495,7 @@ async fn execute_tool_call(
         }
         "learn_fact" => {
             let fact = args["fact"].as_str().unwrap_or("");
-            match db.add_memory(user_id, fact, Some("fact")) {
+            match crate::db::memory_profiles::learn_fact(db, user_id, fact) {
                 Ok(_) => format!("Learned: {}", fact),
                 Err(e) => format!("Error: {}", e),
             }
@@ -1484,7 +1503,7 @@ async fn execute_tool_call(
         "learn_preference" => {
             let key = args["key"].as_str().unwrap_or("");
             let value = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
-            match crate::db::memory::update_memory(db, user_id, |memory| {
+            match crate::db::memory_profiles::update_memory(db, user_id, |memory| {
                 crate::db::memory::update_preference(memory, key, &value);
             }) {
                 Ok(_) => format!("Preference '{}' = '{}'", key, value),
@@ -1493,7 +1512,7 @@ async fn execute_tool_call(
         }
         "learn_topic" => {
             let topic = args["topic"].as_str().unwrap_or("");
-            match db.add_memory(user_id, topic, Some("topic")) {
+            match crate::db::memory_profiles::learn_topic(db, user_id, topic) {
                 Ok(_) => format!("Topic tracked: {}", topic),
                 Err(e) => format!("Error: {}", e),
             }

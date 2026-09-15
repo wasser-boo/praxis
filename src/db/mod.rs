@@ -3,6 +3,9 @@ pub mod cron_jobs;
 pub mod enc2;
 pub mod logs;
 pub mod memory;
+#[cfg(test)]
+mod memory_profile_tests;
+pub mod memory_profiles;
 pub mod messages;
 pub mod pairings;
 pub mod secrets;
@@ -86,6 +89,12 @@ impl Database {
         if version < 11 {
             conn.execute_batch(include_str!("../../migrations/011_message_audio.sql"))?;
             conn.pragma_update(None, "user_version", 11)?;
+        }
+        if version < 12 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../../migrations/012_memory_profiles.sql"))?;
+            tx.pragma_update(None, "user_version", 12)?;
+            tx.commit()?;
         }
 
         Ok(())

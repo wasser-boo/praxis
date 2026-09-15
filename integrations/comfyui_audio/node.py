@@ -4,7 +4,9 @@ No TTS model imports in ComfyUI's Python environment. Neither node mutates the
 shared queue, accepts terms, or uploads reference audio. XTTS retains its
 existing ComfyUI-cache release; Qwen only owns its worker's GPU allocations.
 """
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -15,6 +17,34 @@ from .segments import speech_segments
 
 XTTS_LANGUAGES = ['en', 'es', 'fr', 'de', 'it', 'pt', 'pl', 'tr', 'ru', 'nl', 'cs', 'ar', 'zh-cn', 'hu', 'ko', 'ja', 'hi', 'de-ja']
 QWEN_LANGUAGES = ['auto', 'en', 'zh', 'ja', 'ko', 'de', 'fr', 'ru', 'pt', 'es', 'it', 'de-ja']
+
+
+def warm_idle_seconds():
+    value = os.environ.get('PRAXIS_QWEN_TTS_IDLE_SECONDS', '0')
+    if not value.isascii() or not value.isdigit() or not 0 <= int(value) <= 3600:
+        raise ValueError('PRAXIS_QWEN_TTS_IDLE_SECONDS must be an integer from 0 to 3600')
+    return int(value)
+
+
+def public_timings(values):
+    result = {}
+    for key in ('cold_model', 'reference_cached'):
+        if type(values.get(key)) is not bool:
+            raise RuntimeError('Invalid worker timing flags')
+        result[key] = values[key]
+    for key in ('model_load_seconds', 'reference_seconds', 'synthesis_seconds', 'total_seconds'):
+        value = values.get(key)
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise RuntimeError('Invalid worker timing duration')
+        result[key] = value
+    return result  # Explicit allowlist: no arbitrary worker fields enter history.
+
+
+def cleanup_output(target):
+    target.unlink(missing_ok=True)
+    # Only this UUID-named reply's staging files; never sweep a shared directory.
+    for partial in target.parent.glob('.praxis-audio-' + target.name + '-*.part'):
+        partial.unlink(missing_ok=True)
 
 
 def reference_path(filename):
@@ -78,11 +108,17 @@ class _SpeechNode:
         environment = os.environ.copy()
         if self.BACKEND == 'qwen3':
             environment.update({'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1', 'HF_HUB_DISABLE_TELEMETRY': '1'})
+        timings = None
+        idle = warm_idle_seconds() if self.BACKEND == 'qwen3' else 0
         try:
-            subprocess.run([python, str(Path(__file__).with_name('worker.py'))],
-                           input=json.dumps(request, ensure_ascii=False), text=True, check=True,
-                           timeout=600, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           env=environment)
+            if idle:
+                from .warm_worker import run
+                timings = public_timings(run(request, python, environment, idle))
+            else:
+                subprocess.run([python, str(Path(__file__).with_name('worker.py'))],
+                               input=json.dumps(request, ensure_ascii=False), text=True, check=True,
+                               timeout=600, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               env=environment)
             if not target.is_file() or not 44 < target.stat().st_size <= 32 * 1024 * 1024:
                 raise RuntimeError('Worker did not produce a bounded non-empty WAV')
             with target.open('rb') as stream:
@@ -90,14 +126,16 @@ class _SpeechNode:
             if header[:4] != b'RIFF' or header[8:] != b'WAVE':
                 raise RuntimeError('Worker produced invalid WAV media')
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
-            target.unlink(missing_ok=True)
+            cleanup_output(target)
             # Never include subprocess output: third-party errors may echo text.
             raise RuntimeError(f'{self.BACKEND} worker failed ({type(error).__name__}); check its environment, model installation, CUDA and limits') from None
         except BaseException:
-            target.unlink(missing_ok=True)
+            cleanup_output(target)
             raise
-        return {'ui': {'audio': [{'filename': filename, 'subfolder': '', 'type': 'output'}]},
-                'result': (filename,)}
+        ui = {'audio': [{'filename': filename, 'subfolder': '', 'type': 'output'}]}
+        if timings is not None:
+            ui['tts_timings'] = [timings]  # only timings/booleans, never text, paths or vectors
+        return {'ui': ui, 'result': (filename,)}
 
 
 class PraxisXTTS(_SpeechNode):
@@ -108,6 +146,18 @@ class PraxisXTTS(_SpeechNode):
 
 
 class PraxisQwen3TTS(_SpeechNode):
+    @classmethod
+    def IS_CHANGED(cls, text, language, reference_audio, reference_text=''):
+        # ComfyUI otherwise caches by filename alone and may never call the
+        # worker after an operator replaces the voice at that same filename.
+        reference = reference_path(reference_audio)
+        with reference.open('rb') as stream:
+            raw = stream.read(20 * 1024 * 1024 + 1)
+        if not 0 < len(raw) <= 20 * 1024 * 1024:
+            raise ValueError('Reference exceeds the audio byte limit')
+        key = [str(reference), hashlib.sha256(raw).hexdigest(), reference_text, warm_idle_seconds()]
+        return hashlib.sha256(json.dumps(key, ensure_ascii=False).encode()).hexdigest()
+
     BACKEND = 'qwen3'
     LANGUAGES = QWEN_LANGUAGES
     PYTHON_ENV = 'PRAXIS_QWEN_TTS_PYTHON'

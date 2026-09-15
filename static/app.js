@@ -2334,17 +2334,29 @@ async function loadMessages() {
     } catch (err) { list.innerHTML = `<div class="data-item"><span style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`; }
 }
 
-async function loadMemory() {
+let memoryLoadGeneration = 0;
+async function loadMemory(requestedProfile = null) {
+    const generation = ++memoryLoadGeneration;
+    const profile = typeof requestedProfile === 'string' ? requestedProfile : null;
     const userId = document.getElementById('memory-user-id').value;
     if (!userId) { alert('Please select a User'); return; }
     const container = document.getElementById('memory-content');
     container.innerHTML = '<div class="data-item"><span class="name">Loading...</span></div>';
     try {
-        const res = await apiGet(`/api/memory/${encodeURIComponent(userId)}`);
+        const res = await apiGet(`/api/memory/${encodeURIComponent(userId)}${profile ? '?profile=' + encodeURIComponent(profile) : ''}`);
+        if (generation !== memoryLoadGeneration || document.getElementById('memory-user-id').value !== userId) return;
         if (!res.ok) { container.innerHTML = `<div class="data-item"><span style="color:var(--error)">Error ${res.status}</span></div>`; return; }
         const data = await res.json();
-        if (document.getElementById('memory-user-id').value !== userId) return;
+        if (document.getElementById('memory-user-id').value !== userId || generation !== memoryLoadGeneration) return;
+        const viewedProfile = data.profile || 'standard';
+        const names = [...new Set([viewedProfile, ...(data.profiles || ['standard'])])];
         container.innerHTML = `
+            <h3>Memory profile</h3>
+            <p>Current chat category: ${escapeHtml(data.active_profile || viewedProfile)}</p>
+            <select id="memory-profile-view">${names.map(name => `<option value="${escapeHtml(name)}" ${name === viewedProfile ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')}</select>
+            <p>${data.profile_exists === false ? 'Not created yet. Use memory_profile_create, then memory_profile_load.' : 'Viewing only this profile. Browsing here does not change the chat selection.'}</p>
+            <h3>Rare shared facts — this user only</h3>
+            <pre class="code-editor">${escapeHtml(JSON.stringify(data.shared || {}, null, 2))}</pre>
             <h3>Learned Facts</h3>
             <div class="data-list">${(data.learned_facts || []).map(f => `<div class="data-item"><span class="name">${escapeHtml(f)}</span></div>`).join('') || '<div class="data-item"><span class="name">None</span></div>'}</div>
             <h3 style="margin-top:1rem">Last Topics</h3>
@@ -2354,7 +2366,11 @@ async function loadMemory() {
             <h3 style="margin-top:1rem">Custom Data — durable memory</h3>
             <p>SRS cards (srs_items), XP and learning_profile are stored here by memory_set. Context custom_data is a separate store for lesson configuration.</p>
             <pre class="code-editor">${escapeHtml(JSON.stringify(data.custom_variables || {}, null, 2))}</pre>`;
-    } catch (err) { container.innerHTML = `<div class="data-item"><span style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`; }
+        document.getElementById('memory-profile-view').addEventListener('change', event => loadMemory(event.target.value));
+    } catch (err) {
+        if (generation === memoryLoadGeneration && document.getElementById('memory-user-id').value === userId)
+            container.innerHTML = `<div class="data-item"><span style="color:var(--error)">Error: ${escapeHtml(err.message)}</span></div>`;
+    }
 }
 
 // ═══ VM ════════════════════════════════════════════════════════════════
@@ -2969,6 +2985,10 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     document.getElementById('load-messages-btn').addEventListener('click', loadMessages);
     document.getElementById('load-memory-btn').addEventListener('click', loadMemory);
+    document.getElementById('memory-user-id').addEventListener('change', () => {
+        memoryLoadGeneration++;
+        document.getElementById('memory-content').innerHTML = '';
+    });
 });
 
 /* ── Web chat speech: mic (STT) + reply TTS toggle ─────────────────────────── */

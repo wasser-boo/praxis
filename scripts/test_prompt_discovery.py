@@ -33,6 +33,8 @@ with tempfile.TemporaryDirectory() as directory:
         output = json.loads(proc.stdout)['messages']
         assert 'search_tools' in output, name
         assert 'search_skills' in output, name
+        assert 'memory_profile_create' in output and 'memory_profile_load' in output, name
+        assert 'shared' in output and 'expected_profile' in output, name
         assert 'CATALOG_DUMP_SENTINEL' not in output, name
         assert 'BULK_SKILL_99' not in output, name
         if name in ['language_instructor', 'language_learning', 'tasks/daily_quiz', 'daily_quiz']:

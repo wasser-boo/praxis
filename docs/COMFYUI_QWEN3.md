@@ -18,7 +18,7 @@ in Japanese; other alphabetic text is pronounced in German. For example:
 
 > Auf Japanisch heißt Schule 学校. Das liest man がっこう. Bitte wiederholen.
 
-One ComfyUI job launches **one worker/model instance**, synthesizes the language
+One ComfyUI job uses **one worker/model instance**, synthesizes the language
 segments in their original order, and combines their samples into **one PCM16
 mono WAV**, with 120 ms gaps. It does not concatenate WAV headers or return
 multiple clips. Praxis downloads that one WAV and uses its existing persistence,
@@ -142,17 +142,61 @@ other segments ≤200). Combined speech is bounded to 600 seconds and 32 MiB.
 The worker has a 600-second execution deadline; Praxis has a separate total budget
 that includes queue time. Long replies can exceed either budget. There are no
 automatic retries, partial-audio fallbacks, remote interrupts or queue deletions.
-Both models are loaded once per job, not kept resident by a new service.
+By default models are loaded once per job. Qwen alone can optionally reuse its
+private worker across jobs, as described below; XTTS stays one-shot.
 
 XTTS's existing license requirement/cache handling is preserved. The Qwen worker
 only releases its own GPU allocations on exit. Neither coordinates Ollama VRAM.
 A large Ollama context plus concurrent speech/image generation can still exhaust
 VRAM; test actual workloads instead of assuming that 48 GB guarantees capacity.
 
+## Optional warm Qwen worker: reduce repeated startup cost
+
+The previous one-shot path loads Torch/model weights and prepares the reference
+for every reply. More VRAM alone does not eliminate that repeated work. On the
+**GPU ComfyUI process**, opt into reuse with:
+
+```dotenv
+PRAXIS_QWEN_TTS_IDLE_SECONDS=120
+```
+
+Default `0` preserves one-shot behavior; valid integer range is 0–3600. Positive
+values retain one Qwen model for that many idle seconds after a completed reply.
+The first reply remains cold. One reference prompt is cached in private worker
+RAM, keyed by reference contents/path and transcript; changing either invalidates
+it. No speaker vectors/transcripts are persisted or logged by the cache.
+Language segmentation, Base weights, BF16/SDPA, token limits and WAV delivery
+remain unchanged: no smaller model, reduced-quality fallback or truncated text.
+
+This is a POSIX inherited Unix socket, **not a TCP/HTTP service**. Requests are
+serialized, frames bounded to 64 KiB, execution bounded to 600 seconds. Idle
+expiry, failures and shutdown terminate only the owned child; requests are never
+retried automatically. If a child cannot be reaped, new work is refused rather
+than spawning another GPU process. In a driver/kernel hang, inspect the owned
+process and its output before cleanup; process termination is not a GPU-reset
+or absolute VRAM-release guarantee. No shared ComfyUI queue is cleared.
+
+ComfyUI history `outputs["1"].tts_timings[0]` reports `cold_model`,
+`reference_cached`, `model_load_seconds`, `reference_seconds`,
+`synthesis_seconds`, `total_seconds`. These are worker wall-clock phases, not
+Praxis queue/network/RVC/playback time. The native client still consumes only
+one WAV; arbitrary worker fields cannot enter timing metadata.
+
+Warm mode trades retained VRAM for latency. The warm worker is **not visible to
+ComfyUI's own model-unloading cache**, and no Ollama/ComfyUI GPU scheduler exists.
+Do not assume a 48 GB GPU can simultaneously hold a large LLM/video workload and
+warm TTS. Use `0` when immediate per-reply model exit is more important. Deploy
+all package files (including `protocol.py` and `warm_worker.py`), inspect an empty
+queue before an authorized ComfyUI-only restart, then test cold/warm/after-idle
+replies and actual VRAM. Use different short texts and inspect ComfyUI's cache
+status: an entirely cached graph is not a warm-inference benchmark. Replacing
+reference contents at the same filename invalidates the Qwen node's graph cache.
+Offline cache/IPC tests do not establish a speedup.
+
 ## Verification
 
 ```sh
-python3 -m unittest discover -s tests -p test_comfyui_audio.py
+python3 -m unittest discover -s tests -p 'test_comfyui*.py'
 cargo test --locked --lib comfyui
 cargo test --locked --lib message_audio_tests
 cargo check --locked --features songbird --tests

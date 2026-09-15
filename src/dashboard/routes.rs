@@ -30,6 +30,8 @@ pub struct ToolUpdate {
 
 #[derive(Deserialize)]
 pub struct MemoryUpdate {
+    pub profile: Option<String>,
+    pub reason: Option<String>,
     pub user_preferences: Option<std::collections::HashMap<String, serde_json::Value>>,
     pub custom_variables: Option<std::collections::HashMap<String, serde_json::Value>>,
     pub learned_facts: Option<Vec<String>>,
@@ -39,6 +41,11 @@ pub struct MemoryUpdate {
 #[derive(Serialize)]
 pub struct MemoryInfo {
     pub user_id: String,
+    pub profile: String,
+    pub active_profile: String,
+    pub profile_exists: bool,
+    pub profiles: Vec<String>,
+    pub shared: HashMap<String, serde_json::Value>,
     pub user_preferences: std::collections::HashMap<String, serde_json::Value>,
     pub custom_variables: std::collections::HashMap<String, serde_json::Value>,
     pub learned_facts: Vec<String>,
@@ -817,17 +824,43 @@ async fn update_tool(
 
 // ── Memory ───────────────────────────────────────────────────────────────────
 
+#[derive(Deserialize, Default)]
+struct MemoryQuery {
+    profile: Option<String>,
+}
+
 async fn get_memory(
     State(state): State<Arc<DashboardState>>,
     Path(user_id): Path<String>,
+    Query(query): Query<MemoryQuery>,
 ) -> Result<Json<MemoryInfo>, StatusCode> {
-    let memory = crate::db::memory::load_memory(&state.db, &user_id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    use crate::db::memory_profiles as profiles;
+    let ctx = state
+        .db
+        .load_context(&user_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut view =
+        profiles::snapshot(&state.db, &ctx).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let active_profile = view.profile.clone();
+    if let Some(name) = query.profile {
+        profiles::validate_name(&name).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let memory = profiles::read_named(&state.db, &user_id, &name)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        view.profile = name;
+        view.exists = memory.is_some();
+        view.memory = memory.unwrap_or_default();
+    }
     Ok(Json(MemoryInfo {
         user_id,
-        user_preferences: memory.user_preferences,
-        custom_variables: memory.custom_variables,
-        learned_facts: memory.learned_facts,
-        last_topics: memory.last_topics,
+        active_profile,
+        profile: view.profile,
+        profile_exists: view.exists,
+        profiles: view.profiles,
+        shared: view.shared,
+        user_preferences: view.memory.user_preferences,
+        custom_variables: view.memory.custom_variables,
+        learned_facts: view.memory.learned_facts,
+        last_topics: view.memory.last_topics,
     }))
 }
 
@@ -836,12 +869,50 @@ async fn update_memory(
     Path(user_id): Path<String>,
     Json(update): Json<MemoryUpdate>,
 ) -> Result<String, StatusCode> {
-    crate::db::memory::update_memory(&state.db, &user_id, |memory| {
-        if let Some(vars) = update.custom_variables { memory.custom_variables = vars; }
-        if let Some(facts) = update.learned_facts { memory.learned_facts = facts; }
-        if let Some(topics) = update.last_topics { memory.last_topics = topics; }
-        if let Some(preferences) = update.user_preferences { memory.user_preferences = preferences; }
-    }).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    use crate::db::memory_profiles as profiles;
+    let profile = match update.profile {
+        Some(name) => name,
+        None => {
+            let ctx = state
+                .db
+                .load_context(&user_id)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            profiles::snapshot(&state.db, &ctx)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .profile
+        }
+    };
+    profiles::validate_name(&profile).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if profile == profiles::SHARED
+        && !update
+            .reason
+            .as_deref()
+            .is_some_and(|r| !r.trim().is_empty() && r.len() <= 512)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if profiles::read_named(&state.db, &user_id, &profile)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    profiles::update_named(&state.db, &user_id, &profile, |memory| {
+        if let Some(vars) = update.custom_variables {
+            memory.custom_variables = vars;
+        }
+        if let Some(facts) = update.learned_facts {
+            memory.learned_facts = facts;
+        }
+        if let Some(topics) = update.last_topics {
+            memory.last_topics = topics;
+        }
+        if let Some(preferences) = update.user_preferences {
+            memory.user_preferences = preferences;
+        }
+        Ok(())
+    })
+    .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok("Memory updated".to_string())
 }
 
@@ -2397,18 +2468,116 @@ mod dashboard_tests {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(DashboardState { db: crate::db::Database::new(dir.path()).unwrap(), gateway_api_key: String::new(), admin_password: String::new() });
         let update: MemoryUpdate = serde_json::from_value(serde_json::json!({"learned_facts":["one", "one"], "user_preferences":{"brief":true}, "custom_variables":{"n":3}})).unwrap();
-        update_memory(State(state.clone()), Path("alice".into()), Json(update)).await.unwrap();
-        let memory = get_memory(State(state.clone()), Path("alice".into())).await.unwrap().0;
+        update_memory(State(state.clone()), Path("alice".into()), Json(update))
+            .await
+            .unwrap();
+        let memory = get_memory(
+            State(state.clone()),
+            Path("alice".into()),
+            Query(MemoryQuery::default()),
+        )
+        .await
+        .unwrap()
+        .0;
         assert_eq!(memory.learned_facts, vec!["one"]);
         assert_eq!(memory.user_preferences["brief"], true);
         assert_eq!(memory.custom_variables["n"], 3);
-        let clear: MemoryUpdate = serde_json::from_value(serde_json::json!({"learned_facts":[], "user_preferences":{}})).unwrap();
-        update_memory(State(state.clone()), Path("alice".into()), Json(clear)).await.unwrap();
-        let memory = get_memory(State(state.clone()), Path("alice".into())).await.unwrap().0;
+        let clear: MemoryUpdate =
+            serde_json::from_value(serde_json::json!({"learned_facts":[], "user_preferences":{}}))
+                .unwrap();
+        update_memory(State(state.clone()), Path("alice".into()), Json(clear))
+            .await
+            .unwrap();
+        let memory = get_memory(
+            State(state.clone()),
+            Path("alice".into()),
+            Query(MemoryQuery::default()),
+        )
+        .await
+        .unwrap()
+        .0;
         assert!(memory.learned_facts.is_empty());
         assert!(memory.user_preferences.is_empty());
         assert_eq!(memory.custom_variables["n"], 3);
-        assert!(get_memory(State(state), Path("bob".into())).await.unwrap().0.custom_variables.is_empty());
+        assert!(get_memory(
+            State(state),
+            Path("bob".into()),
+            Query(MemoryQuery::default())
+        )
+        .await
+        .unwrap()
+        .0
+        .custom_variables
+        .is_empty());
+    }
+
+    #[tokio::test]
+    async fn backend_memory_api_profiles_do_not_change_selection_or_other_buckets() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(DashboardState {
+            db: crate::db::Database::new(dir.path()).unwrap(),
+            gateway_api_key: String::new(),
+            admin_password: String::new(),
+        });
+        crate::db::memory_profiles::create_profile(&state.db, "alice", "language_instructor")
+            .unwrap();
+        let update: MemoryUpdate = serde_json::from_value(
+            serde_json::json!({"profile":"language_instructor", "custom_variables":{"xp":2}}),
+        )
+        .unwrap();
+        update_memory(State(state.clone()), Path("alice".into()), Json(update))
+            .await
+            .unwrap();
+        let selected = get_memory(
+            State(state.clone()),
+            Path("alice".into()),
+            Query(MemoryQuery::default()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(selected.profile, "standard");
+        assert!(selected.custom_variables.is_empty());
+        let lesson = get_memory(
+            State(state.clone()),
+            Path("alice".into()),
+            Query(MemoryQuery {
+                profile: Some("language_instructor".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(lesson.custom_variables["xp"], 2);
+        assert_eq!(lesson.active_profile, "standard");
+        for body in [
+            serde_json::json!({"profile":"shared", "custom_variables":{"name":"Alex"}}),
+            serde_json::json!({"profile":"shared", "reason":"Explicit synthetic permission", "custom_variables":{"xp":2}}),
+        ] {
+            let bad: MemoryUpdate = serde_json::from_value(body).unwrap();
+            assert_eq!(
+                update_memory(State(state.clone()), Path("alice".into()), Json(bad))
+                    .await
+                    .unwrap_err(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let shared: MemoryUpdate = serde_json::from_value(serde_json::json!({"profile":"shared", "reason":"Explicit synthetic permission", "custom_variables":{"name":"Alex"}})).unwrap();
+        update_memory(State(state.clone()), Path("alice".into()), Json(shared))
+            .await
+            .unwrap();
+        assert_eq!(
+            get_memory(
+                State(state),
+                Path("alice".into()),
+                Query(MemoryQuery::default())
+            )
+            .await
+            .unwrap()
+            .0
+            .shared["name"],
+            "Alex"
+        );
     }
 
     #[tokio::test]

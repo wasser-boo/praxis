@@ -150,15 +150,33 @@ fn get_default_tools() -> Vec<Tool> {
             is_enabled: true,
         },
         Tool {
+            name: "memory_profile_load".into(),
+            description: Some("Load an existing user-owned memory profile for the current session/persona. On entering language_instructor load language_instructor, not a general memory bucket. If exists=false, call memory_profile_create then load again. Never load unrelated profiles without a relevant user request. Shared is separate and cannot be selected.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":128}},"required":["name"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "memory_profile_create".into(),
+            description: Some("Create an empty named memory category owned only by this user. Existing data is never replaced or copied from general memory. Then use memory_profile_load. Examples: language_instructor, code_assistant, researcher. Do not create one bucket for unrelated modes.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":128}},"required":["name"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "memory_profile_list".into(),
+            description: Some("List this user's memory profile names only, without revealing other profiles' contents or other users. Use to locate the relevant category before loading it.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
             name: "memory_get".into(),
-            description: Some("Read a typed durable user memory variable, e.g. srs_items, xp or learning_profile. The same data appears in Dashboard Memory Custom Data and POML memory.variables; this is not context custom_data.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string","maxLength":128}},"required":["key"],"additionalProperties":false}),
+            description: Some("Read a typed variable from the ACTIVE memory profile (SRS, xp, learning_profile etc.), not context custom_data. Returns profile and value; echo both as expected_profile/expected_value when writing. scope=shared is only for rare general name/pronouns/time_zone facts, never course or project data.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string","maxLength":128},"scope":{"type":"string","enum":["profile","shared"],"default":"profile"}},"required":["key"],"additionalProperties":false}),
             is_enabled: true,
         },
         Tool {
             name: "memory_set".into(),
-            description: Some("Persist one typed durable user memory variable (SRS srs_items, xp, learning_profile, etc.). Preserve unrelated keys/items. Use expected_value from memory_get to avoid stale overwrites. JSON null deletes the key. Never store credentials. Confirm remembering only after success.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string","maxLength":128},"value":{},"expected_value":{"description":"Previously read JSON value; null for an absent variable"}},"required":["key","value"],"additionalProperties":false}),
+            description: Some("Persist typed JSON in the active memory profile. First memory_get, then pass its profile/value as expected_profile/expected_value to protect concurrent edits and mode switches. Null deletes. Shared writes require explicit scope, expected_profile=shared, and a reason for a user-authorized general fact (name/pronouns/time_zone); use VERY RARELY. No credentials. Confirm only success.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string","maxLength":128},"value":{},"expected_value":{"description":"Previously read JSON value; null if absent"},"expected_profile":{"type":"string","maxLength":128},"scope":{"type":"string","enum":["profile","shared"],"default":"profile"},"reason":{"type":"string","maxLength":256}},"required":["key","value"],"additionalProperties":false}),
             is_enabled: true,
         },
         Tool {
@@ -922,7 +940,12 @@ mod tool_tests {
         let defs = to_tool_definitions(&db).unwrap();
         let expected = get_default_tools().iter().filter(|tool| tool.is_enabled).count();
         assert_eq!(defs.len(), expected);
-        assert_eq!(defs[0].function.name, "execute_terminal");
+        assert!(defs
+            .iter()
+            .any(|tool| tool.function.name == "execute_terminal"));
+        assert!(defs
+            .iter()
+            .any(|tool| tool.function.name == "memory_profile_load"));
     }
 
     #[test]
