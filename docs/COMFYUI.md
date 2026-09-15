@@ -7,6 +7,13 @@ a WAV locally, and returns its bytes to the existing RVC, audio persistence,
 dashboard and Discord playback pipeline. There is no separate XTTS service.
 Existing providers and delivery systems remain unchanged; no automatic fallback.
 
+**German/Japanese within one reply:** the optional
+`settings.comfyui_tts_language_mode=de-ja` mode combines the ordered language
+segments into one WAV. It requires the updated server node package. The same
+setting also works with the optional `comfyui_qwen3` backend; see
+[Qwen3 and shared mixed speech](COMFYUI_QWEN3.md) for installation and examples.
+`single` (default) keeps the previous fixed-language XTTS behavior.
+
 **Image integration is intentionally excluded.** Use your image plugin separately.
 This change adds no image adapter, image workflow, or plugin registry changes.
 
@@ -24,6 +31,8 @@ Praxis process** provide installation-wide defaults. Resolution:
 `settings.*` → legacy `custom_data.*` → environment → default.
 Null/empty strings inherit; a null timeout inherits, while an explicit timeout
 must be an integer from 1 to 3600. These fields are saved in the context database.
+The error for an editor/GUI JSON now includes the exact local workflow path;
+`nodes`/`links` editor exports are not API graphs.
 
 Earlier `custom_data.comfyui_*` values remain compatible, but new configuration
 should use `settings.comfyui_*`. To stop inheriting an old value, copy it into
@@ -36,6 +45,7 @@ settings and unrelated custom data are unchanged.
 | `comfyui_tts_workflow` | `COMFYUI_TTS_WORKFLOW` | `workflows/tts-api.json`; **local Praxis** file |
 | `comfyui_xtts_reference_audio` | `COMFYUI_XTTS_REFERENCE_AUDIO` | `reference.wav`; relative to **server** input directory |
 | `comfyui_xtts_language` | `COMFYUI_XTTS_LANGUAGE` | `en`; XTTS pronunciation code, not translation |
+| `comfyui_tts_language_mode` | `COMFYUI_TTS_LANGUAGE_MODE` | `single` (provider language) or `de-ja` (one mixed German/Japanese WAV); requires updated server nodes |
 | `comfyui_timeout_seconds` | `COMFYUI_TIMEOUT_SECONDS` | `900`; integer 1–3600; submission + queue + execution + download budget |
 
 Relative workflow paths resolve from the Praxis working directory; absolute local

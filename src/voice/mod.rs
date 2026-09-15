@@ -1,5 +1,6 @@
 pub mod handler;
 pub mod comfyui_xtts;
+pub mod comfyui_qwen3;
 pub mod vosk_remote;
 pub mod wake_word;
 

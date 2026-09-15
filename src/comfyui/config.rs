@@ -26,48 +26,10 @@ impl ComfyUiConfig {
         legacy: Option<&Value>,
         env: impl Fn(&str) -> Option<String>,
     ) -> anyhow::Result<Self> {
-        let setting = |typed: Option<&str>,
-                       key: &str,
-                       variable: &str,
-                       default: &str|
-         -> anyhow::Result<String> {
-            if let Some(value) = typed.filter(|value| !value.is_empty()) {
-                return Ok(value.to_string());
-            }
-            // Keep earlier custom_data configurations working. Unrelated
-            // non-object extension data must not invalidate typed settings.
-            if let Some(value) = legacy.and_then(|ctx| ctx.get(key)).filter(|v| !v.is_null()) {
-                let value = value
-                    .as_str()
-                    .with_context(|| format!("Legacy custom_data.{key} must be a string"))?;
-                if !value.is_empty() {
-                    return Ok(value.to_string());
-                }
-            }
-            Ok(env(variable)
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| default.to_string()))
+        let setting = |typed, key, variable, default| {
+            string_setting(typed, legacy, key, variable, default, &env)
         };
-        let timeout = if let Some(seconds) = settings.comfyui_timeout_seconds {
-            seconds as u64
-        } else {
-            match legacy
-                .and_then(|ctx| ctx.get("comfyui_timeout_seconds"))
-                .filter(|v| !v.is_null())
-            {
-                Some(value) => value.as_u64().context(
-                    "Legacy custom_data.comfyui_timeout_seconds must be a positive integer",
-                )?,
-                None => env("COMFYUI_TIMEOUT_SECONDS")
-                    .unwrap_or_else(|| "900".into())
-                    .parse::<u64>()
-                    .context("COMFYUI_TIMEOUT_SECONDS must be a positive integer")?,
-            }
-        };
-        ensure!(
-            (1..=3600).contains(&timeout),
-            "ComfyUI timeout must be 1–3600 seconds"
-        );
+        let timeout = timeout_setting(settings, legacy, &env)?;
         Ok(Self {
             base_url: setting(
                 settings.comfyui_base_url.as_deref(),
@@ -88,14 +50,88 @@ impl ComfyUiConfig {
                 "COMFYUI_XTTS_REFERENCE_AUDIO",
                 "reference.wav",
             )?,
-            language: setting(
-                settings.comfyui_xtts_language.as_deref(),
-                "comfyui_xtts_language",
-                "COMFYUI_XTTS_LANGUAGE",
-                "en",
-            )?,
-            timeout: Duration::from_secs(timeout),
+            language: effective_language(settings, legacy, &env, || {
+                setting(
+                    settings.comfyui_xtts_language.as_deref(),
+                    "comfyui_xtts_language",
+                    "COMFYUI_XTTS_LANGUAGE",
+                    "en",
+                )
+            })?,
+            timeout,
         })
+    }
+}
+
+pub(super) fn string_setting(
+    typed: Option<&str>,
+    legacy: Option<&Value>,
+    key: &str,
+    variable: &str,
+    default: &str,
+    env: &impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<String> {
+    if let Some(value) = typed.filter(|v| !v.is_empty()) {
+        return Ok(value.to_string());
+    }
+    if let Some(value) = legacy.and_then(|ctx| ctx.get(key)).filter(|v| !v.is_null()) {
+        let value = value
+            .as_str()
+            .with_context(|| format!("Legacy custom_data.{key} must be a string"))?;
+        if !value.is_empty() {
+            return Ok(value.to_string());
+        }
+    }
+    Ok(env(variable)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string()))
+}
+
+pub(super) fn timeout_setting(
+    settings: &ContextSettings,
+    legacy: Option<&Value>,
+    env: &impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Duration> {
+    let seconds = if let Some(seconds) = settings.comfyui_timeout_seconds {
+        seconds as u64
+    } else if let Some(value) = legacy
+        .and_then(|v| v.get("comfyui_timeout_seconds"))
+        .filter(|v| !v.is_null())
+    {
+        value
+            .as_u64()
+            .context("Legacy custom_data.comfyui_timeout_seconds must be a positive integer")?
+    } else {
+        env("COMFYUI_TIMEOUT_SECONDS")
+            .unwrap_or_else(|| "900".into())
+            .parse::<u64>()
+            .context("COMFYUI_TIMEOUT_SECONDS must be a positive integer")?
+    };
+    ensure!(
+        (1..=3600).contains(&seconds),
+        "ComfyUI timeout must be 1–3600 seconds"
+    );
+    Ok(Duration::from_secs(seconds))
+}
+
+pub(super) fn effective_language(
+    settings: &ContextSettings,
+    legacy: Option<&Value>,
+    env: &impl Fn(&str) -> Option<String>,
+    single: impl FnOnce() -> anyhow::Result<String>,
+) -> anyhow::Result<String> {
+    let mode = string_setting(
+        settings.comfyui_tts_language_mode.as_deref(),
+        legacy,
+        "comfyui_tts_language_mode",
+        "COMFYUI_TTS_LANGUAGE_MODE",
+        "single",
+        env,
+    )?;
+    match mode.as_str() {
+        "single" => single(),
+        "de-ja" => Ok(mode),
+        _ => anyhow::bail!("ComfyUI speech language mode must be single or de-ja"),
     }
 }
 
@@ -111,6 +147,7 @@ mod tests {
             comfyui_tts_workflow: Some("/local/tts.json".into()),
             comfyui_xtts_reference_audio: Some("voices/person.wav".into()),
             comfyui_xtts_language: Some("de".into()),
+            comfyui_tts_language_mode: Some("single".into()),
             comfyui_timeout_seconds: Some(120),
             qwen_tts_language: Some("French".into()),
             ..Default::default()

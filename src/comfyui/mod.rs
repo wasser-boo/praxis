@@ -1,6 +1,7 @@
 //! ComfyUI API-to-local-WAV boundary. No retries, queue mutation, or provider
 //! fallback. Remote paths are descriptors for /view, never local paths.
 pub mod config;
+pub mod qwen3;
 pub mod workflows;
 
 use anyhow::{ensure, Context as _};
@@ -396,3 +397,5 @@ fn descriptor(value: &Value) -> anyhow::Result<(String, String)> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod qwen3_tests;

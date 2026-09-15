@@ -8,10 +8,10 @@ use tokio::io::AsyncReadExt;
 pub const TTS_OUTPUT_NODE: &str = "1";
 pub const XTTS_LANGUAGES: &[&str] = &[
     "en", "es", "fr", "de", "it", "pt", "pl", "tr", "ru", "nl", "cs", "ar", "zh-cn", "hu", "ko",
-    "ja", "hi",
+    "ja", "hi", "de-ja",
 ];
 
-async fn load(path: &Path) -> anyhow::Result<Value> {
+pub(super) async fn load(path: &Path) -> anyhow::Result<Value> {
     const LIMIT: u64 = 1024 * 1024;
     let file = tokio::fs::File::open(path)
         .await
@@ -28,7 +28,7 @@ async fn load(path: &Path) -> anyhow::Result<Value> {
             && nodes
                 .values()
                 .all(|node| node["class_type"].is_string() && node["inputs"].is_object()),
-        "Expected API-format nodes with class_type and inputs (export API format)"
+        "Expected API-format nodes with class_type and inputs in {} (export API format, not the GUI workflow)", path.display()
     );
     Ok(graph)
 }
@@ -42,16 +42,7 @@ pub async fn xtts(config: &ComfyUiConfig, text: &str) -> anyhow::Result<Value> {
         XTTS_LANGUAGES.contains(&config.language.as_str()),
         "Unsupported XTTS language code (use en, de, es, fr, etc., not language names)"
     );
-    ensure!(safe_relative(&config.reference_audio), "reference_audio must be relative to ComfyUI's SERVER input directory, not a local Praxis path");
-    let extension = Path::new(&config.reference_audio)
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    ensure!(
-        ["wav", "mp3", "flac", "ogg"].contains(&extension.as_str()),
-        "Unsupported XTTS reference audio extension"
-    );
+    validate_reference(&config.reference_audio)?;
     let mut graph = load(&config.tts_workflow).await?;
     ensure!(
         graph[TTS_OUTPUT_NODE]["class_type"] == "PraxisXTTS"
@@ -65,6 +56,20 @@ pub async fn xtts(config: &ComfyUiConfig, text: &str) -> anyhow::Result<Value> {
     graph[TTS_OUTPUT_NODE]["inputs"]["reference_audio"] = json!(config.reference_audio);
     // No upload endpoint, local reference-file reads, or license acceptance.
     Ok(graph)
+}
+
+pub(super) fn validate_reference(reference: &str) -> anyhow::Result<()> {
+    ensure!(safe_relative(reference), "reference_audio must be relative to ComfyUI's SERVER input directory, not a local Praxis path");
+    let extension = Path::new(reference)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    ensure!(
+        ["wav", "mp3", "flac", "ogg"].contains(&extension.as_str()),
+        "Unsupported speech reference audio extension"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

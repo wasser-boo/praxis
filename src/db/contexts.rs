@@ -86,6 +86,15 @@ pub struct ContextSettings {
     pub comfyui_base_url: Option<String>,
     #[serde(default)]
     pub comfyui_tts_workflow: Option<String>,
+    /// Shared speech mode: single (provider language) or de-ja (one mixed WAV).
+    #[serde(default)]
+    pub comfyui_tts_language_mode: Option<String>,
+    #[serde(default)]
+    pub comfyui_qwen_reference_audio: Option<String>,
+    #[serde(default)]
+    pub comfyui_qwen_reference_text: Option<String>,
+    #[serde(default)]
+    pub comfyui_qwen_language: Option<String>,
     /// Relative to ComfyUI's SERVER input directory, not a local Praxis path.
     #[serde(default)]
     pub comfyui_xtts_reference_audio: Option<String>,
@@ -335,6 +344,10 @@ impl Default for ContextSettings {
             voice_tts_type: default_tts(),
             comfyui_base_url: None,
             comfyui_tts_workflow: None,
+            comfyui_tts_language_mode: None,
+            comfyui_qwen_reference_audio: None,
+            comfyui_qwen_reference_text: None,
+            comfyui_qwen_language: None,
             comfyui_xtts_reference_audio: None,
             comfyui_xtts_language: None,
             comfyui_timeout_seconds: None,

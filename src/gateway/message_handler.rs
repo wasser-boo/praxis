@@ -999,6 +999,11 @@ fn spawn_tts(
             crate::comfyui::config::ComfyUiConfig::from_settings(settings, Some(&ctx.custom_data))
         })
     });
+    let comfyui_qwen3_config = (tts_type == "comfyui_qwen3").then(|| {
+        db.load_context(user_id).and_then(|ctx| {
+            crate::comfyui::qwen3::Qwen3TtsConfig::from_settings(settings, Some(&ctx.custom_data))
+        })
+    });
     let rvc_on = settings.rvc_on;
     let rvc_server = settings.rvc_server.clone();
     let rvc_model_path = settings.rvc_model_path.clone();
@@ -1124,6 +1129,24 @@ fn spawn_tts(
                     Ok(bytes) => bytes,
                     Err(error) => {
                         tracing::warn!("TTS FAILED: comfyui_xtts: {error:#}");
+                        return;
+                    }
+                }
+            }
+            "comfyui_qwen3" => {
+                let config = match comfyui_qwen3_config {
+                    Some(Ok(config)) => config,
+                    Some(Err(error)) => {
+                        tracing::warn!("TTS FAILED: comfyui_qwen3 configuration: {error}");
+                        return;
+                    }
+                    None => return,
+                };
+                // One combined WAV; reuse delivery below, with no provider fallback.
+                match crate::voice::comfyui_qwen3::speak(&config, &text, None).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        tracing::warn!("TTS FAILED: comfyui_qwen3: {error:#}");
                         return;
                     }
                 }
