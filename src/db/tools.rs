@@ -940,12 +940,15 @@ mod tool_tests {
         let defs = to_tool_definitions(&db).unwrap();
         let expected = get_default_tools().iter().filter(|tool| tool.is_enabled).count();
         assert_eq!(defs.len(), expected);
-        assert!(defs
-            .iter()
-            .any(|tool| tool.function.name == "execute_terminal"));
-        assert!(defs
-            .iter()
-            .any(|tool| tool.function.name == "memory_profile_load"));
+        // Preserve the full enabled-default order, not a stale hard-coded
+        // assumption that execute_terminal precedes progressive discovery.
+        let expected_names: Vec<_> = get_default_tools().into_iter()
+            .filter(|tool| tool.is_enabled).map(|tool| tool.name).collect();
+        let actual_names: Vec<_> = defs.iter().map(|tool| tool.function.name.clone()).collect();
+        assert_eq!(actual_names, expected_names);
+        for name in ["execute_terminal", "memory_profile_create", "memory_profile_load", "memory_profile_list"] {
+            assert!(actual_names.iter().any(|actual| actual == name));
+        }
     }
 
     #[test]
