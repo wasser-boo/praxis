@@ -226,7 +226,7 @@ pub async fn compact_history(
     ctx.settings.compaction_summary = summary.clone();
     state.db.save_context(&ctx)?;
 
-    let keep_budget = ctx.settings.history_token_limit.unwrap_or(500000) / 2;
+    let keep_budget = ctx.settings.history_token_limit.unwrap_or(32000) / 2;
     if let Ok((recent, _)) = state
         .db
         .get_chat_messages_with_token_budget(user_id, keep_budget)

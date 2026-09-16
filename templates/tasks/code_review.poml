@@ -1,6 +1,0 @@
-<poml>
-  <include src="../code_assistant.poml" />
-  <include src="../shared/task_inputs.poml" />
-  <task>Review phase: examine the supplied code and requirements. Do not edit files unless asked. Prioritize concrete bugs, security issues and regressions; cite locations, explain severity and give actionable fixes. Avoid speculative style-only findings. Use the code_review skill if it adds useful guidance and is available.</task>
-  <output-format>Give prioritized findings, evidence and suggested fixes. If no consequential issue is found, say so and state review/test limitations.</output-format>
-</poml>

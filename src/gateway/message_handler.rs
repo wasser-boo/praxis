@@ -38,8 +38,10 @@ pub(crate) async fn handle_message_inner(
     let mut current_tool_ids = std::collections::HashSet::new();
     let mut finalizing = tool_limit == 0;
     let mut ctx = ctx;
+    // History stores the RAW input; the rendered template is used for the
+    // current request only (raw-storing policy).
     let rendered_user = crate::gateway::prompt::render_user(state, &ctx, content).await?;
-    state.db.add_message(user_id, &crate::db::messages::Message::user(rendered_user))?;
+    state.db.add_message(user_id, &crate::db::messages::Message::user(content.to_string()))?;
     let system_prompt = crate::gateway::prompt::render_system(state, &ctx, content).await?;
 
     let mut messages = Vec::new();
@@ -52,7 +54,7 @@ pub(crate) async fn handle_message_inner(
         tool_name: None,
     });
 
-    let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
+    let token_budget = ctx.settings.history_token_limit.unwrap_or(32000);
     let (history, _tokens) = state
         .db
         .get_messages_with_token_budget(user_id, token_budget)?;
@@ -80,6 +82,13 @@ pub(crate) async fn handle_message_inner(
             tool_call_id: msg.tool_call_id.clone(),
             tool_name: msg.tool_name.clone(),
         });
+    }
+
+    // Render only the CURRENT user turn; stored history stays raw.
+    if let Some(last) = messages.last_mut() {
+        if last.role == "user" {
+            last.content = Some(rendered_user);
+        }
     }
 
     let tool_defs = crate::tools::discovery::definitions(&state.db, &state.plugins, user_id)?;
@@ -199,14 +208,16 @@ pub(crate) async fn handle_message_inner(
                 }
             }
 
+            let limit = ctx.settings.tool_result_limit.unwrap_or(2000).max(0) as usize;
+            let stored_result = crate::gateway::prompt::truncate_tool_result(&final_result, limit);
             let msg = if let Some(parts) = image_content_parts {
                 crate::db::messages::Message::tool_with_image(
-                    final_result.clone(),
+                    stored_result.clone(),
                     tc.id.clone(),
                     parts,
                 )
             } else {
-                crate::db::messages::Message::tool(final_result.clone(), tc.id.clone())
+                crate::db::messages::Message::tool(stored_result, tc.id.clone())
             };
             // Set tool_name for Ollama compatibility
             let mut msg = msg;

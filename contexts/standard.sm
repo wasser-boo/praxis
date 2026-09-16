@@ -1,20 +1,10 @@
-# Default profile router. Rules live here, not in Rust or a hidden LLM classifier.
-# Only explicit role-change requests switch templates; ordinary task messages do not.
-# No unconditional template assignment: manual settings.system_template choices stick.
+# Routing contract v2: the model sets custom_data.role via set_context and the
+# unified system template renders the matching persona block. State variables
+# carry the persona catalog. Manual settings.system_template choices stick; a
+# stale name falls back to standard at render time.
 @name "Standard profile routing"
-@version "1.0"
+@version "2.0"
 @steps [routing]
 
 [state routing]
-
-[overrides]
-if custom_data.user_prompt =~ "(?i)^\s*(please\s+)?(be|become|act as|switch to|use|i want you to be)\s+(a\s+|an\s+|my\s+|the\s+)?language[ _-]?(instructor|teacher|tutor)\b" -> settings.system_template = "language_instructor"
-if custom_data.user_prompt =~ "(?i)^\s*(please\s+)?(teach me|help me learn|help me practise|help me practice)\s+(french|japanese|spanish|italian|english|german)\b" -> settings.system_template = "language_instructor"
-if custom_data.user_prompt =~ "(?i)^\s*sei\s+(bitte\s+)?(mein\s+|ein\s+)?(sprachlehrer|sprachtrainer)\b" -> settings.system_template = "language_instructor"
-if custom_data.user_prompt =~ "(?i)^\s*(wechsele|wechsel|wechsle|geh|gehe|komm)\s+(bitte\s+)?(zurück|zurueck|back|wieder)?\s*(zu|auf|in|to)?\s*(dem\s+|der\s+|zum\s+|zur\s+)?(sprach(lehrer|trainer|unterricht)|language[ _-]?(instructor|teacher|tutor)|japanisch|lehrer|unterricht)\b" -> settings.system_template = "language_instructor"
-if custom_data.user_prompt =~ "(?i)^\s*(wechsele|wechsel|wechsle)\s+(bitte\s+)?(zu|auf|in)\s+(dem\s+|der\s+|zum\s+|zur\s+)?(code[ _-]?(review(er)?|assistent)|coding|research(er)?|senior[ _-]?dev|technical[ _-]?writer|standard|general)\b" -> settings.system_template = "code_reviewer"
-if custom_data.user_prompt =~ "(?i)^\s*(please\s+)?(be|become|act as|switch to|use)\s+(a\s+|an\s+|my\s+|the\s+)?code[ _-]?(review(er)?|reviewer)\b" -> settings.system_template = "code_reviewer"
-if custom_data.user_prompt =~ "(?i)^\s*(please\s+)?(be|act as|switch to|use)\s+(a\s+|my\s+|the\s+)?(code[ _-]?assistant|coding assistant|software developer)\b" -> settings.system_template = "code_assistant"
-if custom_data.user_prompt =~ "(?i)^\s*(please\s+)?(be|act as|switch to|use)\s+(a\s+|my\s+|the\s+)?(researcher|research assistant)\b" -> settings.system_template = "researcher"
-if custom_data.user_prompt =~ "(?i)^\s*(please\s+)?(switch to|use|return to|go back to)\s+(the\s+)?(standard|general)(\s+assistant)?\b" -> settings.system_template = "standard"
-if custom_data.user_prompt =~ "(?i)^\s*(reset role|reset profile)\s*[.!]?\s*$" -> settings.system_template = "standard"
+persona_roles = "standard, code, review, teach, research"

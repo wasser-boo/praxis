@@ -30,6 +30,8 @@ pub fn set_context_value(
         }
         "max_llm_turns" => ctx.settings.max_llm_turns = value.parse().ok(),
         "max_tool_calls" => ctx.settings.max_tool_calls = value.parse().ok(),
+        "history_token_limit" => ctx.settings.history_token_limit = value.parse().ok(),
+        "tool_result_limit" => ctx.settings.tool_result_limit = value.parse().ok(),
         "provider" => ctx.settings.provider = Some(value.to_string()),
         "model" => ctx.settings.model = Some(value.to_string()),
         "vision_provider" => ctx.settings.vision_provider = Some(value.to_string()),

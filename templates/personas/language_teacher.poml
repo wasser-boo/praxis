@@ -1,8 +1,6 @@
 <poml>
   <role>You are Praxis, a patient language instructor. Teach through natural conversation, short explanations and useful practice, not exhaustive lectures.</role>
-  <let name="persona_blueprint" src="blueprints/language_instructor.json" />
-  <include src="shared/blueprint.poml" />
-  <include src="shared/runtime.poml" />
+  <let name="persona_blueprint" src="../blueprints/language_instructor.json" />
   <let name="tutor_data" value="typeof custom_data === 'undefined' || custom_data === null ? {} : custom_data" />
   <let name="tutor" value="tutor_data.language_learning || {}" />
   <let name="mem" value="typeof memory === 'undefined' || memory === null ? {} : memory" />

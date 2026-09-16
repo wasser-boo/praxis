@@ -171,12 +171,10 @@ async fn run_agent_loop_inner(
     }
     crate::gateway::prompt::route_context(std::path::Path::new("."), &mut ctx, &user_message, &state.plugins, None)?;
     state.db.save_context(&ctx)?;
-    let rendered_user_message = crate::gateway::prompt::render_user(state, &ctx, &user_message).await?;
-
-    // Store user message
+    // Store the RAW user input; render_user runs per request (raw-storing policy).
     state.db.add_message(
         user_id,
-        &crate::db::messages::Message::user(rendered_user_message),
+        &crate::db::messages::Message::user(user_message.clone()),
     )?;
 
     loop {
@@ -281,10 +279,14 @@ async fn run_agent_loop_inner(
             }
         }
 
-        let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
+        let token_budget = ctx.settings.history_token_limit.unwrap_or(32000);
         let (history, _history_tokens) = state
             .db
             .get_messages_with_token_budget(user_id, token_budget)?;
+        let current_user_idx = history.iter().rposition(|m| m.role == "user");
+        // Render only the CURRENT user turn with fresh context; older turns stay raw.
+        let rendered_current_user =
+            crate::gateway::prompt::render_user(state, &ctx, &user_message).await?;
 
         let image_msg_indices = crate::gateway::prompt::history_image_indices(
             &history, &current_tool_ids, state.llm.history_image_messages(),
@@ -324,7 +326,9 @@ async fn run_agent_loop_inner(
             });
             messages.push(ChatMessage {
                 role: msg.role.clone(),
-                content: if msg.content.is_empty() {
+                content: if Some(msg_idx) == current_user_idx {
+                    Some(rendered_current_user.clone())
+                } else if msg.content.is_empty() {
                     None
                 } else {
                     Some(msg.content.clone())
@@ -732,14 +736,16 @@ async fn run_agent_loop_inner(
                     }
                 }
 
+                let limit = ctx.settings.tool_result_limit.unwrap_or(2000).max(0) as usize;
+                let stored_result = crate::gateway::prompt::truncate_tool_result(&final_result, limit);
                 let msg = if let Some(parts) = image_content_parts {
                     crate::db::messages::Message::tool_with_image(
-                        final_result,
+                        stored_result,
                         tc.id.clone(),
                         parts,
                     )
                 } else {
-                    crate::db::messages::Message::tool(final_result, tc.id.clone())
+                    crate::db::messages::Message::tool(stored_result, tc.id.clone())
                 };
                 // Set tool_name for Ollama compatibility
                 let mut msg = msg;

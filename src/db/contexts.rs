@@ -222,6 +222,9 @@ pub struct ContextSettings {
     pub compaction_summary: String,
     #[serde(default)]
     pub history_token_limit: Option<usize>,
+    /// Max characters persisted per tool result; raw beyond this is trimmed.
+    #[serde(default)]
+    pub tool_result_limit: Option<usize>,
     #[serde(default)]
     pub compaction_token_limit: Option<usize>,
     #[serde(default)]
@@ -408,6 +411,7 @@ impl Default for ContextSettings {
             compaction_enabled: false,
             compaction_summary: String::new(),
             history_token_limit: None,
+            tool_result_limit: None,
             compaction_token_limit: None,
             compaction_template: None,
             system_template: None,

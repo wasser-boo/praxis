@@ -1,4 +1,0 @@
-<poml>
-  <!-- Compatibility for existing root-level transcript_check selections. -->
-  <include src="tasks/transcript_check.poml" />
-</poml>

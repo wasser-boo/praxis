@@ -1,7 +1,0 @@
-@name "Conversational mode"
-@version "1.0"
-@steps [chat]
-
-[state chat]
-mode = "chat"
-settings.system_template = "standard"

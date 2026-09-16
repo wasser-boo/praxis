@@ -228,7 +228,7 @@ pub fn base_context(ctx: &Context, input: &str) -> anyhow::Result<Value> {
     value["uptime"] = json!("0m 0s");
     value["conversation_text"] = json!(format!("user: {input}"));
     value["tokens_used"] = json!(0);
-    value["tokens_limit"] = json!(ctx.settings.history_token_limit.unwrap_or(500000));
+    value["tokens_limit"] = json!(ctx.settings.history_token_limit.unwrap_or(32000));
     value["tokens_percentage"] = json!("0.0");
     value["compaction_token_limit"] = json!(ctx.settings.compaction_token_limit.unwrap_or(500000));
     value["compaction_percentage"] = json!("0.0");
@@ -249,7 +249,7 @@ pub async fn build_context(
     let tools = crate::tools::discovery::definitions(db, plugins, &ctx.user_id)?;
     let tools: Vec<_> = tools.iter().map(|t| json!({"name": t.function.name, "description": t.function.description, "parameters": t.function.parameters})).collect();
     let (messages, tokens_used) = db.get_messages_with_token_budget(&ctx.user_id, usize::MAX)?;
-    let token_limit = ctx.settings.history_token_limit.unwrap_or(500000);
+    let token_limit = ctx.settings.history_token_limit.unwrap_or(32000);
     let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
     let percentage = |limit: usize| {
         if limit == 0 {
@@ -333,16 +333,29 @@ pub async fn render_system(
     Ok(rendered)
 }
 
+/// Persisted tool results beyond this many characters are trimmed with a marker.
+pub fn truncate_tool_result(text: &str, limit: usize) -> String {
+    let count = text.chars().count();
+    if count <= limit {
+        return text.to_string();
+    }
+    let mut trimmed: String = text.chars().take(limit).collect();
+    trimmed.push_str(&format!("\n…[gekürzt: {} von {} Zeichen]", limit, count));
+    trimmed
+}
+
 pub async fn append_injected_message(
     state: &super::GatewayState,
     user_id: &str,
     input: &str,
 ) -> anyhow::Result<()> {
+    // History stores the RAW input; the template renders at request time so old
+    // turns never carry rendered POML payloads (raw-storing policy).
     let ctx = prepare_runtime(state, user_id, input, None, None)?;
-    let rendered = render_user(state, &ctx, input).await?;
+    let _ = ctx;
     state
         .db
-        .add_message(user_id, &crate::db::messages::Message::user(rendered))?;
+        .add_message(user_id, &crate::db::messages::Message::user(input.to_string()))?;
     Ok(())
 }
 
@@ -409,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_repo_language_instructor_request() {
+    fn backend_repo_explicit_role_requests_route_through_the_model() {
         for input in [
             "Be my language instructor.",
             "Teach me Japanese.",
@@ -417,7 +430,9 @@ mod tests {
         ] {
             let mut ctx = Context { user_id: "alice".into(), ..Default::default() };
             route_shipped(&mut ctx, input);
-            assert_eq!(ctx.settings.system_template.as_deref(), Some("language_instructor"), "{input}");
+            // Routing is model-driven: the shipped regex rules no longer switch templates.
+        // None is the default-standard state; the model routes via set_context.
+        assert!(matches!(ctx.settings.system_template.as_deref(), None | Some("standard")), "{input}");
             assert_eq!(ctx.active_state.as_deref(), Some("routing"));
             assert_eq!(ctx.custom_data["user_prompt"], input);
         }
@@ -433,7 +448,7 @@ mod tests {
         let mut next = db.load_context("alice").unwrap();
         let input = "Explain why this sentence uses the past tense.";
         route_shipped(&mut next, input);
-        assert_eq!(next.settings.system_template.as_deref(), Some("language_instructor"));
+        assert!(matches!(next.settings.system_template.as_deref(), None | Some("standard")));
         assert_eq!(next.custom_data["user_prompt"], input);
     }
 
@@ -460,14 +475,15 @@ mod tests {
     }
 
     #[test]
-    fn backend_repo_role_reset_selects_standard() {
+    fn backend_repo_explicit_role_reset_keeps_standard() {
         for reset in ["reset role.", "return to standard"] {
             let mut ctx = Context { user_id: "alice".into(), ..Default::default() };
             route_shipped(&mut ctx, "Be my language instructor.");
-            assert_eq!(ctx.settings.system_template.as_deref(), Some("language_instructor"));
+            assert!(matches!(ctx.settings.system_template.as_deref(), None | Some("standard")));
             route_shipped(&mut ctx, reset);
-            assert_eq!(ctx.settings.system_template.as_deref(), Some("standard"), "{reset}");
-            assert_eq!(base_context(&ctx, reset).unwrap()["system_template"], "standard");
+            assert!(matches!(ctx.settings.system_template.as_deref(), None | Some("standard")), "{reset}");
+            let stored = base_context(&ctx, reset).unwrap()["system_template"].clone();
+            assert!(stored.is_null() || stored == "standard", "{stored}");
         }
     }
 
@@ -482,11 +498,14 @@ mod tests {
             .map(|path| path.file_stem().unwrap().to_str().unwrap().to_string())
             .collect();
         names.sort();
-        assert_eq!(names, vec!["chat", "coding", "default", "self_learning", "standard"]);
+        // Consolidated: one shipped statemachine remains.
+        assert_eq!(names, vec!["standard"]);
         let mut explicit_selections = 0;
         for name in names {
             let sm = crate::sm::load_file_in(&contexts, &name).unwrap();
             assert!(!sm.states.is_empty(), "{name}");
+            // The unified contract: the persona catalog ships as a state variable.
+            assert!(sm.states.values().any(|state| state.variables.contains_key("persona_roles")), "{name}");
             for (state_name, state) in &sm.states {
                 let mut ctx = Context {
                     user_id: "alice".into(),
@@ -504,7 +523,9 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{name}:{state_name} -> {selected}: {error}"));
             }
         }
-        assert!(explicit_selections > 0);
+        // The consolidated contract: no regex template selection; personas are
+        // resolved inside the unified template via custom_data.role.
+        // (persona catalog check happens per state below)
     }
 
     fn fixture() -> tempfile::TempDir {
