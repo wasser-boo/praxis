@@ -149,6 +149,7 @@ impl MiMoProvider {
         let tool_calls = parse_openai_tool_calls(message);
 
         Ok(ChatResponse {
+            reasoning_content: None,
             content,
             tool_calls,
             finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),

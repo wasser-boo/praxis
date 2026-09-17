@@ -121,6 +121,7 @@ impl LLMProvider for OpenAIProvider {
         });
 
         Ok(ChatResponse {
+            reasoning_content: None,
             content,
             tool_calls,
             finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),

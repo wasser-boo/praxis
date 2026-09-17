@@ -110,6 +110,7 @@ impl LLMProvider for LlamaCppProvider {
         let message = &choice["message"];
 
         let content = message["content"].as_str().map(|s| s.to_string());
+        let reasoning_content = message["reasoning_content"].as_str().map(|s| s.to_string());
         let tool_calls = message["tool_calls"].as_array().map(|calls| {
             calls
                 .iter()
@@ -130,6 +131,7 @@ impl LLMProvider for LlamaCppProvider {
         });
 
         Ok(ChatResponse {
+            reasoning_content: reasoning_content,
             content,
             tool_calls,
             finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),

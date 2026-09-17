@@ -46,7 +46,8 @@ pub(crate) async fn handle_message_inner(
 
     let mut messages = Vec::new();
     messages.push(ChatMessage {
-        role: "system".to_string(),
+        reasoning_content: None,
+role: "system".to_string(),
         content: Some(system_prompt),
         content_parts: None,
         tool_calls: None,
@@ -71,6 +72,7 @@ pub(crate) async fn handle_message_inner(
                 .collect()
         });
         messages.push(ChatMessage {
+    reasoning_content: None,
             role: msg.role.clone(),
             content: if msg.content.is_empty() {
                 None
@@ -240,7 +242,8 @@ pub(crate) async fn handle_message_inner(
         ctx = crate::gateway::prompt::prepare_runtime(state, user_id, content, None, channel_id)?;
         let mut followup_messages = Vec::new();
         followup_messages.push(ChatMessage {
-            role: "system".to_string(),
+            reasoning_content: None,
+role: "system".to_string(),
             content: Some(crate::gateway::prompt::render_system(state, &ctx, content).await?),
             content_parts: None,
             tool_calls: None,
@@ -258,6 +261,7 @@ pub(crate) async fn handle_message_inner(
             m.content_parts.as_ref().is_some_and(|p| !p.is_empty()) && !image_msg_indices.contains(&i)
         ) {
             followup_messages.push(ChatMessage {
+    reasoning_content: None,
                 role: "system".into(),
                 content: Some(crate::gateway::prompt::OMITTED_HISTORY_IMAGES_NOTICE.into()),
                 content_parts: None, tool_calls: None, tool_call_id: None, tool_name: None,
@@ -277,6 +281,7 @@ pub(crate) async fn handle_message_inner(
                     .collect()
             });
             followup_messages.push(ChatMessage {
+    reasoning_content: None,
                 role: msg.role.clone(),
                 content: if msg.content.is_empty() {
                     None
@@ -307,6 +312,7 @@ pub(crate) async fn handle_message_inner(
         finalizing = tool_calls_used >= tool_limit;
         if finalizing {
             followup_messages.push(ChatMessage {
+    reasoning_content: None,
                 role: "system".into(),
                 content: Some("The tool-call budget for this request is exhausted. No more tools may run. Give an honest final status using the saved tool results, explicitly stating any unfinished work. Do not claim unexecuted actions succeeded.".into()),
                 content_parts: None,

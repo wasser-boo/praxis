@@ -75,6 +75,7 @@ impl OllamaProvider {
         check_completion(state.done_reason)?;
         let has_tools = !state.tool_calls.is_empty();
         Ok(ChatResponse {
+            reasoning_content: None,
             content: if state.content.is_empty() { None } else { Some(state.content) },
             tool_calls: if has_tools { Some(state.tool_calls) } else { None },
             finish_reason: Some(if has_tools { "tool_calls" } else { "stop" }.to_string()),
@@ -309,6 +310,7 @@ fn parse_ollama_response(data: &serde_json::Value) -> anyhow::Result<ChatRespons
     let has_tools = tool_calls.as_ref().is_some_and(|calls| !calls.is_empty());
 
     Ok(ChatResponse {
+        reasoning_content: None,
         content,
         tool_calls,
         finish_reason: Some(if has_tools { "tool_calls" } else { "stop" }.to_string()),

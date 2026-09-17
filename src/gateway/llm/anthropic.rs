@@ -262,6 +262,7 @@ pub fn parse_anthropic_response(data: &serde_json::Value) -> anyhow::Result<Chat
     };
 
     Ok(ChatResponse {
+        reasoning_content: None,
         content,
         tool_calls,
         finish_reason: data["stop_reason"].as_str().map(|s| s.to_string()),

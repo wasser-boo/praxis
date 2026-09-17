@@ -211,7 +211,8 @@ async fn run_agent_loop_inner(
         ctx = crate::gateway::prompt::prepare_runtime(state, user_id, &user_message, Some(turn), None)?;
         let system_prompt = crate::gateway::prompt::render_system(state, &ctx, &user_message).await?;
         let mut messages = vec![ChatMessage {
-            role: "system".to_string(),
+            reasoning_content: None,
+role: "system".to_string(),
             content: Some(system_prompt.clone()),
             content_parts: None,
             tool_calls: None,
@@ -228,6 +229,7 @@ async fn run_agent_loop_inner(
         {
             tracing::info!(user_id = %user_id, "System prompt changed; injecting change notice");
             messages.push(ChatMessage {
+    reasoning_content: None,
                 role: "system".to_string(),
                 content: Some(notice),
                 content_parts: None,
@@ -240,6 +242,7 @@ async fn run_agent_loop_inner(
         // Add compaction summary if available
         if ctx.settings.compaction_enabled && !ctx.settings.compaction_summary.is_empty() {
             messages.push(ChatMessage {
+    reasoning_content: None,
                 role: "system".to_string(),
                 content: Some(format!(
                     "Previous conversation summary: {}",
@@ -260,6 +263,7 @@ async fn run_agent_loop_inner(
         {
             if let Some(data_url) = crate::tools::vm_tools::screenshot_to_data_url(ss_path) {
                 messages.push(ChatMessage {
+    reasoning_content: None,
                     role: "user".to_string(),
                     content: Some(
                         "[Current VM screenshot — this is what is on screen right now]".to_string(),
@@ -296,6 +300,7 @@ async fn run_agent_loop_inner(
             .count().saturating_sub(image_msg_indices.len());
         if omitted_history_images > 0 {
             messages.push(ChatMessage {
+    reasoning_content: None,
                 role: "system".into(),
                 content: Some(crate::gateway::prompt::OMITTED_HISTORY_IMAGES_NOTICE.into()),
                 content_parts: None, tool_calls: None, tool_call_id: None, tool_name: None,
@@ -325,6 +330,7 @@ async fn run_agent_loop_inner(
                     .collect()
             });
             messages.push(ChatMessage {
+    reasoning_content: None,
                 role: msg.role.clone(),
                 content: if Some(msg_idx) == current_user_idx {
                     Some(rendered_current_user.clone())
@@ -1066,6 +1072,7 @@ pub async fn generate_compaction_summary(
 
     let request = ChatRequest {
         messages: vec![ChatMessage {
+    reasoning_content: None,
             role: "user".to_string(),
             content: Some(prompt),
             content_parts: None,

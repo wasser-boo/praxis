@@ -173,6 +173,7 @@ impl LLMRouter {
             }
 
             messages.push(provider::ChatMessage {
+    reasoning_content: None,
                 role: "assistant".to_string(),
                 content: response.content.clone(),
                 content_parts: None,
@@ -555,6 +556,7 @@ impl LLMRouter {
 
                 // Add tool result to messages
                 messages.push(provider::ChatMessage {
+    reasoning_content: None,
                     role: "tool".to_string(),
                     content: Some(final_result_str),
                     content_parts,
