@@ -74,9 +74,22 @@ impl OllamaProvider {
         tracing::info!(content_bytes = state.content.len(), tool_call_count = state.tool_calls.len(), thinking_bytes = state.thinking_bytes, done_reason = state.done_reason.unwrap_or("unspecified"), completion_tokens = ?state.usage.as_ref().map(|u| u.completion_tokens), "[STREAM] Ollama response collected");
         check_completion(state.done_reason)?;
         let has_tools = !state.tool_calls.is_empty();
+        let think_usable = !state.thinking.trim().is_empty();
+        let reasoning = (state.content.is_empty() && think_usable)
+            .then(|| state.thinking.trim().to_string());
+        let content = if !state.content.is_empty() {
+            Some(state.content)
+        } else if think_usable {
+            // Think phase consumed the budget without producing an answer:
+            // surface the reasoning so the turn is usable.
+            Some(format!("[Denkspur]
+{}", state.thinking.trim()))
+        } else {
+            None
+        };
         Ok(ChatResponse {
-            reasoning_content: None,
-            content: if state.content.is_empty() { None } else { Some(state.content) },
+            reasoning_content: reasoning,
+            content,
             tool_calls: if has_tools { Some(state.tool_calls) } else { None },
             finish_reason: Some(if has_tools { "tool_calls" } else { "stop" }.to_string()),
             usage: state.usage,
@@ -222,6 +235,7 @@ struct OllamaStreamState {
     content: String,
     // Count thinking for diagnostics, but never retain, emit or speak it.
     thinking_bytes: usize,
+    thinking: String,
     tool_calls: Vec<ToolCall>,
     done: bool,
     done_reason: Option<&'static str>,
@@ -272,9 +286,10 @@ impl OllamaStreamState {
             self.done_reason = parse_done_reason(&data);
         }
         let message = &data["message"];
-        self.thinking_bytes = self.thinking_bytes.saturating_add(
-            message["thinking"].as_str().map_or(0, str::len),
-        );
+        if let Some(thinking_delta) = message["thinking"].as_str() {
+            self.thinking.push_str(thinking_delta);
+            self.thinking_bytes = self.thinking_bytes.saturating_add(thinking_delta.len());
+        }
         if let Some(calls) = parse_tool_calls_from_message(message) {
             self.tool_calls.extend(calls);
         }
