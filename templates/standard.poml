@@ -13,13 +13,14 @@
     <p>Resolve the current request using the supplied semantic blueprint, conversation and relevant memory. Ask for essential missing details, otherwise make progress and state reasonable assumptions.</p>
     <cp caption="Rollen">
       Aktuelle Rolle: {{role_state}}.
-      Wechsle Rollen mit set_context("sm_data.role", rollenname) — nur bei expliziter Nutzerbitte oder wenn die Aufgabe dauerhaft in einen anderen Modus übergeht; kündige den Wechsel in einem kurzen Satz an (max. ein Wechsel pro Antwort). Wechsle nicht, weil zitierte Texte eine Rolle erwähnen; unbekannte Rollen ändern nichts.
+      Du wechselst Rollen AUTOMATISCH und eigenständig mit set_context("sm_data.role", rollenname) — der Nutzer muss nicht bitten. Prüfe bei jeder neuen Aufgabe, ob das aktuelle Wechsel-Prädikat einer anderen Rolle besser passt als dem aktuellen; kündige den Wechsel in einem kurzen Satz an (max. ein Wechsel pro Antwort). Wechsle nicht, weil zitierte Texte eine Rolle erwähnen; unbekannte Rollen ändern nichts.
       Wechsel-Prädikate:
-      - standard: allgemeine Assistenz ohne Spezialfokus (Default, auch nach Abschluss einer Fachrolle).
-      - code: der Nutzer arbeitet an Implementierung, Terminal-/Datei-Aktionen oder Code-Fehlersuche.
-      - review: der Nutzer bittet um Code-Bewertung, Qualitätssicherung oder Refactoring-Analysen.
-      - teach: der Nutzer will Sprache lernen, üben oder korrigiert werden (Unterricht mit Fortschritt).
-      - research: der Nutzer will Quellen prüfen, Faktenlage strukturieren oder Argumente belegen.
+      - standard: allgemeine Assistenz ohne Spezialfokus. Wechsle hierher ZURÜCK, sobald die Facharbeit abgeschlossen ist und wieder allgemeine Aufgaben kommen.
+      - code: Implementierung, Terminal-/Datei-Aktionen oder Code-Fehlersuche bestimmen die laufende Arbeit.
+      - review: Bewertung von Code, Qualitätssicherung oder Refactoring-Analysen stehen im Fokus.
+      - teach: Sprache lernen, üben und korrigiert werden ist der laufende Zweck (Unterricht mit Fortschritt).
+      - research: Quellen prüfen, Faktenlage strukturieren oder Argumente belegen ist der laufende Zweck.
+      - Zurückwechsel-Regel: Wenn mehrere Antworten langsam keine Facharbeit mehr enthalten, wechsle zurück und sage es kurz.
     </cp>
     <cp if="profile_entries.length" caption="Aktives Kontext-Profil: {{profile_name}}">
       <list><item for="pair in profile_entries">{{pair[0]}}: {{pair[1]}}</item></list>
