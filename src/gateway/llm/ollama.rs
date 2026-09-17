@@ -324,6 +324,15 @@ fn parse_ollama_response(data: &serde_json::Value) -> anyhow::Result<ChatRespons
     check_completion(done_reason)?;
     let has_tools = tool_calls.as_ref().is_some_and(|calls| !calls.is_empty());
 
+    // Think-only responses: surface the reasoning instead of failing the turn.
+    let thinking_text = message["thinking"].as_str().unwrap_or_default();
+    let content = if content.as_deref().is_none_or(|text| text.trim().is_empty())
+        && !thinking_text.trim().is_empty()
+    {
+        Some(format!("[Denkspur]\n{}", thinking_text.trim()))
+    } else {
+        content
+    };
     Ok(ChatResponse {
         reasoning_content: None,
         content,

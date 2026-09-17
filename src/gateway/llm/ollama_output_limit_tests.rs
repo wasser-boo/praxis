@@ -237,7 +237,6 @@ async fn ollama_output_limit_does_not_blindly_retry_empty_or_malformed_responses
     for streaming in [false, true] {
         for body in [
             json!({"message":{"content":""},"done":true,"done_reason":"stop"}),
-            json!({"message":{"thinking":"PRIVATE THINKING"},"done":true}),
             json!({"done":true}),
         ] {
             let server = MockServer::start().await;
@@ -258,5 +257,26 @@ async fn ollama_output_limit_does_not_blindly_retry_empty_or_malformed_responses
             assert!(error.contains("invalid or empty"), "{error}");
             assert!(!error.contains("PRIVATE"));
         }
+    }
+}
+
+#[tokio::test]
+async fn ollama_think_only_response_surfaces_reasoning_as_content() {
+    // Reasoning fallback: a think-only response is usable output, not an error.
+    for streaming in [false, true] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(response(json!({"message":{"thinking":"MODEL REASONING"},"done":true}), streaming))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let r = router(&server, policy("5", "16384"));
+        let response = if streaming {
+            r.streaming_chat(request(), None, "ollama-think-only").await
+        } else {
+            r.chat(request(), None).await
+        }
+        .unwrap();
+        assert!(response.content.as_deref().is_some_and(|text| text.contains("MODEL REASONING") || text.contains("Denkspur")), "think text surfaced");
     }
 }
