@@ -66,10 +66,23 @@ pub struct ChatMessage {
     pub tool_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub function: FunctionCall,
+}
+
+// llama-server rejects assistant tool_calls without a type field; inject it on
+// every request serialization (the stored history omits it).
+impl serde::Serialize for ToolCall {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("ToolCall", 3)?;
+        s.serialize_field("type", "function")?;
+        s.serialize_field("id", &self.id)?;
+        s.serialize_field("function", &self.function)?;
+        s.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
