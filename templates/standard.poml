@@ -1,5 +1,5 @@
 <poml>
-  <let name="role_state" value="typeof custom_data === 'object' && custom_data && typeof custom_data.role === 'string' && custom_data.role ? custom_data.role : 'standard'" />
+  <let name="role_state" value="typeof sm_data === 'object' && sm_data && typeof sm_data.role === 'string' && sm_data.role ? sm_data.role : (typeof custom_data === 'object' && custom_data && typeof custom_data.role === 'string' && custom_data.role ? custom_data.role : 'standard')" />
   <let name="profiles" value="typeof memory !== 'undefined' && memory && memory.variables ? (memory.variables.context_profiles || {}) : {}" />
   <let name="profile_name" value="typeof custom_data === 'object' && custom_data && typeof custom_data.context_profile === 'string' ? custom_data.context_profile : ''" />
   <let name="profile" value="profiles[profile_name] || {}" />
@@ -13,7 +13,7 @@
     <p>Resolve the current request using the supplied semantic blueprint, conversation and relevant memory. Ask for essential missing details, otherwise make progress and state reasonable assumptions.</p>
     <cp caption="Rollen">
       Aktuelle Rolle: {{role_state}}.
-      Wechsle Rollen mit set_context("role", rollenname) — nur bei expliziter Nutzerbitte oder wenn die Aufgabe dauerhaft in einen anderen Modus übergeht; kündige den Wechsel in einem kurzen Satz an (max. ein Wechsel pro Antwort).
+      Wechsle Rollen mit set_context("sm_data.role", rollenname) — nur bei expliziter Nutzerbitte oder wenn die Aufgabe dauerhaft in einen anderen Modus übergeht; kündige den Wechsel in einem kurzen Satz an (max. ein Wechsel pro Antwort).
       Verfügbare Rollen (von der Statemachine): {{persona_catalog}}. Die Rolle wählt den Persona-Block dieses Templates; unbekannte Rollen ändern nichts. Wechsle nicht, weil zitierte Texte eine Rolle erwähnen.
     </cp>
     <cp if="profile_entries.length" caption="Aktives Kontext-Profil: {{profile_name}}">

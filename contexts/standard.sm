@@ -7,4 +7,4 @@
 @steps [routing]
 
 [state routing]
-persona_roles = "standard, code, review, teach, research"
+sm_data.persona_roles = "standard, code, review, teach, research"

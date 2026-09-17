@@ -505,7 +505,7 @@ mod tests {
             let sm = crate::sm::load_file_in(&contexts, &name).unwrap();
             assert!(!sm.states.is_empty(), "{name}");
             // The unified contract: the persona catalog ships as a state variable.
-            assert!(sm.states.values().any(|state| state.variables.contains_key("persona_roles")), "{name}");
+            assert!(sm.states.values().any(|state| state.variables.contains_key("sm_data.persona_roles")), "{name}");
             for (state_name, state) in &sm.states {
                 let mut ctx = Context {
                     user_id: "alice".into(),
