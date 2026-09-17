@@ -12,6 +12,7 @@ use wiremock::{
 fn request() -> ChatRequest {
     ChatRequest {
         messages: vec![ChatMessage {
+    reasoning_content: None,
             role: "user".into(),
             content: Some("synthetic task".into()),
             content_parts: None,

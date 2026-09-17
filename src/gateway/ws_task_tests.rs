@@ -38,6 +38,7 @@ impl LLMProvider for TestProvider {
             return Err(ProviderError::new(ErrorKind::Unavailable).into());
         }
         Ok(ChatResponse {
+    reasoning_content: None,
             content: Some("done".into()),
             tool_calls: None,
             finish_reason: None,

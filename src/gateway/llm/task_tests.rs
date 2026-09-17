@@ -37,6 +37,7 @@ impl LLMProvider for ToolProvider {
             }
         }
         Ok(ChatResponse {
+    reasoning_content: None,
             content: Some(
                 if turn == 0 {
                     "working"

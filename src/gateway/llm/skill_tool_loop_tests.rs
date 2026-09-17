@@ -17,6 +17,7 @@ impl LLMProvider for ToolLoopProvider {
     async fn chat(&self, _: ChatRequest) -> anyhow::Result<ChatResponse> {
         let first = self.turn.fetch_add(1, Ordering::SeqCst) == 0;
         Ok(ChatResponse {
+    reasoning_content: None,
             content: Some(
                 if first {
                     "Loading instructions"

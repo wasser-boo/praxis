@@ -98,6 +98,7 @@ impl LLMProvider for Scripted {
 }
 fn reply() -> ChatResponse {
     ChatResponse {
+        reasoning_content: None,
         content: Some("done".into()),
         tool_calls: None,
         finish_reason: Some("stop".into()),
@@ -107,6 +108,7 @@ fn reply() -> ChatResponse {
 fn request() -> ChatRequest {
     ChatRequest {
         messages: vec![ChatMessage {
+    reasoning_content: None,
             role: "user".into(),
             content: Some("synthetic request".into()),
             content_parts: None,

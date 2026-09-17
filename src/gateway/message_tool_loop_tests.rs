@@ -59,6 +59,7 @@ fn call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
 }
 fn reply(content: Option<&str>, calls: Vec<ToolCall>) -> ChatResponse {
     ChatResponse {
+        reasoning_content: None,
         content: content.map(String::from),
         tool_calls: (!calls.is_empty()).then_some(calls),
         finish_reason: None,
