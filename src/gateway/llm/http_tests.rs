@@ -306,6 +306,43 @@ async fn resilience_transport_failure_diagnostics_never_expose_url_credentials()
     }
 }
 
+#[tokio::test]
+async fn llamacpp_reasoning_only_surfaces_on_streaming_path() {
+    // Reproduces the reported qwen reasoning-model payload: the model spent the
+    // whole output budget on its chain-of-thought, so content is empty and only
+    // reasoning_content carries text, with finish_reason=length. This must NOT
+    // raise InvalidResponse, and the reasoning must be surfaced as the reply on
+    // the streaming path (llamacpp uses the default chat_stream -> chat()).
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "step-by-step reasoning that exhausted the budget"
+                },
+                "finish_reason": "length"
+            }],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 4096, "total_tokens": 4103}
+        })))
+        .mount(&server)
+        .await;
+    let (p, _, _) = adapter("llamacpp", server.uri());
+    let r = LLMRouter::with_providers(vec![p], "llamacpp".into(), vec![], policy());
+    let response = r
+        .streaming_chat(request(), None, "llamacpp-reasoning-only")
+        .await
+        .expect("reasoning-only reply must not raise InvalidResponse");
+    assert_eq!(
+        response.content.as_deref(),
+        Some("step-by-step reasoning that exhausted the budget"),
+        "reasoning must be written back into content, not discarded"
+    );
+    assert_eq!(response.finish_reason.as_deref(), Some("length"));
+}
+
 #[test]
 fn resilience_router_rejects_empty_keys_and_shares_same_account_gates() {
     let mut config = crate::config::Config::from_env();

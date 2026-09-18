@@ -362,7 +362,9 @@ fn validate_response(mut response: ChatResponse) -> Result<ChatResponse, Provide
     let tools = response.tool_calls.as_deref().unwrap_or_default();
     let mut content = response.content.clone();
     // Deep-thinking models can spend the whole output budget on the think
-    // phase; surface the reasoning as the response instead of failing.
+    // phase; surface the reasoning as the response instead of failing. This
+    // must be written back to `response.content` (not only into the local), or
+    // the reply is delivered blank even though validation passed.
     if content.as_deref().is_none_or(|text| text.trim().is_empty()) {
         if let Some(reasoning) = response.reasoning_content.as_deref().filter(|r| !r.trim().is_empty()) {
             content = Some(reasoning.to_string());
@@ -382,6 +384,9 @@ fn validate_response(mut response: ChatResponse) -> Result<ChatResponse, Provide
             return Err(ProviderError::new(ErrorKind::InvalidResponse));
         }
     }
+    // Persist the substituted reasoning so downstream consumers (agent loop,
+    // dashboard, TTS) see it as the assistant reply instead of an empty turn.
+    response.content = content;
     Ok(response)
 }
 
