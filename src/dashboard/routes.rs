@@ -183,6 +183,7 @@ pub fn routes(db: crate::db::Database) -> Router {
     // Protected API routes with auth middleware
     let protected = Router::new()
         .route("/contexts", axum::routing::get(list_contexts))
+        .route("/chat-sessions", axum::routing::get(list_chat_sessions))
         .route("/contexts/:user_id", axum::routing::get(get_context))
         .route("/contexts/:user_id", axum::routing::put(update_context))
         .route("/contexts/:user_id", axum::routing::delete(delete_context))
@@ -398,6 +399,81 @@ async fn status(State(_state): State<Arc<DashboardState>>) -> Json<serde_json::V
 }
 
 // ── Contexts ─────────────────────────────────────────────────────────────────
+
+/// All chat sessions known to the server, independent of the browser's
+/// localStorage cache. The dashboard previously rendered only the sessions it
+/// happened to have cached, so chats created in another browser or on another
+/// device (and Discord-paired histories) stayed invisible until manually
+/// reconstructed. Context rows are authoritative; message stats and a preview
+/// are resolved from the messages table, where forked sessions store rows
+/// under `user_id:::session_id` while the session itself is `user_id`.
+async fn list_chat_sessions(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let conn = state.db.conn();
+    let mut stmt = conn
+        .prepare(
+            "SELECT user_id, updated_at FROM contexts ORDER BY updated_at DESC LIMIT 500",
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    drop(stmt);
+
+    let mut sessions = Vec::new();
+    for (user_id, updated_at) in rows {
+        let username: Option<String> = conn
+            .query_row(
+                "SELECT data FROM contexts WHERE user_id = ?1 LIMIT 1",
+                rusqlite::params![user_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|data| {
+                serde_json::from_str::<crate::db::contexts::Context>(&data).ok()
+            })
+            .and_then(|ctx| ctx.username.filter(|u| !u.trim().is_empty()));
+        // Messages live under the session key or its forked `:::` sub-keys.
+        let prefix = format!("{user_id}:::");
+        let message_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE user_id = ?1 OR substr(user_id, 1, length(?2)) = ?2",
+                rusqlite::params![user_id, prefix],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let preview: Option<String> = conn
+            .query_row(
+                "SELECT content FROM messages WHERE user_id = ?1 AND role = 'user' AND content <> '' ORDER BY id ASC LIMIT 1",
+                rusqlite::params![user_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .or_else(|| {
+                conn.query_row(
+                    "SELECT content FROM messages WHERE substr(user_id, 1, length(?1)) = ?1 AND role = 'user' AND content <> '' ORDER BY id ASC LIMIT 1",
+                    rusqlite::params![prefix],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            })
+            .map(|text| {
+                let flat: String = text.trim().chars().take(120).collect();
+                flat
+            });
+        sessions.push(serde_json::json!({
+            "user_id": user_id,
+            "username": username,
+            "updated_at": updated_at,
+            "message_count": message_count,
+            "preview": preview,
+        }));
+    }
+    Ok(Json(serde_json::json!({ "sessions": sessions })))
+}
 
 async fn list_contexts(
     State(state): State<Arc<DashboardState>>,

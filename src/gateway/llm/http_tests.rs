@@ -343,6 +343,137 @@ async fn llamacpp_reasoning_only_surfaces_on_streaming_path() {
     assert_eq!(response.finish_reason.as_deref(), Some("length"));
 }
 
+/// Reproduces the reported production failure: a reasoning model spends ~130 s
+/// and the whole max_tokens budget, then starts a tool call that gets cut off
+/// mid-arguments (finish_reason=length, arguments='{"command":"gr'). The old
+/// code raised a non-retryable InvalidResponse and dropped the turn. The fix
+/// classifies it as OutputLimit so the router retries with a larger allowance.
+#[tokio::test]
+async fn llamacpp_truncated_tool_call_retries_with_larger_output_budget() {
+    let server = MockServer::start().await;
+    let seen: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen_in = seen.clone();
+    let hits_in = hits.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(move |req: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            seen_in.lock().unwrap().push(body);
+            let first = hits_in.fetch_add(1, Ordering::SeqCst) == 0;
+            if first {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [{
+                                "id": "trunc1",
+                                "function": {"name": "execute_terminal", "arguments": "{\"command\":\"gr"}
+                            }]
+                        },
+                        "finish_reason": "length"
+                    }],
+                    "usage": {"completion_tokens": 4096}
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [{
+                                "id": "ok1",
+                                "function": {"name": "execute_terminal", "arguments": "{\"command\":\"grep x\"}"}
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {"completion_tokens": 30}
+                }))
+            }
+        })
+        .mount(&server)
+        .await;
+    let (p, _, _) = adapter("llamacpp", server.uri());
+    let r = LLMRouter::with_providers(vec![p], "llamacpp".into(), vec![], policy());
+    let response = r.chat(request(), None).await.expect("must retry, not fail");
+    assert_eq!(response.tool_calls.as_ref().map(Vec::len), Some(1));
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "truncation must trigger exactly one retry");
+    assert_eq!(seen[0]["max_tokens"], serde_json::json!(10));
+    assert_eq!(
+        seen[1]["max_tokens"],
+        serde_json::json!(20),
+        "retry must double the output allowance"
+    );
+}
+
+#[tokio::test]
+async fn llamacpp_empty_tool_call_fields_are_repaired_not_rejected() {
+    // llama.cpp omits the id and emits "" for no-argument tools; both used to
+    // fail the whole response as InvalidResponse.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "",
+                        "function": {"name": "agent_complete", "arguments": ""}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let (p, _, _) = adapter("llamacpp", server.uri());
+    let r = LLMRouter::with_providers(vec![p], "llamacpp".into(), vec![], policy());
+    let response = r.chat(request(), None).await.expect("must repair");
+    let calls = response.tool_calls.expect("call must survive");
+    assert_eq!(calls.len(), 1);
+    assert!(!calls[0].id.is_empty(), "empty id must be generated");
+    assert_eq!(calls[0].function.arguments, "{}");
+}
+
+#[tokio::test]
+async fn llamacpp_malformed_tool_call_without_cutoff_stays_invalid() {
+    // Broken arguments with finish_reason=stop is a genuine provider bug:
+    // no retry, no expansion, stays InvalidResponse.
+    let server = MockServer::start().await;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_in = hits.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(move |_req: &wiremock::Request| {
+            hits_in.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "bad1",
+                            "function": {"name": "x", "arguments": "{not json at all"}
+                        }]
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+        })
+        .mount(&server)
+        .await;
+    let (p, _, _) = adapter("llamacpp", server.uri());
+    let r = LLMRouter::with_providers(vec![p], "llamacpp".into(), vec![], policy());
+    let e = r.chat(request(), None).await.unwrap_err().to_string();
+    assert!(e.contains("invalid or empty provider response"), "{e}");
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "must not retry");
+}
+
 #[test]
 fn resilience_router_rejects_empty_keys_and_shares_same_account_gates() {
     let mut config = crate::config::Config::from_env();

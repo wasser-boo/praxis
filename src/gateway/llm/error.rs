@@ -112,9 +112,23 @@ impl ProviderError {
             ErrorKind::Configuration
         } else if error.is_timeout() {
             ErrorKind::Timeout
-        } else if error.is_decode() {
+        } else if error.is_decode()
+            && !matches!(
+                cause,
+                Some(
+                    "connection reset"
+                        | "broken pipe"
+                        | "unexpected EOF"
+                        | "connection closed"
+                        | "incomplete HTTP message"
+                )
+            )
+        {
+            // A genuinely malformed body on an intact connection.
             ErrorKind::InvalidResponse
         } else {
+            // Includes decode failures caused by the connection dying mid-body:
+            // nothing was executed, so a retry is safe and expected.
             ErrorKind::Transport
         };
         Self {
@@ -130,7 +144,12 @@ impl ProviderError {
         error
             .downcast_ref::<Self>()
             .cloned()
-            .unwrap_or_else(|| Self::new(ErrorKind::InvalidResponse))
+            .unwrap_or_else(|| Self {
+                // Keep the catch-all distinguishable in logs: without this the
+                // user only ever sees "invalid or empty provider response".
+                cause: Some("unclassified provider failure"),
+                ..Self::new(ErrorKind::InvalidResponse)
+            })
     }
 }
 impl fmt::Display for ProviderError {

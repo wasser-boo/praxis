@@ -1559,10 +1559,60 @@ function loadChatSessions() {
         saveChatSessions();
     }
     renderChatSessionList();
+    // Server-side sessions are authoritative for existence: chats created on
+    // another device/browser (or before localStorage was cleared) must show
+    // up too, not just the ones this browser cached.
+    mergeServerChatSessions();
     // Discord pairings appear as chat sessions too (their full history lives
     // under the paired user_id). Merged in the background; the list re-renders
     // when they arrive.
     mergeDiscordPairingSessions();
+}
+
+/// Fetch every chat session persisted on the server and merge it into the
+/// locally cached list. Local names/renames win; server-only chats appear,
+/// and entries we previously added from the server but that no longer exist
+/// there (deleted elsewhere) are pruned.
+async function mergeServerChatSessions() {
+    try {
+        const res = await apiGet('/api/chat-sessions');
+        if (!res || !res.ok) return;
+        const data = await res.json();
+        const sessions = data.sessions || [];
+        if (sessions.length === 0) return;
+        const serverIds = new Set(sessions.map(s => s.user_id));
+        let changed = false;
+        for (const s of sessions) {
+            if (!s.user_id) continue;
+            const existing = chatSessions.find(c => c.id === s.user_id);
+            if (existing) {
+                if (!existing.name && s.preview) {
+                    existing.name = s.preview.replace(/\s+/g, ' ').slice(0, 40);
+                    changed = true;
+                }
+                continue;
+            }
+            const preview = (s.preview || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+            chatSessions.push({
+                id: s.user_id,
+                name: preview || s.username || s.user_id.slice(0, 12),
+                username: s.username || chatUsername,
+                server: true,
+            });
+            changed = true;
+        }
+        // Prune server-added entries that vanished server-side (deleted from
+        // another device). Purely local and Discord entries are never pruned.
+        const kept = chatSessions.filter(c => !(c.server && !serverIds.has(c.id)));
+        if (kept.length !== chatSessions.length) {
+            chatSessions = kept.length > 0 ? kept : chatSessions;
+            changed = true;
+        }
+        if (changed) {
+            saveChatSessions();
+            renderChatSessionList();
+        }
+    } catch {}
 }
 
 /// Fetch pairings and add one chat-session entry per paired context (marked

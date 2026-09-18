@@ -1,6 +1,6 @@
 use super::{
     error::{CallFailure, ErrorKind, ProviderError},
-    provider::{ChatRequest, ChatResponse, ContentPart, LLMProvider},
+    provider::{ChatRequest, ChatResponse, ContentPart, LLMProvider, ToolCall},
     resilience::{self, interruptible, ProviderGate, ResilienceConfig},
     LLMRouter,
 };
@@ -359,7 +359,7 @@ fn validate_response(mut response: ChatResponse) -> Result<ChatResponse, Provide
     {
         response.tool_calls = None;
     }
-    let tools = response.tool_calls.as_deref().unwrap_or_default();
+    let truncated = response.finish_reason.as_deref() == Some("length");
     let mut content = response.content.clone();
     // Deep-thinking models can spend the whole output budget on the think
     // phase; surface the reasoning as the response instead of failing. This
@@ -370,20 +370,53 @@ fn validate_response(mut response: ChatResponse) -> Result<ChatResponse, Provide
             content = Some(reasoning.to_string());
         }
     }
-    if tools.is_empty() && content.as_deref().is_none_or(|text| text.trim().is_empty()) {
-        return Err(ProviderError::new(ErrorKind::InvalidResponse));
-    }
+    let has_text = content.as_deref().is_some_and(|text| !text.trim().is_empty());
+    // Repair and validate tool calls. A token-budget cutoff can land in the
+    // middle of a call's JSON arguments (finish_reason=length); that is a
+    // recoverable output limit, NOT an invalid provider response. Dropping the
+    // whole turn as non-retryable was the reported "invalid provider response"
+    // at ~130 s: long thinking + tool call truncated at max_tokens.
+    let mut repaired: Vec<ToolCall> = Vec::new();
     let mut ids = std::collections::HashSet::new();
-    for call in tools {
-        if call.id.is_empty()
-            || !ids.insert(&call.id)
-            || call.function.name.is_empty()
+    let mut cut_call = false;
+    for mut call in response.tool_calls.take().unwrap_or_default() {
+        if call.id.is_empty() || !ids.insert(call.id.clone()) {
+            call.id = format!("call_{}", repaired.len() + 1);
+            while ids.contains(&call.id) {
+                call.id = format!("{}_{}", call.id, ids.len() + 1);
+            }
+            ids.insert(call.id.clone());
+        }
+        if call.function.arguments.trim().is_empty() {
+            // llama.cpp omits arguments for no-argument tools.
+            call.function.arguments = "{}".to_string();
+            repaired.push(call);
+            continue;
+        }
+        if call.function.name.is_empty()
             || !serde_json::from_str::<serde_json::Value>(&call.function.arguments)
                 .is_ok_and(|args| args.is_object())
         {
-            return Err(ProviderError::new(ErrorKind::InvalidResponse));
+            // Truncated or malformed: never execute a half-arguments call.
+            cut_call = true;
+            continue;
         }
+        repaired.push(call);
     }
+    if repaired.is_empty() && !has_text {
+        // Nothing usable came back. A budget cutoff is recoverable: the router
+        // doubles max_tokens (bounded by retry_max_output_tokens) and retries.
+        return Err(ProviderError::new(if truncated {
+            ErrorKind::OutputLimit
+        } else {
+            ErrorKind::InvalidResponse
+        }));
+    }
+    if cut_call && !has_text && truncated {
+        // The only payload was a cut-off call: retry with a larger allowance.
+        return Err(ProviderError::new(ErrorKind::OutputLimit));
+    }
+    response.tool_calls = (!repaired.is_empty()).then_some(repaired);
     // Persist the substituted reasoning so downstream consumers (agent loop,
     // dashboard, TTS) see it as the assistant reply instead of an empty turn.
     response.content = content;
