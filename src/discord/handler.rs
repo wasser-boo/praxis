@@ -715,6 +715,12 @@ impl EventHandler for DiscordHandler {
                                     )
                                     .await;
 
+                                    // Session-Hook (pgpu §12.4): Voice-Session
+                                    // startet → GPU-Slots vorwärmen (LLM für
+                                    // Antworten, media für TTS; STT läuft
+                                    // router-lokal). Fire-and-forget.
+                                    crate::gpu_router::wake_slots_for_session();
+
                                     // Check context for deafened and voice_enabled settings
                                     let discord_user_id = command.user.id.to_string();
                                     let (should_deafen, voice_listening) =

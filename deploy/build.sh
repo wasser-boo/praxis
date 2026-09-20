@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Baut das Praxis-VPS-Image (Binary + gebündeltes POML-CLI).
 # Usage: IMAGE_TAG=vayayo/praxis:latest bash deploy/build.sh [--push]
+#
+# Multi-Arch (Heimserver/Vast=amd64, NAS=arm64) bauen+pushen — Builder einmalig:
+#   docker buildx create --name multiarch --driver docker-container --use
+# dann aus dem Repo-Root (Version anheben; QEMU-arm64-Build dauert >1 h):
+#   docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Dockerfile \
+#     --build-context poml=../poml \
+#     -t vayayo/praxis:0.5 -t vayayo/praxis:latest \
+#     --provenance=false --push .
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

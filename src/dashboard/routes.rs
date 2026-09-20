@@ -193,6 +193,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/messages/:user_id/clear-chat", axum::routing::post(clear_chat_view))
         .route("/messages/:user_id/compact", axum::routing::post(compact_messages))
         .route("/skills", axum::routing::get(list_skills))
+        .route("/router-state", axum::routing::get(router_state))
         .route("/delegations/:user_id", axum::routing::get(list_delegations_route))
         .route("/templates", axum::routing::get(list_templates))
         .route("/templates", axum::routing::post(create_template))
@@ -396,6 +397,16 @@ async fn status(State(_state): State<Arc<DashboardState>>) -> Json<serde_json::V
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+/// GPU-Router-State als Proxy (Badge im Overview): Slot-States + Budget
+/// („heute X $"). Auth läuft über die Dashboard-Session — der Router-Token
+/// bleibt serverseitig in gpu_router (nie im Browser).
+async fn router_state() -> Json<serde_json::Value> {
+    match crate::gpu_router::state().await {
+        Some(s) => Json(serde_json::to_value(&s).unwrap_or_else(|_| serde_json::json!({"configured": false}))),
+        None => Json(serde_json::json!({"configured": false})),
+    }
 }
 
 // ── Contexts ─────────────────────────────────────────────────────────────────

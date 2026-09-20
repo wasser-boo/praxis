@@ -198,7 +198,34 @@ async function loadOverview() {
                 <button class="btn btn-sm btn-primary" onclick="quickStartAgent('${escapeHtml(uid)}')">Start Agent</button>
                 </div></div>`).join('')
             : '<div class="data-item"><span class="name">No users yet. Pair a bot or create a context first.</span></div>';
+
+        // GPU-Router-Badge (pgpu): Slot-States + Budget heute — WENN ein
+        // Router konfiguriert ist (GPU_ROUTER_URL), sonst Karte ausblenden.
+        loadGpuRouterBadge();
     } catch (err) { console.error('Overview error:', err); }
+}
+
+async function loadGpuRouterBadge() {
+    const el = document.getElementById('gpu-router-state');
+    if (!el) return;
+    try {
+        const rs = await apiGet('/api/router-state');
+        const data = await rs.json();
+        if (!data || data.configured === false) {
+            el.closest('.stat-card').style.display = 'none';
+            return;
+        }
+        const fmt = s => {
+            const st = s.healthy ? 'healthy' : (s.state || 'cold');
+            return `${(s.role || s.id)}: ${st}${s.busy ? ' (busy)' : ''}`;
+        };
+        const slots = (data.slots || []).map(fmt).join(' · ');
+        const spent = data.budget ? ` — ${Number(data.budget.spent_today_usd).toFixed(2)} $ heute` : '';
+        el.textContent = `${slots}${spent}`;
+        el.classList.toggle('ok', (data.slots || []).some(s => s.healthy));
+    } catch (err) {
+        el.textContent = 'Router nicht erreichbar';
+    }
 }
 
 function quickStartAgent(userId) {

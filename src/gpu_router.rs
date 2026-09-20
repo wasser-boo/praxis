@@ -19,7 +19,7 @@
 
 use once_cell::sync::Lazy;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -79,7 +79,7 @@ pub fn wait_s() -> u64 {
     CONFIG.as_ref().map_or(0, |c| c.wait_s)
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SlotState {
     pub id: i64,
     #[serde(default)]
@@ -98,12 +98,30 @@ pub struct SlotState {
     pub active_instance: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// Budget-Teil des Router-States (fürs Dashboard-Badge: „heute X $“).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RouterBudget {
+    #[serde(default)]
+    pub spent_today_usd: f64,
+    #[serde(default)]
+    pub spent_month_usd: f64,
+    #[serde(default)]
+    pub soft_eur: f64,
+    #[serde(default)]
+    pub hard_eur: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RouterState {
     #[serde(default)]
     pub slots: Vec<SlotState>,
     #[serde(default)]
     pub stt_sessions: u64,
+    #[serde(default)]
+    pub budget: Option<RouterBudget>,
+    /// Setzt das Dashboard-Proxy-Endpoint, wenn kein Router konfiguriert ist.
+    #[serde(default)]
+    pub configured: Option<bool>,
 }
 
 static STATE_CACHE: Lazy<Mutex<Option<(Instant, RouterState)>>> = Lazy::new(|| Mutex::new(None));
@@ -244,6 +262,16 @@ pub fn on_cold_response(slot_id: i64, state: &str) {
 /// blocks = ein Job ⇒ Router hält den Slot über die Lücken busy).
 pub fn job_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// Session-Start-Hook (pgpu-Bauplan §12.4 🟢): Beim Öffnen einer Chat-
+/// Session (Dashboard-WS) oder Discord-Voice-Join beide Slots anstoßen.
+/// Fire-and-forget + dedupliziert (30 s/Slot) — ein Kaltstart des LLM-Slots
+/// dauert bis 45 min; der Wake soll schon beim Öffnen laufen, nicht erst
+/// beim ersten Chat-Turn (der sonst 5× ins Retry läuft).
+pub fn wake_slots_for_session() {
+    ensure_awake_background(SLOT_LLM);
+    ensure_awake_background(SLOT_MEDIA);
 }
 
 /// Der ComfyUI-Proxy des Routers antwortet auf kaltem Slot mit 503 +

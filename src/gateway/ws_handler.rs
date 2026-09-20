@@ -55,6 +55,12 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<GatewayState>)
 }
 
 async fn handle_socket(socket: WebSocket, state: GatewayState) {
+    // GPU-Session-Hook (pgpu §12.4): Chat/Dashboard geöffnet → Slots
+    // vorwärmen. LLM-Kaltstart bis 45 min — der Wake soll beim Öffnen der
+    // Session laufen, nicht erst im ersten Turn (X-Router-Wait fängt nur
+    // bis 600 s). Fire-and-forget, dedupliziert (30 s/Slot).
+    crate::gpu_router::wake_slots_for_session();
+
     let (mut sender, mut receiver) = socket.split();
 
     while let Some(msg) = receiver.next().await {
