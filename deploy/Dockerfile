@@ -10,6 +10,11 @@
 FROM rust:1-bookworm AS praxis-build
 # audiopus/libopus (songbird) braucht cmake/pkg-config; libssl-dev als
 # Rückfall für künftige Nicht-rustls-Abhängigkeiten.
+# TARGETARCH (BuildKit/buildx): Multi-Arch-Builds dürfen target/ und die
+# Cargo-Registry NICHT ungeschützt teilen (Race beim Entpacken —
+# aws-lc-sys-Crash 20.09.): target pro Arch ins eigene Unterverzeichnis,
+# Registry mit sharing=locked.
+ARG TARGETARCH=""
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -30,9 +35,10 @@ COPY migrations/ migrations/
 COPY docs/ docs/
 COPY examples/ examples/
 RUN --mount=type=cache,target=/build/target \
-    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    CARGO_TARGET_DIR=/build/target/${TARGETARCH:-host} \
     cargo build --release --features songbird \
-    && cp target/release/praxis /praxis
+    && cp /build/target/${TARGETARCH:-host}/release/praxis /praxis
 
 # ------------------------------------------------------------- POML-CLI
 # POML-CLI ist ein Webpack-Bundle; die externals (sharp, pdfjs-dist …)
