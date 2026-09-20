@@ -44,4 +44,5 @@ if [ "$(id -u)" = "0" ]; then
     exec setpriv --reuid "$PUID" --regid "$PGID" --clear-groups "$0" "$@"
 fi
 
-exec "$@"
+# Als unprivilegierter User: Praxis-Binary mit den CMD-Argumenten starten.
+exec /opt/praxis/bin/praxis "$@"

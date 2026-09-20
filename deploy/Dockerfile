@@ -76,5 +76,4 @@ ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 VOLUME ["/opt/praxis/data", "/opt/praxis/contexts"]
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s \
     CMD curl -fs http://127.0.0.1:${GATEWAY_PORT:-3537}/health >/dev/null || exit 1
-ENTRYPOINT ["/opt/praxis/bin/praxis"]
 CMD ["run"]
