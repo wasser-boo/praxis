@@ -11,6 +11,23 @@ const SALT_FILE: &str = ".secrets_salt";
 const NONCE_SIZE: usize = 12;
 const SALT_SIZE: usize = 32;
 
+/// Basisverzeichnis des Secret-Stores. Default: Arbeitsverzeichnis (wie
+/// bisher). Container-Betrieb setzt `SECRETS_DIR` auf ein Volume, damit
+/// Store + Salt Container-Neustarts überleben.
+fn secrets_dir() -> std::path::PathBuf {
+    std::env::var("SECRETS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| ".".into())
+}
+
+fn secrets_file() -> std::path::PathBuf {
+    secrets_dir().join(ENCRYPTED_SECRETS_FILE)
+}
+
+fn salt_file() -> std::path::PathBuf {
+    secrets_dir().join(SALT_FILE)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EncryptedSecrets {
     pub ciphertext: String,
@@ -33,9 +50,9 @@ fn generate_salt() -> [u8; SALT_SIZE] {
 }
 
 fn load_or_create_salt() -> anyhow::Result<[u8; SALT_SIZE]> {
-    let path = Path::new(SALT_FILE);
+    let path = salt_file();
     if path.exists() {
-        let data = std::fs::read(path)?;
+        let data = std::fs::read(&path)?;
         if data.len() == SALT_SIZE {
             let mut salt = [0u8; SALT_SIZE];
             salt.copy_from_slice(&data);
@@ -44,7 +61,7 @@ fn load_or_create_salt() -> anyhow::Result<[u8; SALT_SIZE]> {
     }
 
     let salt = generate_salt();
-    std::fs::write(path, &salt)?;
+    std::fs::write(&path, &salt)?;
     tracing::info!("Generated new encryption salt");
     Ok(salt)
 }
@@ -96,13 +113,13 @@ pub fn decrypt(encrypted: &EncryptedSecrets, password: &str) -> anyhow::Result<S
 pub fn save_encrypted_secrets(secrets_json: &str, password: &str) -> anyhow::Result<()> {
     let encrypted = encrypt(secrets_json, password)?;
     let content = serde_json::to_string_pretty(&encrypted)?;
-    std::fs::write(ENCRYPTED_SECRETS_FILE, content)?;
-    tracing::info!("Saved encrypted secrets to {}", ENCRYPTED_SECRETS_FILE);
+    std::fs::write(secrets_file(), content)?;
+    tracing::info!("Saved encrypted secrets to {}", secrets_file().display());
     Ok(())
 }
 
 pub fn load_encrypted_secrets(password: &str) -> anyhow::Result<String> {
-    let path = Path::new(ENCRYPTED_SECRETS_FILE);
+    let path = secrets_file();
     if !path.exists() {
         return Err(anyhow::anyhow!("No encrypted secrets file found"));
     }
@@ -114,7 +131,7 @@ pub fn load_encrypted_secrets(password: &str) -> anyhow::Result<String> {
 }
 
 pub fn has_encrypted_secrets() -> bool {
-    Path::new(ENCRYPTED_SECRETS_FILE).exists()
+    secrets_file().exists()
 }
 
 pub fn verify_password(password: &str) -> bool {
@@ -278,5 +295,28 @@ mod security_tests {
 
         let plaintext = cipher2.decrypt(nonce2, ct.as_ref()).unwrap();
         assert_eq!(String::from_utf8(plaintext).unwrap(), "Hello, World!");
+    }
+
+    #[test]
+    fn secrets_dir_env_relocates_store_and_salt() {
+        // Container-Betrieb: SECRETS_DIR zeigt auf ein Volume — Store + Salt
+        // müssen dort leben (nicht im CWD), damit sie Container-Neustarts
+        // überleben. Env-Manipulation nur in diesem (serialisierten) Test:
+        // Sicherheitshalber prüfen wir, dass kein paralleler Test SECRETS_DIR
+        // setzt, und räumen ihn in jedem Fall auf.
+        let temp = tempfile::tempdir().unwrap();
+        // enc2 ist prozessglobal — wir ändern die Env nur, wenn sie nicht
+        // bereits belegt ist, und räumen deterministisch auf.
+        let guard = std::sync::Mutex::new(());
+        let _lock = guard.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SECRETS_DIR", temp.path());
+        let cleanup = || { std::env::remove_var("SECRETS_DIR"); };
+        assert!(!has_encrypted_secrets());
+        save_encrypted_secrets("{}", "container-test-key").unwrap();
+        assert!(temp.path().join("secrets.enc2").exists());
+        assert!(temp.path().join(".secrets_salt").exists());
+        assert_eq!(load_encrypted_secrets("container-test-key").unwrap(), "{}");
+        assert!(load_encrypted_secrets("wrong").is_err());
+        cleanup();
     }
 }

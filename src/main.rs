@@ -429,14 +429,55 @@ async fn run_services(
     enable_discord: bool,
     enable_dashboard: bool,
 ) -> anyhow::Result<()> {
-    // Check if we need master key for encrypted secrets
+    // Master-Key-Zustellung. Reihenfolge = Expositionsrisiko aufsteigend:
+    //   1. MASTER_KEY_FILE (Container-Standard: Root-Entrypoint kopiert den
+    //      Key auf ein tmpfs-File 0400, Praxis liest+LÖSCHT es — der Key ist
+    //      nie in argv/env, und die Datei existiert nur im Millisekunden-
+    //      Fenster des Starts, bevor der Agent überhaupt Befehle ausführen
+    //      kann. `sh -c env` und /proc/<pid>/environ bleiben sauber.)
+    //   2. MASTER_KEY-Env (einfach, aber vom Agenten lesbar — nur für
+    //      Umgebungen ohne Agent-Shell-Zugang)
+    //   3. --password argv (nur interaktiv/legacy; sichtbar in /proc/cmdline)
+    // Nach dem Lesen werden die Env-Variablen entfernt, damit kind-Prozesse
+    // (Agent-Terminal) sie nicht erben.
+    let delivered_master_key = || -> Option<String> {
+        let path = std::env::var("MASTER_KEY_FILE").ok()?;
+        std::env::remove_var("MASTER_KEY_FILE");
+        let key = std::fs::read_to_string(&path).ok()?.trim().to_string();
+        if key.is_empty() {
+            return None;
+        }
+        // Einmal-Zustellung: Datei löschen. Bei ro-Mounts nur loggen —
+        // dann mindestens mode 0400 + tmpfs sicherstellen (Deployment).
+        if let Err(e) = std::fs::remove_file(&path) {
+            tracing::debug!(%e, "MASTER_KEY_FILE nicht löschbar (ro-Mount?) — Agent-Schutz auf VM/mode beruht");
+        }
+        Some(key)
+    };
+    let env_master_key = || -> Option<String> {
+        let key = std::env::var("MASTER_KEY").ok()?;
+        std::env::remove_var("MASTER_KEY");
+        Some(key)
+    };
+
     let master_password = if praxis::db::secrets::has_secrets() {
         let stored_hash = std::env::var("PRAXIS_MASTER_KEY_HASH").ok();
 
-        let password = if let Some(pass) = cli_password.or_else(|| std::env::var("MASTER_KEY").ok())
-        {
+        let password = if let Some(pass) = cli_password {
+            pass
+        } else if let Some(pass) = delivered_master_key().or_else(env_master_key) {
             pass
         } else {
+            // Container-/Daemon-Betrieb ohne TTY: klare, handlungsfähige
+            // Meldung statt eines Prompts, der im Container hängt bzw.
+            // kryptisch abstirbt („alles per Env“, VPS-Deploy).
+            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                anyhow::bail!(
+                    "Encrypted secrets (secrets.enc2) vorhanden, aber kein MASTER_KEY geliefert. \
+                     Für Container-Betrieb MASTER_KEY_FILE setzen (Compose: secrets + Root-Entrypoint) \
+                     und neu starten."
+                );
+            }
             rpassword::prompt_password("Enter MASTER_KEY to unlock secrets: ")
                 .map_err(|e| anyhow::anyhow!("Failed to read password: {}", e))?
         };
@@ -453,6 +494,17 @@ async fn run_services(
             }
         }
 
+        Some(password)
+    } else if let Some(password) = delivered_master_key().or_else(env_master_key) {
+        // Erststart ohne Store, aber mit geliefertem Master-Key: leeren
+        // verschlüsselten Store anlegen — headless, ohne Onboarding-Prompt.
+        // Die eigentlichen Secrets (Discord-Token, Provider-Keys) trägt man
+        // danach über das Dashboard (Settings) ein; sie landen verschlüsselt
+        // im Store und sind für die Agent-Shell nie lesbar.
+        praxis::db::secrets::save_secrets(&praxis::db::secrets::Secrets::default(), &password)?;
+        tracing::info!(
+            "Erststart: leerer verschlüsselter Secret-Store angelegt — Secrets über das Dashboard (Settings) befüllen"
+        );
         Some(password)
     } else {
         None
