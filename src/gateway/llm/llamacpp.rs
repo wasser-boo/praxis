@@ -211,6 +211,17 @@ impl LLMProvider for LlamaCppProvider {
             .post(&url)
             .json(&body);
 
+        // GPU-Router (pgpu) vor dem LLM-Proxy: `X-Router-Wait` hält die
+        // Verbindung auf kaltem Slot bis healthy (impliziter Wake), statt
+        // sofort mit 503 zu antworten. 20.09.: ohne den Header failte der
+        // erste Chat nach Idle-Stopp 5× am Retry, weil der 1–2-min-Neustart
+        // länger dauerte als Backoff+Budget. Harmlos gegen jeden anderen
+        // Server; ohne GPU_ROUTER_URL bleibt wait_s 0 und der Header bleibt weg.
+        let router_wait = crate::gpu_router::wait_s();
+        if router_wait > 0 {
+            req = req.header(crate::gpu_router::HEADER_WAIT, router_wait);
+        }
+
         if let Some(ref key) = self.api_key {
             if !key.is_empty() {
                 req = req.header("Authorization", format!("Bearer {}", key));

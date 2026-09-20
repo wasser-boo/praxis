@@ -22,6 +22,18 @@ pub(crate) async fn handle_message_inner(
     crate::gateway::prompt::reset_task_completion(&state.db, user_id)?;
     // Route before deciding the path and before either prompt is rendered.
     let ctx = crate::gateway::prompt::prepare_runtime(state, user_id, content, None, channel_id)?;
+
+    // GPU-Router-Prewarm (pgpu §12.4): Wenn die Antwort per ComfyUI gesprochen
+    // wird, den media-Slot früh wecken — die Box wärmt, während das LLM noch
+    // generiert, statt beim Sprechen auf einen kalten Slot (503) zu laufen.
+    // No-op ohne GPU_ROUTER_URL; ensure_awake dedupliziert (30 s).
+    if matches!(
+        ctx.settings.voice_tts_type.as_str(),
+        "comfyui_qwen3" | "comfyui_xtts"
+    ) {
+        crate::gpu_router::ensure_awake_background(crate::gpu_router::SLOT_MEDIA);
+    }
+
     let max_turns = ctx.settings.max_llm_turns.unwrap_or(1);
 
     // Use agent loop when max_turns > 1

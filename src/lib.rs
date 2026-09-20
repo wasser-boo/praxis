@@ -8,6 +8,7 @@ pub mod db;
 pub mod discord;
 pub mod event_channel;
 pub mod gateway;
+pub mod gpu_router;
 pub mod onboard;
 pub mod plugins;
 pub mod skills;

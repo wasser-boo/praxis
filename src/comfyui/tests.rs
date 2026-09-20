@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 use std::time::Duration;
 use wiremock::{
-    matchers::{body_json, method, path, query_param},
+    matchers::{body_json, header_exists, method, path, query_param},
     Mock, MockServer, ResponseTemplate,
 };
 
@@ -531,4 +531,91 @@ fn comfyui_only_accepts_private_literal_endpoints() {
             "{url}"
         );
     }
+}
+
+#[tokio::test]
+async fn router_503_surfaces_cold_slot_state_instead_of_server_error() {
+    // GPU-Router-Semantik (pgpu): kalter Slot antwortet 503 + X-Router-State,
+    // das Backend erreicht der Request nie. Der Fehler muss das State melden
+    // (Wake-Logik läuft an) und darf NICHT als "job may have executed"
+    // durchgehen — es wurde nichts übermittelt.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("Retry-After", "10")
+                .insert_header("x-router-state", "downloading 42%"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let err = client(&server)
+        .execute(&workflow(), "test", dir.path(), None)
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("GPU-Slot downloading 42%"), "message: {msg}");
+    assert!(msg.contains("Wake angestoßen"), "message: {msg}");
+    assert!(!msg.contains("job may have executed"), "message: {msg}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_empty(dir.path());
+}
+
+#[tokio::test]
+async fn every_request_of_one_execute_shares_a_router_job_id() {
+    // Submit, History-Polls und Download einer Ausführung teilen EINE
+    // X-Router-Job-Id — der GPU-Router hält den Slot über Anfrage-Lücken
+    // (TTS-Sätze eines Antwortblocks) busy. Alle Mocks matchen nur MIT dem
+    // Header; fehlt er irgendwo, fällt der Request als unmatched durch.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .and(header_exists("x-router-job-id"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"prompt_id": "job-1", "node_errors": {}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/job-1"))
+        .and(header_exists("x-router-job-id"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(history("out.wav", "")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .and(query_param("filename", "out.wav"))
+        .and(header_exists("x-router-job-id"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(wav()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let artifact = client(&server)
+        .execute(&workflow(), "test", dir.path(), None)
+        .await
+        .unwrap();
+    assert!(artifact.path().exists());
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests.len() >= 3, "submit + poll + view erwartet");
+    let ids: Vec<Option<String>> = requests
+        .iter()
+        .map(|r| {
+            r.headers
+                .get("x-router-job-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        })
+        .collect();
+    assert!(ids.iter().all(|id| id.is_some()), "alle Requests mit Job-Id: {ids:?}");
+    let first = ids[0].clone().unwrap();
+    assert!(
+        ids.iter().all(|id| id.as_deref() == Some(first.as_str())),
+        "eine Job-Id pro Ausführung: {ids:?}"
+    );
 }

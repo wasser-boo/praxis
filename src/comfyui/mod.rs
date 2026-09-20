@@ -110,6 +110,10 @@ impl ComfyUiClient {
         cancellation: Option<&CancellationToken>,
     ) -> anyhow::Result<DownloadedFile> {
         let token = cancellation.cloned().unwrap_or_default();
+        // Ein execute() = ein Router-Job: X-Router-Job-Id verbindet Submit,
+        // History-Polls und Download zu einem Batch — der GPU-Router hält
+        // den Slot über Anfrage-Lücken busy (kein Idle-Stop mittendrin).
+        let job = crate::gpu_router::job_id();
         let mut progress = JobProgress {
             submitted: false,
             prompt_id: None,
@@ -118,7 +122,7 @@ impl ComfyUiClient {
         let result = tokio::select! {
             biased;
             _ = token.cancelled() => Err(anyhow::anyhow!("cancelled locally")),
-            result = tokio::time::timeout(self.timeout, self.execute_inner(workflow, output_node, directory, &mut progress)) => {
+            result = tokio::time::timeout(self.timeout, self.execute_inner(workflow, output_node, directory, &job, &mut progress)) => {
                 match result {
                     Ok(result) => result,
                     Err(_) => Err(anyhow::anyhow!("execution timed out (submission, queue, execution and download share one budget)")),
@@ -126,12 +130,25 @@ impl ComfyUiClient {
             }
         };
         progress.returned = true;
-        result.map_err(|error| anyhow::anyhow!(
-            "ComfyUI prompt {}: {error:#}. No automatic retry; {}",
-            progress.prompt_id.as_deref().unwrap_or("unknown"),
-            if progress.submitted { "job may have executed or remain queued/running. Check server history before retrying; no remote interrupt was sent" }
-            else { "no job submitted" }
-        ))
+        result.map_err(|error| {
+            // Router-503 (kalter Slot) niemals als "Job evtl. gelaufen"
+            // melden: Der Request hat das Backend nie erreicht. Stattdessen
+            // Slot wecken (nächster Versuch/Satz findet eine warme Box) und
+            // klar melden, dass dieser Versuch dem Fallback überlassen bleibt.
+            if let Some(cold) = error.downcast_ref::<crate::gpu_router::RouterCold>() {
+                crate::gpu_router::on_cold_response(crate::gpu_router::SLOT_MEDIA, &cold.state);
+                return anyhow::anyhow!(
+                    "ComfyUI nicht erreichbar: GPU-Slot {} (Router 503) — Wake angestoßen; kein Job übermittelt",
+                    cold.state
+                );
+            }
+            anyhow::anyhow!(
+                "ComfyUI prompt {}: {error:#}. No automatic retry; {}",
+                progress.prompt_id.as_deref().unwrap_or("unknown"),
+                if progress.submitted { "job may have executed or remain queued/running. Check server history before retrying; no remote interrupt was sent" }
+                else { "no job submitted" }
+            )
+        })
     }
 
     async fn execute_inner(
@@ -139,6 +156,7 @@ impl ComfyUiClient {
         workflow: &Value,
         output_node: &str,
         directory: &Path,
+        job: &str,
         progress: &mut JobProgress,
     ) -> anyhow::Result<DownloadedFile> {
         ensure!(
@@ -163,6 +181,7 @@ impl ComfyUiClient {
             .json(
                 self.http
                     .post(self.base.join("prompt")?)
+                    .header(crate::gpu_router::HEADER_JOB_ID, job)
                     .json(&serde_json::json!({"prompt": workflow}))
                     .send()
                     .await,
@@ -196,6 +215,7 @@ impl ComfyUiClient {
                 .json(
                     self.http
                         .get(self.base.join(&format!("history/{id}"))?)
+                        .header(crate::gpu_router::HEADER_JOB_ID, job)
                         .send()
                         .await,
                 )
@@ -262,6 +282,7 @@ impl ComfyUiClient {
         let response = self
             .http
             .get(self.base.join("view")?)
+            .header(crate::gpu_router::HEADER_JOB_ID, job)
             .query(&[
                 ("filename", descriptor.0.as_str()),
                 ("subfolder", descriptor.1.as_str()),
@@ -326,6 +347,23 @@ fn successful(response: Result<Response, reqwest::Error>) -> anyhow::Result<Resp
             anyhow::anyhow!("ComfyUI connection/request failed; check NetBird and server")
         }
     })?;
+    // GPU-Router (pgpu): kalter Slot antwortet 503 + X-Router-State statt
+    // das Backend zu erreichen. Typisiert markieren, damit execute() gezielt
+    // wake anstoßen kann — ein generisches "HTTP 503" würde als Server-
+    // Fehler durchgehen und den Slot kalt lassen.
+    if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        if let Some(state) = response
+            .headers()
+            .get("x-router-state")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+        {
+            return Err(anyhow::Error::new(crate::gpu_router::RouterCold {
+                state: state.clone(),
+            })
+            .context(format!("ComfyUI via GPU-Router: Slot {state} (HTTP 503)")));
+        }
+    }
     // No raw provider error body in logs/history: it can contain speech/prompts.
     ensure!(
         response.status().is_success(),
