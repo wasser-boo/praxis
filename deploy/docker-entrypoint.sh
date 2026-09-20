@@ -44,5 +44,13 @@ if [ "$(id -u)" = "0" ]; then
     exec setpriv --reuid "$PUID" --regid "$PGID" --clear-groups "$0" "$@"
 fi
 
-# Als unprivilegierter User: Praxis-Binary mit den CMD-Argumenten starten.
+# Als unprivilegierter User: Erststart/Repair der einkompilierten Assets
+# (static/, Workflows, Skills …) auf die Disk — idempotent (created/preserved),
+# offline, fasst keine Secrets/DB/State an. OHNE das ist ein frischer
+# Container dashboard-blind (/static/app.js, /logo.png → 404; 21.09. live
+# auf dem NAS gesehen — Assets liegen nicht im Image, sondern in der Binary).
+/opt/praxis/bin/praxis repair-assets --directory /opt/praxis \
+    || echo "warning: repair-assets failed — Dashboard evtl. ohne Assets"
+
+# Praxis-Binary mit den CMD-Argumenten starten.
 exec /opt/praxis/bin/praxis "$@"
