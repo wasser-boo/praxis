@@ -93,6 +93,44 @@ LLM calls share bounded retries, provider/account concurrency limits, optional R
 
 See [LLM resilience and safe rollout](docs/LLM_RESILIENCE.md) for configuration, streaming safety, tests, and the Ollama working-directory repair.
 
+### GPU-Router-Integration (pgpu, Bauplan §12.4)
+
+Wenn Praxis seine LLM-/TTS-/STT-Backends über den pgpu-GPU-Router erreicht
+(`LLAMACPP_API_BASE`/`COMFYUI_BASE_URL`/`VOSK_SERVER_URL` auf die Router-IP,
+Ports identisch zum Direktbetrieb):
+
+```env
+GPU_ROUTER_URL=http://100.105.6.69:8080   # Dashboard/API des Routers
+GPU_ROUTER_TOKEN=<ROUTER_TOKEN>           # gleicher Token wie im Router-Deploy
+GPU_ROUTER_WAIT_S=120                     # Hold-Fenster auf kaltem Slot (Default 120)
+```
+
+Ohne `GPU_ROUTER_URL` sind alle Funktionen No-Ops (lokaler Betrieb bleibt
+unberührt). Damit:
+- hält der Router kalte Slots über `X-Router-Wait` bis healthy wach
+  (impliziter Wake) — der erste Chat nach Idle-Stopp geht durch, statt am
+  Retry-Backoff zu scheitern,
+- antwortet der ComfyUI-Proxy auf kaltem media-Slot mit 503 +
+  `X-Router-State`; Praxis stößt Wake an und scheitert schnell + klar
+  („GPU-Slot warming — kein Job übermittelt“) statt irrelevanter
+  Server-Fehler-Meldungen,
+- hält `X-Router-Job-Id` den Slot über die Lücken zwischen TTS-Sätzen
+  eines Antwortblocks busy (kein Idle-Stop mittendrin),
+- wärmt der media-Slot preemptiv, während die Antwort noch generiert
+  (nur wenn die Antwort im Kanal wirklich gesprochen wird).
+
+### VPS-/Container-Deploy (mit GPU-Router + NetBird in einer Compose)
+
+`bash deploy/build.sh [--push]` baut `vayayo/praxis` (Binary mit songbird,
+Node + gebündeltes POML-CLI). Die komplette Stack-Compose (NetBird-Peer,
+GPU-Router, STT, Praxis — ein Netzwerk-Namespace, kein Port-Publishing)
+liegt im pgpu-Repo: `pgpu/deploy/vps-compose.yml`, Anleitung
+`pgpu/deploy/vps/README.md`. Sicherheitsmodell dort: Secrets nur im
+verschllüsselten Store (Dashboard-Settings), Master-Key-Zustellung per
+Root-Entrypoint → tmpfs → lesen+löschen (nie in env/argv — die Agent-Shell
+im shared VM-mode kann Store und Key nicht lesen), Erststart legt headless
+einen leeren Store an (`MASTER_KEY_FILE`, `SECRETS_DIR`).
+
 ## VM Mode
 
 When `VM_ENABLED=true`, the LLM gets access to QEMU VM tools:
