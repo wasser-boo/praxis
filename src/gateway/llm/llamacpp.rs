@@ -25,11 +25,124 @@ impl LlamaCppProvider {
     }
 }
 
+/// Merge all system-role messages into ONE leading system message.
+///
+/// llama.cpp chat templates hard-reject a system message anywhere but index
+/// 0 (Qwen3.6 GGUF: `Jinja Exception: System message must be at the
+/// beginning` -> HTTP 500). Praxis injects system-role notices mid-history
+/// (prompt-change notice, compaction summary, omitted-images notice) which
+/// cloud providers tolerate. Non-system messages keep their original
+/// relative order (tool chains stay attached to their tool_calls).
+fn normalize_system_messages(messages: &mut Vec<ChatMessage>) {
+    let mut system_texts: Vec<String> = Vec::new();
+    let mut system_parts: Option<Vec<ContentPart>> = None;
+    let mut rest: Vec<ChatMessage> = Vec::new();
+    for m in messages.drain(..) {
+        if m.role == "system" {
+            if let Some(t) = m.content.as_ref() {
+                if !t.is_empty() {
+                    system_texts.push(t.clone());
+                }
+            }
+            if system_parts.is_none() && m.content_parts.as_ref().is_some_and(|p| !p.is_empty()) {
+                system_parts = m.content_parts;
+            }
+        } else {
+            rest.push(m);
+        }
+    }
+    if system_texts.is_empty() && system_parts.is_none() {
+        *messages = rest;
+        return;
+    }
+    let merged = ChatMessage {
+        role: "system".into(),
+        content: (!system_texts.is_empty()).then(|| system_texts.join("\n\n")),
+        reasoning_content: None,
+        content_parts: system_parts,
+        tool_calls: None,
+        tool_call_id: None,
+        tool_name: None,
+    };
+    rest.insert(0, merged);
+    *messages = rest;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.into(),
+            content: Some(content.into()),
+            reasoning_content: None,
+            content_parts: None,
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+        }
+    }
+
+    #[test]
+    fn mid_history_system_messages_merge_into_leading_slot() {
+        // Reproduces the 2026-09-20 GPU-router incident: Praxis sent a
+        // system notice mid-history and Qwen3.6's template rejected with 500.
+        let mut msgs = vec![
+            msg("system", "Du bist ein Assistent."),
+            msg("user", "Frage 1"),
+            msg("assistant", "Antwort 1"),
+            msg("system", "nachträgliche Notiz"),
+            msg("user", "Frage 2"),
+        ];
+        normalize_system_messages(&mut msgs);
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[0].content.as_deref(), Some("Du bist ein Assistent.\n\nnachträgliche Notiz"));
+        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[1].content.as_deref(), Some("Frage 1"));
+        assert_eq!(msgs[2].role, "assistant");
+        assert_eq!(msgs[3].content.as_deref(), Some("Frage 2"));
+    }
+
+    #[test]
+    fn no_system_messages_stays_untouched() {
+        let mut msgs = vec![msg("user", "hi"), msg("assistant", "hey")];
+        normalize_system_messages(&mut msgs);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+    }
+
+    #[test]
+    fn tool_chain_order_is_preserved() {
+        let mut msgs = vec![
+            msg("system", "sys"),
+            msg("user", "q"),
+            msg("assistant", "a"),
+            msg("system", "notice"),
+            msg("tool", "tool-result"),
+            msg("user", "next"),
+        ];
+        normalize_system_messages(&mut msgs);
+        let roles: Vec<&str> = msgs.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["system", "user", "assistant", "tool", "user"]);
+    }
+}
+
 #[async_trait]
 impl LLMProvider for LlamaCppProvider {
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let url = format!("{}/v1/chat/completions", self.base_url);
 
+        // llama.cpp chat templates (e.g. Qwen3.6 GGUF) hard-reject system
+        // messages that are not the FIRST message: 'Jinja Exception: System
+        // message must be at the beginning' -> HTTP 500. Praxis legitimately
+        // injects system-role notices mid-history (prompt-change notice,
+        // compaction summary, omitted-history-images notice), which cloud
+        // providers tolerate. Normalize for llama.cpp: merge all system
+        // messages into a single leading system message, original order kept.
+        let mut request = request;
+        normalize_system_messages(&mut request.messages);
         let model = request.model.as_deref().unwrap_or(&self.model);
 
         let mut messages: Vec<serde_json::Value> = Vec::new();
