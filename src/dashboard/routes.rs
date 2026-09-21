@@ -170,12 +170,22 @@ fn sync_templates_dir(db: &crate::db::Database, dir: &std::path::Path, prefix: &
 }
 
 pub fn routes(db: crate::db::Database) -> Router {
-    let secrets = crate::db::secrets::get_secrets();
+    let secrets_src = crate::db::secrets::get_secrets();
     let config = crate::config::Config::from_env();
+    // Transparenz: Der Store ÜBERSCHREIBT die Env-Werte (Feature: Passwort-
+    // Rotation ohne Redeploy) — aber ein versehentlich ins Secrets-Formular
+    // geschriebener Wert führt sonst zu einem Rätsel-Login (21.09. live
+    // passiert). Beim Start deutlich loggen:
+    if secrets_src.dashboard_admin_password.is_some() {
+        tracing::warn!("Dashboard-Passwort kommt aus dem Secret-Store (überschreibt DASHBOARD_ADMIN_PASSWORD aus der Env)");
+    }
+    if secrets_src.gateway_api_key.is_some() {
+        tracing::warn!("Gateway-API-Key kommt aus dem Secret-Store (überschreibt GATEWAY_API_KEY aus der Env)");
+    }
     let state = Arc::new(DashboardState {
         db,
-        gateway_api_key: secrets.gateway_api_key.unwrap_or(config.gateway_api_key),
-        admin_password: secrets
+        gateway_api_key: secrets_src.gateway_api_key.unwrap_or(config.gateway_api_key),
+        admin_password: secrets_src
             .dashboard_admin_password
             .unwrap_or(config.dashboard_admin_password),
     });
@@ -1031,6 +1041,9 @@ async fn get_secrets() -> Result<Json<SecretsInfo>, StatusCode> {
 
 async fn update_secrets(Json(update): Json<SecretsUpdate>) -> Result<String, StatusCode> {
     let mut secrets = crate::db::secrets::get_secrets();
+    // Felder, die wegen Leer-Werten übersprungen wurden (Selbst-Zugangs-
+    // daten dürfen nie mit "" in den Store — sonst Login/Gateway-401).
+    let mut skipped: Vec<&str> = Vec::new();
 
     if let Some(v) = update.discord_bot_token {
         secrets.discord_bot_token = Some(v);
@@ -1057,10 +1070,21 @@ async fn update_secrets(Json(update): Json<SecretsUpdate>) -> Result<String, Sta
         secrets.elevenlabs_api_key = Some(v);
     }
     if let Some(v) = update.gateway_api_key {
-        secrets.gateway_api_key = Some(v);
+        // Selbst-Zugangsdaten: Leere Werte würden Login/Gateway still mit ""
+        // in den Store schreiben (Store > Env) → Lockout/401 bis Store-Reset.
+        // Leere = überspringen (Nichts senden = unverändert).
+        if v.trim().is_empty() {
+            skipped.push("gateway_api_key");
+        } else {
+            secrets.gateway_api_key = Some(v);
+        }
     }
     if let Some(v) = update.dashboard_admin_password {
-        secrets.dashboard_admin_password = Some(v);
+        if v.trim().is_empty() {
+            skipped.push("dashboard_admin_password");
+        } else {
+            secrets.dashboard_admin_password = Some(v);
+        }
     }
 
     for (k, v) in update.custom {
@@ -1070,6 +1094,12 @@ async fn update_secrets(Json(update): Json<SecretsUpdate>) -> Result<String, Sta
             secrets.custom.insert(k, v);
         }
     }
+
+    let skipped_note = if skipped.is_empty() {
+        String::new()
+    } else {
+        format!(" (leere Werte ignoriert: {})", skipped.join(", "))
+    };
 
     // Persist to enc2 if master password provided
     if let Some(ref password) = update.master_password {
@@ -1088,10 +1118,13 @@ async fn update_secrets(Json(update): Json<SecretsUpdate>) -> Result<String, Sta
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
         crate::db::secrets::init_secrets(secrets);
-        Ok("Secrets saved and encrypted.".to_string())
+        Ok(format!("Secrets saved and encrypted.{}", skipped_note))
     } else {
         crate::db::secrets::init_secrets(secrets);
-        Ok("Secrets updated in memory. Provide master_password to persist to disk.".to_string())
+        Ok(format!(
+            "Secrets updated in memory. Provide master_password to persist to disk.{}",
+            skipped_note
+        ))
     }
 }
 
