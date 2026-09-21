@@ -196,6 +196,9 @@ pub async fn wake(slot_id: i64) -> bool {
     if !cfg.token.is_empty() {
         request = request.bearer_auth(&cfg.token);
     }
+    // Force: auch bei ausgeschalteter Auto-Miete (Nacht-Sleep) wecken —
+    // Praxis ist der authentifizierte Auslöser, Budget-Caps greifen weiter.
+    request = request.json(&serde_json::json!({ "force": true }));
     match request.send().await {
         Ok(response) if response.status().is_success() => {
             tracing::info!(slot = slot_id, "GPU-Router: Slot geweckt");

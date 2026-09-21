@@ -476,9 +476,9 @@ impl EventHandler for DiscordHandler {
                         .to_ascii_lowercase();
                     let reply = match self.db.get_pairing_by_discord(&discord_user_id) {
                         Ok(Some(pairing)) => {
-                            let valid = matches!(mode.as_str(), "on" | "off" | "auto");
+                            let valid = matches!(mode.as_str(), "on" | "off" | "auto" | "low" | "medium" | "high" | "xhigh");
                             if !valid {
-                                "Invalid mode. Use on, off, or auto.".to_string()
+                                "Invalid mode. Use off, low, medium, high, xhigh, on, or auto.".to_string()
                             } else {
                                 match crate::context_cmd::parse(&format!("/context set settings.thinking_mode={mode}")) {
                                     Ok(op) => {

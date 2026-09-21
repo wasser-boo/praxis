@@ -23,14 +23,36 @@ pub struct ChatRequest {
 pub enum ThinkingMode {
     On,
     Off,
+    Low,
+    Medium,
+    High,
+    Xhigh,
 }
 
 impl ThinkingMode {
+    /// Setting-String → Mode. Stufen (Qwen3.8 thinking levels): off → xhigh;
+    /// "on" = Alias High, "auto"/unbekannt = None (Provider-Default).
     pub fn from_setting(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "on" | "true" | "1" => Some(Self::On),
-            "off" | "false" | "0" => Some(Self::Off),
+            "off" | "false" | "0" | "none" => Some(Self::Off),
+            "low" => Some(Self::Low),
+            "medium" | "med" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" | "extra_high" | "max" => Some(Self::Xhigh),
             _ => None,
+        }
+    }
+
+    /// Provider-übergreifender Level-Name ("low"/"medium"/"high"/"xhigh");
+    /// On → "high", Off → None.
+    pub fn level(&self) -> Option<&'static str> {
+        match self {
+            Self::On | Self::High => Some("high"),
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::Xhigh => Some("xhigh"),
+            Self::Off => None,
         }
     }
 }

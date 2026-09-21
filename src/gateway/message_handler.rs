@@ -23,8 +23,16 @@ pub(crate) async fn handle_message_inner(
     // Route before deciding the path and before either prompt is rendered.
     let ctx = crate::gateway::prompt::prepare_runtime(state, user_id, content, None, channel_id)?;
 
-    // GPU-Router-Prewarm (pgpu §12.4): Wenn die Antwort per ComfyUI gesprochen
-    // wird, den media-Slot früh wecken — die Box wärmt, während das LLM noch
+    // GPU-Router-Prewarm (pgpu §12.4): LLM-Slot VOR dem Turn wecken (await —
+    //Wake + State-Check sind <1 s). Nachts (20:00-Sleep = auto_rent aus)
+    // ist force-wake der einzige Weg hoch; X-Router-Wait allein würde sofort
+    // mit 503 auto_rent_off abgewiesen. Danach hält X-Router-Wait die LLM-
+    // Anfrage selbst bis healthy (Restart ~1-2 min) — die Nachricht WARTET
+    // also auf die geladene Box und wird danach beantwortet.
+    if crate::gpu_router::configured() {
+        let _ = crate::gpu_router::ensure_awake(crate::gpu_router::SLOT_LLM).await;
+    }
+    // Media-Slot früh wecken — die Box wärmt, während das LLM noch
     // generiert, statt beim Sprechen auf einen kalten Slot (503) zu laufen.
     // Nur wenn die Antwort in DIESEM Kanal wirklich gesprochen wird — sonst
     // mietet ein Web-Chat ohne web_chat_tts eine Media-Box für nichts.

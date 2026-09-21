@@ -198,13 +198,31 @@ impl LLMProvider for LlamaCppProvider {
             messages.push(msg);
         }
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
             "tools": request.tools,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
         });
+        // Qwen3.8 thinking levels: llama.cpp nimmt Stufen über
+        // chat_template_kwargs (enable_thinking + reasoning_effort — das
+        // Qwen3.8-Template kennt off/low/medium/high/xhigh). Der Level geht
+        // zusätzlich top-level als reasoning_effort raus (je nach Server-
+        // Build wird eines von beiden gelesen; llama.cpp ignoriert Unknowns).
+        match request.thinking {
+            Some(t) if t.level().is_none() => {
+                body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
+            }
+            Some(t) => {
+                body["chat_template_kwargs"] = serde_json::json!({
+                    "enable_thinking": true,
+                    "reasoning_effort": t.level(),
+                });
+                body["reasoning_effort"] = serde_json::json!(t.level());
+            }
+            None => {}
+        }
 
         let mut req = self
             .client

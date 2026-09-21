@@ -171,14 +171,18 @@ pub async fn setup_commands(http: &serenity::http::Http) -> anyhow::Result<()> {
     http.create_global_command(&skill_cmd).await?;
 
     let thinking_cmd = serenity::builder::CreateCommand::new("thinking")
-        .description("Toggle extended reasoning (thinking) for your model")
+        .description("Set thinking level for your model (off/low/medium/high/xhigh)")
         .add_option(serenity::builder::CreateCommandOption::new(
             serenity::model::application::CommandOptionType::String,
             "mode", "on, off, or auto (provider default)"
         )
         .required(true)
-        .add_string_choice("on — enable extended reasoning", "on")
-        .add_string_choice("off — disable extended reasoning", "off")
+        .add_string_choice("off — no thinking", "off")
+        .add_string_choice("low", "low")
+        .add_string_choice("medium", "medium")
+        .add_string_choice("high", "high")
+        .add_string_choice("xhigh — maximum reasoning", "xhigh")
+        .add_string_choice("on — alias for high", "on")
         .add_string_choice("auto — provider default", "auto"))
         .dm_permission(true);
     http.create_global_command(&thinking_cmd).await?;
@@ -512,9 +516,13 @@ pub fn register_commands() -> Vec<serde_json::Value> {
         serde_json::json!({
             "name": "thinking",
             "description": "Toggle extended reasoning (thinking) for your model",
-            "options": [{"type": 3, "name": "mode", "description": "on, off, or auto (provider default)", "required": true, "choices": [
-                {"name": "on", "value": "on"},
+            "options": [{"type": 3, "name": "mode", "description": "off, low, medium, high, xhigh, on (alias high), or auto", "required": true, "choices": [
                 {"name": "off", "value": "off"},
+                {"name": "low", "value": "low"},
+                {"name": "medium", "value": "medium"},
+                {"name": "high", "value": "high"},
+                {"name": "xhigh", "value": "xhigh"},
+                {"name": "on", "value": "on"},
                 {"name": "auto", "value": "auto"}
             ]}]
         }),

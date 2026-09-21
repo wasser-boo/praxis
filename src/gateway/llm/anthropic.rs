@@ -36,15 +36,27 @@ impl LLMProvider for AnthropicProvider {
         // Extended thinking: Anthropic requires an explicit token budget and
         // forbids temperature overrides alongside it.
         match request.thinking {
-            Some(super::provider::ThinkingMode::On) => {
-                let budget = request.max_tokens.map(|t| (t / 2).max(1024)).unwrap_or(2048);
+            Some(t) if t.level().is_some() => {
+                // Stufen → Budget-Scala: low 1k, medium 2k, high 4k, xhigh 8k
+                // (Anthropic kennt keine Level, nur Token-Budget).
+                let budget = request.max_tokens.map(|m| (m / 2).max(1024)).unwrap_or(match t.level() {
+                    Some("low") => 1024,
+                    Some("medium") => 2048,
+                    Some("xhigh") => 8192,
+                    _ => 4096,
+                }).min(match t.level() {
+                    Some("low") => 2048,
+                    Some("medium") => 4096,
+                    Some("xhigh") => 16384,
+                    _ => 8192,
+                });
                 body["thinking"] = serde_json::json!({ "type": "enabled", "budget_tokens": budget });
                 body.as_object_mut().map(|o| o.remove("temperature"));
             }
             Some(super::provider::ThinkingMode::Off) => {
                 body["thinking"] = serde_json::json!({ "type": "disabled" });
             }
-            None => {}
+            _ => {}
         }
 
         if !system_prompt.is_empty() {

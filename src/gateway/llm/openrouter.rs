@@ -89,11 +89,11 @@ impl LLMProvider for OpenRouterProvider {
         // Extended reasoning: OpenRouter normalizes `reasoning.exclude` (hide
         // the trace) and `reasoning.enabled` for capable models.
         match request.thinking {
-            Some(super::provider::ThinkingMode::Off) => {
+            Some(t) if t.level().is_none() => {
                 body["reasoning"] = serde_json::json!({ "exclude": true, "enabled": false });
             }
-            Some(super::provider::ThinkingMode::On) => {
-                body["reasoning"] = serde_json::json!({ "enabled": true });
+            Some(t) => {
+                body["reasoning"] = serde_json::json!({ "enabled": true, "effort": t.level() });
             }
             None => {}
         }

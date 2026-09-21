@@ -41,10 +41,13 @@ impl OllamaProvider {
             "stream": true,
         });
         add_tools(&mut body, &request);
-        if let Some(super::provider::ThinkingMode::Off) = request.thinking {
-            body["think"] = serde_json::json!(false);
-        } else if let Some(super::provider::ThinkingMode::On) = request.thinking {
-            body["think"] = serde_json::json!(true);
+        // Ollama-API: think = false | true | "low"|"medium"|"high"|"xhigh"
+        // (Stufen-Strings durchlaufen den Fork bis ins Qwen3.8-Template).
+        if let Some(t) = request.thinking {
+            body["think"] = match t.level() {
+                Some(lvl) => serde_json::json!(lvl),
+                None => serde_json::json!(false),
+            };
         }
 
         tracing::debug!(message_count = messages.len(), "Ollama streaming request prepared");
@@ -114,10 +117,13 @@ impl LLMProvider for OllamaProvider {
             "stream": false,
         });
         add_tools(&mut body, &request);
-        if let Some(super::provider::ThinkingMode::Off) = request.thinking {
-            body["think"] = serde_json::json!(false);
-        } else if let Some(super::provider::ThinkingMode::On) = request.thinking {
-            body["think"] = serde_json::json!(true);
+        // Ollama-API: think = false | true | "low"|"medium"|"high"|"xhigh"
+        // (Stufen-Strings durchlaufen den Fork bis ins Qwen3.8-Template).
+        if let Some(t) = request.thinking {
+            body["think"] = match t.level() {
+                Some(lvl) => serde_json::json!(lvl),
+                None => serde_json::json!(false),
+            };
         }
 
         tracing::debug!(message_count = messages.len(), "Ollama request prepared");
