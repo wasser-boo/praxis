@@ -1073,6 +1073,17 @@ async fn update_secrets(Json(update): Json<SecretsUpdate>) -> Result<String, Sta
 
     // Persist to enc2 if master password provided
     if let Some(ref password) = update.master_password {
+        // Trim wie beim Start (MASTER_KEY_FILE wird beim Lesen getrimmt):
+        // Copy-Paste-Zeilenümbrüche dürfen kein Re-Keying auslösen.
+        let password = password.trim();
+        // Guard: Bei vorhandenem Store MUSS das Feld den AKTUELLEN Master-Key
+        // öffnen (echter Decrypt-Test). Ohne Check verschlüsselt save_secrets
+        // den Store still mit einem evtl. falschen Wert NEU → nächster Start
+        // „Invalid MASTER_KEY (hash mismatch)" (21.09. live passiert: Secret
+        // im Dashboard geändert, Restart brickte).
+        if crate::db::secrets::has_secrets() && !crate::db::enc2::verify_password(password) {
+            return Ok("Falsches Master-Passwort — NICHTS gespeichert, Store unverändert. (Feld = exakter Inhalt von vps/master_key)".to_string());
+        }
         if let Err(_e) = crate::db::secrets::save_secrets(&secrets, password) {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }

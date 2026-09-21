@@ -2233,7 +2233,7 @@ async function saveSecret() {
     try {
         const res = await apiFetch('/api/secrets', { method: 'PUT', body: JSON.stringify(body) });
         msgEl.textContent = await res.text();
-        msgEl.style.color = 'var(--success)'; msgEl.classList.remove('hidden');
+        msgEl.style.color = msgEl.textContent.startsWith('Falsches') ? 'var(--error)' : 'var(--success)'; msgEl.classList.remove('hidden');
         document.getElementById('secret-value').value = '';
         document.getElementById('secret-master').value = '';
         setTimeout(loadSecrets, 1500);
@@ -2251,7 +2251,7 @@ async function addCustomSecret() {
     try {
         const res = await apiFetch('/api/secrets', { method: 'PUT', body: JSON.stringify(body) });
         msgEl.textContent = await res.text();
-        msgEl.style.color = 'var(--success)'; msgEl.classList.remove('hidden');
+        msgEl.style.color = msgEl.textContent.startsWith('Falsches') ? 'var(--error)' : 'var(--success)'; msgEl.classList.remove('hidden');
         document.getElementById('custom-secret-key').value = '';
         document.getElementById('custom-secret-value').value = '';
         document.getElementById('custom-secret-master').value = '';
