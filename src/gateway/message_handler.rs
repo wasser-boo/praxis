@@ -234,8 +234,7 @@ role: "system".to_string(),
                 }
             }
 
-            let limit = ctx.settings.tool_result_limit.unwrap_or(2000).max(0) as usize;
-            let stored_result = crate::gateway::prompt::truncate_tool_result(&final_result, limit);
+            let stored_result = crate::gateway::tool_results::prepare_for_call(&state.db, user_id, tc, &final_result)?;
             let msg = if let Some(parts) = image_content_parts {
                 crate::db::messages::Message::tool_with_image(
                     stored_result.clone(),
@@ -587,6 +586,10 @@ async fn execute_tool_call(
         Err(e) => return format!("Error parsing arguments: {}", e),
     };
 
+    let args = match crate::tools::tool_output::execution_args(&args) {
+        Ok(args) => args,
+        Err(error) => return format!("Error: {error}; tool not executed"),
+    };
     let ctx_data = db
         .load_context(user_id)
         .ok()
@@ -597,6 +600,8 @@ async fn execute_tool_call(
     let plugin_secrets = plugins.secrets_for_tool(&tc.function.name, &all_secrets);
 
     match tc.function.name.as_str() {
+        "read_tool_result" => crate::tools::tool_output::run(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
         "search_tools" => crate::tools::discovery::search(db, plugins, user_id, &args)
             .unwrap_or_else(|e| format!("Error: {e}")),
         "memory_profile_create" => crate::tools::memory::profile_create(db, user_id, &args)
@@ -616,20 +621,7 @@ async fn execute_tool_call(
         "execute_terminal" => {
             let command = args["command"].as_str().unwrap_or("");
             match crate::tools::execute_terminal::execute_terminal(command, None).await {
-                Ok(result) => {
-                    if result.exit_code == 0 {
-                        if result.stdout.is_empty() {
-                            "Command executed successfully (no output)".to_string()
-                        } else {
-                            result.stdout
-                        }
-                    } else {
-                        format!(
-                            "Exit code: {}\nStdout: {}\nStderr: {}",
-                            result.exit_code, result.stdout, result.stderr
-                        )
-                    }
-                }
+                Ok(result) => result.render(),
                 Err(e) => format!("Error: {}", e),
             }
         }
@@ -658,20 +650,7 @@ async fn execute_tool_call(
         }
         "read_file" => {
             let path = args["path"].as_str().unwrap_or("");
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    if content.len() > 10000 {
-                        format!(
-                            "{}...\n\n[File truncated - {} bytes total]",
-                            crate::util::truncate_chars(&content, 10000),
-                            content.len()
-                        )
-                    } else {
-                        content
-                    }
-                }
-                Err(e) => format!("Error reading file: {}", e),
-            }
+            crate::tools::read_file::run(path).await.unwrap_or_else(|e| format!("Error reading file: {e}"))
         }
         "get_context" => match db.load_context(user_id) {
             Ok(ctx) => serde_json::to_string_pretty(&ctx)

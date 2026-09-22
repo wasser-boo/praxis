@@ -143,6 +143,7 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
 
 fn get_default_tools() -> Vec<Tool> {
     vec![
+        crate::tools::tool_output::definition(),
         Tool {
             name: "search_tools".into(),
             description: Some("Search enabled builtin/plugin capabilities by name or keywords and load matching schemas for the NEXT model turn in this task. Start here for web search, memory/SRS, media, Discord, VM, scheduling or other non-core tools. Never enables disabled tools. Use precise queries; do not enumerate the catalog.".into()),

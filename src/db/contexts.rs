@@ -224,6 +224,8 @@ pub struct ContextSettings {
     pub history_token_limit: Option<usize>,
     /// Max characters persisted per tool result; raw beyond this is trimmed.
     #[serde(default)]
+    // Legacy saved setting; model-facing tool responses now default to full text.
+    // Per-call _output controls replace this destructive global clipping limit.
     pub tool_result_limit: Option<usize>,
     #[serde(default)]
     pub compaction_token_limit: Option<usize>,
@@ -590,6 +592,7 @@ impl Database {
     pub fn delete_context(&self, user_id: &str) -> anyhow::Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        tx.execute("DELETE FROM tool_outputs WHERE owner_id=?1", [user_id])?;
         // '%' and '_' in user IDs are literal, never SQL wildcard selectors.
         let prefix = format!("{user_id}:::");
         for table in [
@@ -724,6 +727,7 @@ impl Database {
 
     pub fn delete_session(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
         let conn = self.conn();
+        super::tool_outputs::clear_session(&conn, user_id, session_id)?;
         conn.execute(
             "DELETE FROM memory_profile_selections WHERE user_id=?1 AND session_id=?2",
             rusqlite::params![
@@ -782,11 +786,11 @@ impl Database {
 
     pub fn clear_session_messages(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
         let key = Self::context_key(user_id, session_id);
-        let conn = self.conn();
-        conn.execute(
-            "DELETE FROM messages WHERE user_id = ?1",
-            rusqlite::params![key],
-        )?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        super::tool_outputs::clear_session(&tx, user_id, session_id)?;
+        tx.execute("DELETE FROM messages WHERE user_id = ?1", rusqlite::params![key])?;
+        tx.commit()?;
         Ok(())
     }
 }

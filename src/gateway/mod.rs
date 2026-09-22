@@ -11,6 +11,7 @@ pub mod prompt_change;
 pub mod rate_limiter;
 pub mod task_control;
 pub mod templates;
+pub mod tool_results;
 pub mod ws_handler;
 
 use std::sync::Arc;
@@ -91,6 +92,9 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
             // Housekeeping: drop old finished background jobs so the
             // in-memory registry cannot grow without bound.
             crate::tools::execute_terminal::cleanup_finished_jobs();
+            if let Err(error) = cron_db.prune_tool_outputs() {
+                tracing::warn!(%error, "Tool-output retention cleanup failed");
+            }
         }
     });
 

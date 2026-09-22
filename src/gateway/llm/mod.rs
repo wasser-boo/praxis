@@ -135,6 +135,17 @@ impl LLMRouter {
         model: Option<&str>,
     ) -> anyhow::Result<ChatWithToolsResult> {
         let _task = crate::gateway::task_control::begin(user_id)?;
+        let mut tools = tools;
+        for tool in &mut tools { crate::tools::tool_output::augment_definition(tool); }
+        if !tools.is_empty() && crate::db::tools::get(db, "read_tool_result").is_ok_and(|t| t.is_enabled) {
+            if !tools.iter().any(|t| t.function.name == "read_tool_result") {
+                if let Some(reader) = crate::db::tools::to_tool_definitions(db)?.into_iter().find(|t| t.function.name == "read_tool_result") {
+                    tools.push(reader);
+                }
+            }
+            messages.push(provider::ChatMessage { role: "system".into(), content: Some(crate::tools::tool_output::INSTRUCTIONS.into()),
+                reasoning_content: None, content_parts: None, tool_calls: None, tool_call_id: None, tool_name: None });
+        }
         let cancel = crate::gateway::task_control::cancellation(user_id).unwrap_or_default();
         let max_iterations = max_iterations.unwrap_or(200);
         let mut iteration = 0;
@@ -196,10 +207,22 @@ impl LLMRouter {
                 let args: serde_json::Value =
                     serde_json::from_str(&tool_call.function.arguments).unwrap_or_default();
 
-                tracing::info!(tool = %tool_call.function.name, args = %tool_call.function.arguments, "Executing tool call");
+                let args = match crate::tools::tool_output::execution_args(&args) {
+                    Ok(args) => args,
+                    Err(error) => {
+                        let result = format!("Error: {error}; tool not executed");
+                        tool_call_records.push(ToolCallRecord { name: tool_call.function.name.clone(), arguments: tool_call.function.arguments.clone(), result: result.clone() });
+                        messages.push(provider::ChatMessage { role: "tool".into(), content: Some(result), reasoning_content: None,
+                            content_parts: None, tool_calls: None, tool_call_id: Some(tool_call.id.clone()), tool_name: Some(tool_call.function.name.clone()) });
+                        continue;
+                    }
+                };
+                tracing::info!(tool = %tool_call.function.name, args_bytes = tool_call.function.arguments.len(), "Executing tool call");
 
                 // Handle agent control signals specially
                 let result_str = match tool_call.function.name.as_str() {
+                    "read_tool_result" => crate::tools::tool_output::run(db, user_id, &args)
+                        .unwrap_or_else(|e| format!("Error: {e}")),
                     "use_skill" => crate::tools::use_skill::run(db, &args).await
                         .unwrap_or_else(|e| format!("Error: {}", e)),
                     "update_template" => crate::tools::update_template::run(db, &args).await
@@ -257,20 +280,7 @@ impl LLMRouter {
                         let command = args["command"].as_str().unwrap_or("");
                         match crate::tools::execute_terminal::execute_terminal(command, None).await
                         {
-                            Ok(result) => {
-                                if result.exit_code == 0 {
-                                    if result.stdout.is_empty() {
-                                        "Command executed (no output)".to_string()
-                                    } else {
-                                        result.stdout
-                                    }
-                                } else {
-                                    format!(
-                                        "Exit code: {}\nStdout: {}\nStderr: {}",
-                                        result.exit_code, result.stdout, result.stderr
-                                    )
-                                }
-                            }
+                            Ok(result) => result.render(),
                             Err(e) => format!("Error: {}", e),
                         }
                     }
@@ -293,20 +303,7 @@ impl LLMRouter {
                     }
                     "read_file" => {
                         let path = args["path"].as_str().unwrap_or("");
-                        match std::fs::read_to_string(path) {
-                            Ok(content) => {
-                                if content.len() > 10000 {
-                                    format!(
-                                        "{}...\n[Truncated - {} bytes]",
-                                        crate::util::truncate_chars(&content, 10000),
-                                        content.len()
-                                    )
-                                } else {
-                                    content
-                                }
-                            }
-                            Err(e) => format!("Error: {}", e),
-                        }
+                        crate::tools::read_file::run(path).await.unwrap_or_else(|e| format!("Error reading file: {e}"))
                     }
                     "memory_profile_create" => {
                         crate::tools::memory::profile_create(db, user_id, &args)
@@ -554,11 +551,12 @@ impl LLMRouter {
                     result: final_result_str.clone(),
                 });
 
-                // Add tool result to messages
+                let delivered = crate::gateway::tool_results::prepare_for_call(db, user_id, tool_call, &final_result_str)?;
+                // Add the MODEL-selected view, never the silently clipped original.
                 messages.push(provider::ChatMessage {
     reasoning_content: None,
                     role: "tool".to_string(),
-                    content: Some(final_result_str),
+                    content: Some(delivered),
                     content_parts,
                     tool_calls: None,
                     tool_call_id: Some(tool_call.id.clone()),

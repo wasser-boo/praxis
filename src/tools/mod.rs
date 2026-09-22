@@ -19,6 +19,11 @@ pub mod vector;
 pub mod vm_tools;
 pub mod web_interactive;
 pub mod write_file;
+pub mod tool_output;
+pub mod read_file;
+
+#[cfg(test)]
+mod tool_output_tests;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

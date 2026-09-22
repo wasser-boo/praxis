@@ -7,6 +7,34 @@ pub struct TerminalResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    #[serde(default)]
+    pub stdout_truncated: bool,
+    #[serde(default)]
+    pub stderr_truncated: bool,
+}
+
+impl TerminalResult {
+    /// Preserve stderr even on exit 0 and make streams selectable via JSON Pointer.
+    pub fn render(&self) -> String {
+        serde_json::to_string_pretty(self).expect("terminal result has only serializable fields")
+    }
+}
+
+// Per stream, before UTF-8 decoding. Even replacement decoding fits the common
+// 8 MiB response archive. Draining continues after the cap to avoid pipe deadlock.
+const MAX_FOREGROUND_CAPTURE: usize = 1024 * 1024;
+async fn capture(mut stream: impl tokio::io::AsyncRead + Unpin) -> std::io::Result<(String, bool)> {
+    let mut kept = Vec::new();
+    let mut lost = false;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 { break; }
+        let retain = n.min(MAX_FOREGROUND_CAPTURE.saturating_sub(kept.len()));
+        kept.extend_from_slice(&chunk[..retain]);
+        lost |= retain < n;
+    }
+    Ok((String::from_utf8_lossy(&kept).into_owned(), lost))
 }
 
 pub async fn execute_terminal(command: &str, cwd: Option<&str>) -> anyhow::Result<TerminalResult> {
@@ -24,13 +52,15 @@ pub async fn execute_terminal(command: &str, cwd: Option<&str>) -> anyhow::Resul
         cmd.current_dir(dir);
     }
 
-    let output = cmd.output().await?;
-
-    Ok(TerminalResult {
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        exit_code: output.status.code().unwrap_or(-1),
-    })
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("stdout capture unavailable"))?;
+    let stderr = child.stderr.take().ok_or_else(|| anyhow::anyhow!("stderr capture unavailable"))?;
+    let (out, err, status) = tokio::join!(capture(stdout), capture(stderr), child.wait());
+    let (stdout, stdout_truncated) = out?;
+    let (stderr, stderr_truncated) = err?;
+    Ok(TerminalResult { stdout, stderr, exit_code: status?.code().unwrap_or(-1), stdout_truncated, stderr_truncated })
 }
 
 // ── Detached background commands ─────────────────────────────────────────────
@@ -74,15 +104,8 @@ fn push_tail(existing: &mut String, chunk: &[u8]) {
     existing.push_str(&String::from_utf8_lossy(chunk));
     let len = existing.len();
     if len > MAX_CAPTURE {
-        let cut = if existing.is_char_boundary(len - MAX_CAPTURE) {
-            len - MAX_CAPTURE
-        } else {
-            existing[len - MAX_CAPTURE..]
-                .char_indices()
-                .next()
-                .map(|(i, _)| len - MAX_CAPTURE + i)
-                .unwrap_or(len)
-        };
+        let mut cut = len - MAX_CAPTURE;
+        while !existing.is_char_boundary(cut) { cut += 1; }
         *existing = existing[cut..].to_string();
     }
 }
@@ -322,6 +345,34 @@ pub fn cleanup_finished_jobs() -> usize {
 #[cfg(test)]
 mod tool_tests {
     use super::*;
+
+    #[test]
+    fn tool_output_background_tail_handles_multibyte_cut_without_panicking() {
+        let mut text = "😀".repeat(MAX_CAPTURE / 4);
+        push_tail(&mut text, b"x");
+        assert!(text.len() <= MAX_CAPTURE);
+        assert!(text.ends_with('x'));
+    }
+
+    #[tokio::test]
+    async fn tool_output_foreground_capture_is_bounded_and_marks_loss() {
+        let bytes = vec![b'x'; MAX_FOREGROUND_CAPTURE + 19];
+        let (text, truncated) = capture(bytes.as_slice()).await.unwrap();
+        assert_eq!(text.len(), MAX_FOREGROUND_CAPTURE);
+        assert!(truncated);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tool_output_terminal_keeps_stderr_on_success_and_exit_status() {
+        let result = execute_terminal("printf hello; printf warning >&2", None).await.unwrap();
+        let data: serde_json::Value = serde_json::from_str(&result.render()).unwrap();
+        assert_eq!(data["stdout"], "hello");
+        assert_eq!(data["stderr"], "warning");
+        assert_eq!(data["exit_code"], 0);
+        assert_eq!(data["stdout_truncated"], false);
+        assert_eq!(data["stderr_truncated"], false);
+    }
 
     #[tokio::test]
     async fn test_execute_terminal_echo() {

@@ -11,6 +11,7 @@ pub mod pairings;
 pub mod secrets;
 pub mod templates;
 pub mod tools;
+pub mod tool_outputs;
 
 use rusqlite::Connection;
 use std::path::Path;
@@ -94,6 +95,13 @@ impl Database {
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch(include_str!("../../migrations/012_memory_profiles.sql"))?;
             tx.pragma_update(None, "user_version", 12)?;
+            tx.commit()?;
+        }
+
+        if version < 13 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../../migrations/013_tool_outputs.sql"))?;
+            tx.pragma_update(None, "user_version", 13)?;
             tx.commit()?;
         }
 

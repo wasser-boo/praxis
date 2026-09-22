@@ -446,12 +446,13 @@ impl Database {
     }
 
     pub fn clear_messages(&self, user_id: &str) -> anyhow::Result<()> {
-        let conn = self.conn();
-        let key = self.resolve_user_key(&conn, user_id);
-        conn.execute(
-            "DELETE FROM messages WHERE user_id = ?1",
-            rusqlite::params![key],
-        )?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let key = self.resolve_user_key(&tx, user_id);
+        let session = super::tool_outputs::active_session(&tx, user_id)?;
+        super::tool_outputs::clear_session(&tx, user_id, &session)?;
+        tx.execute("DELETE FROM messages WHERE user_id = ?1", rusqlite::params![key])?;
+        tx.commit()?;
         Ok(())
     }
 }

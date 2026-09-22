@@ -15,6 +15,7 @@ use std::{
 enum Step {
     Reply(ChatResponse),
     Unavailable,
+    ReadLastOutput,
     Cancel(ChatResponse),
 }
 struct ScriptedProvider {
@@ -31,7 +32,7 @@ impl LLMProvider for ScriptedProvider {
         self
     }
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        self.requests.lock().unwrap().push(request);
+        self.requests.lock().unwrap().push(request.clone());
         match self
             .steps
             .lock()
@@ -41,6 +42,13 @@ impl LLMProvider for ScriptedProvider {
         {
             Step::Reply(response) => Ok(response),
             Step::Unavailable => Err(ProviderError::new(ErrorKind::Unavailable).into()),
+            Step::ReadLastOutput => {
+                let text = request.messages.iter().rev().find(|m| m.role == "tool").unwrap().content.as_deref().unwrap();
+                let id = serde_json::from_str::<serde_json::Value>(text).ok()
+                    .and_then(|v| v.get("output_id").or_else(|| v.pointer("/_praxis_tool_output/output_id")).and_then(serde_json::Value::as_str).map(String::from))
+                    .unwrap_or_else(|| text.rsplit("output_id=").next().unwrap().split_whitespace().next().unwrap().to_string());
+                Ok(reply(None, vec![call("reread", "read_tool_result", serde_json::json!({"output_id":id,"json_pointer":"/stdout"}))]))
+            }
             Step::Cancel(response) => {
                 crate::gateway::task_control::cancel(&self.user);
                 Ok(response)
@@ -133,6 +141,56 @@ fn assert_paired_history(state: &GatewayState, user: &str, expected_calls: usize
         "never persist an empty final answer"
     );
     assert!(crate::gateway::task_control::cancellation(user).is_none());
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[ignore = "Requires Node and POML_CLI; synthetic provider and temporary shell/file fixtures only"]
+async fn tool_output_model_controls_all_three_loops_and_default_is_full_without_reexecution() {
+    for flow in ["message", "agent", "standalone"] {
+        for select_tail in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("source.txt");
+            let effect = dir.path().join("effects.txt");
+            let body = format!("BEGIN_SENTINEL\n{}END_SENTINEL\n", "middle payload αβγ\n".repeat(3000));
+            std::fs::write(&source, &body).unwrap();
+            let mut args = serde_json::json!({"command":format!("printf once >> '{}'; cat '{}'; printf warning >&2", effect.display(), source.display())});
+            if select_tail { args["_output"] = serde_json::json!({"view":"tail","line_count":1,"json_pointer":"/stdout"}); }
+            let (state, user, requests) = fixture(dir.path(), vec![
+                Step::Reply(reply(None, vec![call("execute-once", "execute_terminal", args)])),
+                Step::ReadLastOutput,
+                Step::Reply(reply(Some("Read requested output without rerunning."), vec![])),
+            ]);
+            state.db.merge_context(&user, serde_json::json!({"settings.tool_result_limit":1,"settings.history_with_toolcalls":false})).unwrap();
+            if flow == "agent" {
+                let config = crate::gateway::agent_loop::AgentLoopConfig { max_turns:4, ..Default::default() };
+                crate::gateway::agent_loop::run_agent_loop(&state, &user, "offline output test", config, None).await.unwrap();
+            } else if flow == "standalone" {
+                let tools = crate::db::tools::to_tool_definitions(&state.db).unwrap();
+                state.llm.chat_with_tools(&state.db, &user, vec![], tools, Some(4), None, None, None).await.unwrap();
+            } else {
+                handle_message(&state, &user, "offline output test", Some("web")).await.unwrap();
+            }
+            assert_eq!(std::fs::read_to_string(&effect).unwrap(), "once");
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 3, "flow={flow}, select_tail={select_tail}");
+            let definition = requests[0].tools.as_ref().unwrap().iter().find(|t| t.function.name == "execute_terminal").unwrap();
+            assert_eq!(definition.function.parameters["properties"]["_output"]["type"], "object");
+            let first = requests[1].messages.iter().find(|m| m.tool_call_id.as_deref() == Some("execute-once")).unwrap().content.as_deref().unwrap();
+            if select_tail {
+                let page: serde_json::Value = serde_json::from_str(first).unwrap();
+                assert_eq!(page["text"], "3002: END_SENTINEL\n");
+                assert!(!first.contains("BEGIN_SENTINEL"));
+            } else {
+                assert!(first.len() > 32000);
+                assert!(first.contains("BEGIN_SENTINEL") && first.contains("END_SENTINEL") && first.contains("warning"));
+            }
+            let reread = requests[2].messages.iter().find(|m| m.tool_call_id.as_deref() == Some("reread")).unwrap().content.as_deref().unwrap();
+            let reread: serde_json::Value = serde_json::from_str(reread).unwrap();
+            assert_eq!(reread["text"], body, "full default must also apply to the model's reader call");
+            assert!(reread["next"].is_null());
+        }
+    }
 }
 
 #[tokio::test]
@@ -599,7 +657,7 @@ async fn tool_chain_discovery_loads_memory_only_for_current_task_on_both_paths()
         let requests = requests.lock().unwrap();
         for index in [0, 1, 5] {
             let tools = requests[index].tools.as_ref().unwrap();
-            assert!(tools.len() <= 12);
+            assert!(tools.len() <= 13); // existing core plus read_tool_result
             assert!(!tools.iter().any(|t| t.function.name == "memory_set"));
         }
         assert!(requests[2].tools.as_ref().unwrap().iter().any(|t| t.function.name == "memory_set"));

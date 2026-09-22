@@ -232,10 +232,13 @@ async fn onboarding_assets_first_message_and_active_skill_render_from_fresh_inst
         ..Default::default()
     };
     let plugins = crate::plugins::PluginRegistry::new();
-    for (input, expected) in [
-        ("FIRST_INPUT_SENTINEL", "standard"),
-        ("Be a language instructor", "language_instructor"),
+    for (input, selected, expected) in [
+        ("FIRST_INPUT_SENTINEL", None, "standard"),
+        // Role decisions are model/user context updates, not keyword switches.
+        ("Be a language instructor", None, "standard"),
+        ("SELECTED_ROLE_SENTINEL", Some("language_instructor"), "language_instructor"),
     ] {
+        ctx.settings.system_template = selected.map(String::from);
         crate::gateway::prompt::route_context(dir.path(), &mut ctx, input, &plugins, None).unwrap();
         db.save_context(&ctx).unwrap();
         let value =
@@ -243,12 +246,10 @@ async fn onboarding_assets_first_message_and_active_skill_render_from_fresh_inst
                 .await
                 .unwrap();
         assert_eq!(value["system_template"], expected);
-        for file in [
-            format!("templates/{expected}.poml"),
-            "templates/user.poml".into(),
-        ] {
+        for name in [expected, "user"] {
+            let path = crate::gateway::templates::resolve_template(&dir.path().join("templates"), name).unwrap();
             let text = crate::gateway::poml::render_strict(
-                dir.path().join(file).to_str().unwrap(),
+                path.to_str().unwrap(),
                 &value,
             )
             .await

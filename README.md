@@ -228,6 +228,14 @@ Tabs:
 
 ## Tool Calling
 
+**The LLM receives the FULL tool response by default**, not a 2,000-character
+preview. Every builtin/plugin tool schema accepts optional `_output` controls
+for a line range, tail, literal search, JSON field or explicit paging. These are
+model-facing parameters, consumed by the gateway before tool execution.
+`read_tool_result` can inspect the saved response again without replaying an
+action. See [Tool output selection](docs/TOOL_OUTPUTS.md) for examples, scope,
+retention and explicit capture limits. Image content parts remain separate.
+
 The LLM has access to these built-in tools:
 
 | Tool | Description |
@@ -236,6 +244,7 @@ The LLM has access to these built-in tools:
 | `write_file` | Create/overwrite file |
 | `edit_file` | Find/replace in file |
 | `read_file` | Read file contents |
+| `read_tool_result` | Full/selected saved tool response without re-execution |
 | `search_skills` | Search bounded metadata results; strategy is configured in POML |
 | `use_skill` | Lazily load one permitted skill's instructions with explicit parameters |
 | `update_template` | Strictly validate and save a POML template without overwriting on render failure |

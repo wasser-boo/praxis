@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 pub const CORE: &[&str] = &[
     "search_tools", "search_skills", "use_skill", "get_context", "set_context",
-    "read_file", "write_file", "edit_file", "execute_terminal",
+    "read_file", "write_file", "edit_file", "execute_terminal", "read_tool_result",
     "agent_complete", "agent_feedback", "agent_next",
 ];
 
@@ -16,6 +16,7 @@ pub fn catalog(db: &Database, plugins: &PluginRegistry) -> anyhow::Result<Vec<To
     tools.extend(plugins.tool_definitions().into_iter().filter(|t| !builtin_names.contains(&t.function.name)));
     tools.sort_by(|a, b| a.function.name.cmp(&b.function.name));
     tools.dedup_by(|a, b| a.function.name == b.function.name);
+    for tool in &mut tools { super::tool_output::augment_definition(tool); }
     Ok(tools)
 }
 

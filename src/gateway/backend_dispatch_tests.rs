@@ -23,6 +23,26 @@ async fn invoke(
 }
 
 #[tokio::test]
+async fn tool_output_dispatcher_validates_before_side_effect_and_reads_without_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::db::Database::new(dir.path()).unwrap();
+    crate::db::tools::init_default_tools(&db).unwrap();
+    let path = dir.path().join("effect");
+    let invalid = invoke(&db, "alice", "write_file", serde_json::json!({"path":path,"content":"no","_output":{"max_chars":0}})).await;
+    assert!(invalid.contains("tool not executed"));
+    assert!(!path.exists());
+    let valid = invoke(&db, "alice", "write_file", serde_json::json!({"path":path,"content":"yes","_output":{"view":"full"}})).await;
+    assert!(!valid.starts_with("Error:"), "{valid}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "yes");
+    let output = db.save_tool_output("alice", "write_file", "call", "original\nsection\nend").unwrap();
+    let result = invoke(&db, "alice", "read_tool_result", serde_json::json!({"output_id":output.id,"view":"lines","start_line":2,"line_count":1})).await;
+    let page: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(page["text"], "2: section\n");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "yes");
+    assert!(invoke(&db, "bob", "read_tool_result", serde_json::json!({"output_id":output.id})).await.starts_with("Error:"));
+}
+
+#[tokio::test]
 async fn backend_dispatcher_memory_is_durable_typed_and_user_scoped() {
     let dir = tempfile::tempdir().unwrap();
     let db = crate::db::Database::new(dir.path()).unwrap();

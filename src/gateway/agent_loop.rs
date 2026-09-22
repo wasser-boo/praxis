@@ -617,17 +617,12 @@ role: "system".to_string(),
                     }
                 }
 
-                // Log tool call result
-                let result_preview = if result.chars().count() > 500 {
-                    format!("{} ({} chars total)", crate::util::truncate_chars_ascii(&result, 500), result.chars().count())
-                } else {
-                    result.clone()
-                };
+                // Tool text can contain private data; diagnostics record metadata only.
                 tracing::info!(
                     user_id = %user_id,
                     tool = %tc.function.name,
                     call_id = %tc.id,
-                    result = %result_preview,
+                    result_bytes = result.len(),
                     "=== TOOL CALL END ==="
                 );
 
@@ -742,8 +737,7 @@ role: "system".to_string(),
                     }
                 }
 
-                let limit = ctx.settings.tool_result_limit.unwrap_or(2000).max(0) as usize;
-                let stored_result = crate::gateway::prompt::truncate_tool_result(&final_result, limit);
+                let stored_result = crate::gateway::tool_results::prepare_for_call(&state.db, user_id, tc, &final_result)?;
                 let msg = if let Some(parts) = image_content_parts {
                     crate::db::messages::Message::tool_with_image(
                         stored_result,
@@ -1112,6 +1106,10 @@ async fn execute_tool_call(
         Err(e) => return format!("Error parsing arguments: {}", e),
     };
 
+    let args = match crate::tools::tool_output::execution_args(&args) {
+        Ok(args) => args,
+        Err(error) => return format!("Error: {error}; tool not executed"),
+    };
     let ctx_data = db
         .load_context(user_id)
         .ok()
@@ -1122,6 +1120,8 @@ async fn execute_tool_call(
     let plugin_secrets = plugins.secrets_for_tool(&tc.function.name, &all_secrets);
 
     match tc.function.name.as_str() {
+        "read_tool_result" => crate::tools::tool_output::run(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
         "search_tools" => crate::tools::discovery::search(db, plugins, user_id, &args)
             .unwrap_or_else(|e| format!("Error: {e}")),
         "memory_profile_create" => crate::tools::memory::profile_create(db, user_id, &args)
@@ -1158,20 +1158,7 @@ async fn execute_tool_call(
             } else {
                 let command = args["command"].as_str().unwrap_or("");
                 match crate::tools::execute_terminal::execute_terminal(command, None).await {
-                    Ok(result) => {
-                        if result.exit_code == 0 {
-                            if result.stdout.is_empty() {
-                                "Command executed successfully (no output)".to_string()
-                            } else {
-                                result.stdout
-                            }
-                        } else {
-                            format!(
-                                "Exit code: {}\nStdout: {}\nStderr: {}",
-                                result.exit_code, result.stdout, result.stderr
-                            )
-                        }
-                    }
+                    Ok(result) => result.render(),
                     Err(e) => format!("Error: {}", e),
                 }
             } // end else (shared mode)
@@ -1318,20 +1305,7 @@ async fn execute_tool_call(
                 }
             } else {
                 let path = args["path"].as_str().unwrap_or("");
-                match std::fs::read_to_string(path) {
-                    Ok(content) => {
-                        if content.len() > 10000 {
-                            format!(
-                                "{}...\n\n[File truncated - {} bytes total]",
-                                crate::util::truncate_chars(&content, 10000),
-                                content.len()
-                            )
-                        } else {
-                            content
-                        }
-                    }
-                    Err(e) => format!("Error reading file: {}", e),
-                }
+                crate::tools::read_file::run(path).await.unwrap_or_else(|e| format!("Error reading file: {e}"))
             } // end else (shared mode)
         }
         "get_context" => match db.load_context(user_id) {
@@ -1865,6 +1839,7 @@ pub fn validate_tool_params(
     args: &serde_json::Value,
     tool_defs: &[crate::gateway::llm::provider::ToolDefinition],
 ) -> Result<(), String> {
+    let args = crate::tools::tool_output::execution_args(args).map_err(|e| e.to_string())?;
     let tool_def = tool_defs.iter().find(|t| t.function.name == tool_name);
     if let Some(def) = tool_def {
         let params = &def.function.parameters;
