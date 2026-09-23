@@ -12,7 +12,7 @@ async fn local_model_live_state_task() -> anyhow::Result<()> {
     std::fs::create_dir(&out)?;
     let id=std::env::var("PRAXIS_STATE_CASE")?;
     let arm=std::env::var("PRAXIS_STATE_ARM")?;
-    anyhow::ensure!(["fixed","entry","continuous"].contains(&arm.as_str()),"Unknown experiment arm");
+    anyhow::ensure!(["fixed","entry","continuous","decision"].contains(&arm.as_str()),"Unknown experiment arm");
     let manifest:serde_json::Value=serde_json::from_str(&std::fs::read_to_string("tests/fixtures/20-tasks.json")?)?;
     let task=manifest.as_array().and_then(|tasks|tasks.iter().find(|t|t["id"]==id))
         .ok_or_else(||anyhow::anyhow!("Unknown state experiment case"))?;
@@ -37,7 +37,12 @@ async fn local_model_live_state_task() -> anyhow::Result<()> {
     ctx.settings.max_llm_turns=Some(1); // real chat tool-followup pipeline
     ctx.settings.max_tool_calls=Some(8);
     ctx.settings.path=dir.path().to_string_lossy().into();
-    ctx.custom_data=json!({"state_eval_policy":arm});
+    let mut custom_data = json!({"state_eval_policy":arm});
+    if arm == "decision" {
+        custom_data["decision_profile"] = json!("task-router");
+        ctx.settings.decision_profile = Some("task-router".into());
+    }
+    ctx.custom_data = custom_data;
     db.save_context(&ctx)?;
     std::fs::write(out.join("fixture.json"),serde_json::to_vec_pretty(&json!({
         "task":task,"arm":arm,"initial_context":ctx,"message":prompt,
