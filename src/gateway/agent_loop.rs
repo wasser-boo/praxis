@@ -399,10 +399,17 @@ role: "system".to_string(),
             );
         }
 
+        // Select provider: free_router when use_freerouter is enabled
+        let provider = if ctx.settings.use_freerouter {
+            Some("free_router")
+        } else {
+            ctx.settings.provider.as_deref()
+        };
+
         // Call LLM
         let response = match state
             .llm
-            .streaming_chat(request, ctx.settings.provider.as_deref(), user_id)
+            .streaming_chat(request, provider, user_id)
             .await
         {
             Ok(r) => r,

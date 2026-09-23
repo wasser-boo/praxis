@@ -242,6 +242,10 @@ pub struct ContextSettings {
     pub compaction_token_limit: Option<usize>,
     #[serde(default)]
     pub compaction_template: Option<String>,
+    /// When true, bypass the GPU router and use the pgpu free router endpoint
+    /// (configured in pgpu as `/free/v1` on the dashboard port).
+    #[serde(default)]
+    pub use_freerouter: bool,
     #[serde(default)]
     pub system_template: Option<String>,
     #[serde(default)]
@@ -430,6 +434,7 @@ impl Default for ContextSettings {
             tool_result_limit: None,
             compaction_token_limit: None,
             compaction_template: None,
+            use_freerouter: false,
             system_template: None,
             active_skill: None,
             provider: None,

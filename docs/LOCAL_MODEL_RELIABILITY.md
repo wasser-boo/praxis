@@ -82,11 +82,22 @@ Coverage is explicitly limited: `read_file`, `search_tools`, `memory_profile_lis
 - Found/fixed a real SM bug: nested state assignments into a null `sm_data` namespace were silently dropped. Invalid model-supplied state names now fail without persisting or resetting the prior state.
 - Live pilot (`state-pilot/`, frozen `state-snapshot/`): three continuous tasks; two finished with correct rubric answers, **zero actual transitions**. One aborted because the model supplied an object instead of a state-name string. The other two answered in standard. This is NOT a passed 20-task experiment. Improve the contract and let harmless invalid state arguments reach the real validator for recovery; then rerun a pilot before the full three-arm experiment (20 distinct tasks × 3 = 60 runs).
 
-### Configurable command prefix and newly requested work
+### Configurable command prefix, Decision routing, and Free router
 
 - `settings.tag_prefix` implemented, default `§`; `/context set settings.tag_prefix="!praxis"`. Literal regex-escaped prefixes, 1–16 characters, no whitespace/control characters. Template instructions and agent response-tag parsing use it; legacy default `§done` remains supported. Model updates cannot change the prefix. Two new targeted regressions pass.
-- Requested, NOT implemented yet: trusted-template lifecycle actions `PREFIX/clearmessagesholdimportantones` and `PREFIX/forgetallthistemplaterememberallafterthat`. Plan reversible model-context exclusion, per-message good/bad labels, whole-turn/tool dependency protection, preserving the current request, cancellation/failure atomicity and a template-entry watermark. Never execute directives interpolated from user/tool text; do not physically delete chats based on classifier confidence.
-- Requested, NOT implemented yet: OpenAPI/API explorer and scoped, expiring/revocable API keys for both Praxis and pgpu. Server-side checks must cover indirect chat/tool/WS/delegation access as well as HTTP paths. Root keys remain administrative; no self-escalation by delegated keys. Existing WS auth exemption is an unresolved security issue.
+- **Decision router integration implemented and tested**: `settings.decision_profile` selects an editable `decisions/*.json` profile. Profiles contain endpoint, model, instructions, schema (enum choices), state_map, timeout, probability threshold, and reevaluation policy (`task_entry` or `every_step`). The router runs BEFORE both chat and agent requests, applies a CAS commit only on high-probability decisions, and retains history/state on any failure. Decision never grants tool permissions or proves task completion. Dashboard editor and raw classification probe (`/api/decision-probe`) added.
+- Live Decision classification test: 9-category routing (A–I → 9 states) on 20 tasks achieved **15/20 exact expected-state matches** with Qwen3-1.7B. Probability is not calibrated certainty; low-probability outcomes leave state unchanged. The Decision router is an additional test arm for the 20-task experiment, not counted as model-selected transitions.
+- **Free router integration implemented**: `settings.use_freerouter` boolean context variable bypasses the GPU router (pgpu slot wake/wait logic) and uses the pgpu free router endpoint directly (`/free/v1` on the dashboard port). The free router must be configured in pgpu with at least one enabled provider. Useful for GPU-free operation or when GPU quota is exhausted. Does not affect Decision endpoint usage. Added `FreeRouterProvider` to LLMRouter, selectable via context in both chat and agent paths. All Rust tests pass.
+
+### Trusted-template lifecycle actions (requested, not implemented)
+
+- `PREFIX/clearmessagesholdimportantones`: classify older content `good`/`bad` for relevance to the current goal.
+- `PREFIX/forgetallthistemplaterememberallafterthat`: requested template/state context boundary; proposed boundary at template entry retaining subsequent messages.
+- Plan: reversible model-context exclusion, per-message good/bad labels, whole-turn/tool dependency protection, preserving the current request, cancellation/failure atomicity, template-entry watermark. Never execute directives interpolated from user/tool text; do not physically delete chats based on classifier confidence.
+
+### OpenAPI/API explorer and scoped keys (requested, not implemented)
+
+- Scoped, expiring/revocable API keys for both Praxis and pgpu. Server-side checks must cover indirect chat/tool/WS/delegation/process-control access. Root keys remain administrative; no self-escalation by delegated keys. Existing WS auth exemption is an unresolved security issue.
 
 ### Decision endpoint: activated on the EXISTING instance
 

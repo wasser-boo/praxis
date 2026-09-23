@@ -10,6 +10,7 @@ pub mod minimax;
 pub mod ollama;
 pub mod openai;
 pub mod openrouter;
+pub mod free_router;
 pub mod provider;
 mod tests;
 #[cfg(test)]
@@ -61,6 +62,17 @@ impl LLMRouter {
             config.llamacpp_api_base.clone(),
         )));
 
+        // pgpu free router: uses the same GPU_ROUTER_URL/TOKEN as the GPU router.
+        // The free router endpoint is /free/v1 on the pgpu dashboard port.
+        if crate::gpu_router::configured() {
+            let token = std::env::var("GPU_ROUTER_TOKEN").unwrap_or_default();
+            providers.push(Box::new(free_router::FreeRouterProvider::new(
+                if token.is_empty() { None } else { Some(token) },
+                config.llamacpp_model.clone(), // reuse llamacpp model as default
+                std::env::var("GPU_ROUTER_URL").unwrap_or_default(),
+            )));
+        }
+
         if let Some(key) = secrets.minimax_api_key.as_ref().filter(|key| !key.trim().is_empty()) {
             providers.push(Box::new(minimax::MiniMaxProvider::new(
                 key.clone(),
@@ -98,6 +110,7 @@ impl LLMRouter {
             ("anthropic", &config.anthropic_api_base, secrets.anthropic_api_key.as_deref()),
             ("ollama", &config.ollama_api_base, secrets.ollama_api_key.as_deref()),
             ("llamacpp", &config.llamacpp_api_base, secrets.llamacpp_api_key.as_deref()),
+            ("free_router", &std::env::var("GPU_ROUTER_URL").unwrap_or_default(), std::env::var("GPU_ROUTER_TOKEN").ok().filter(|s|!s.is_empty()).as_deref()),
             ("minimax", &config.minimax_api_base, secrets.minimax_api_key.as_deref()),
             ("mimo", &config.mimo_api_base, secrets.mimo_api_key.as_deref()),
             ("openrouter", &config.openrouter_api_base, secrets.openrouter_api_key.as_deref()),

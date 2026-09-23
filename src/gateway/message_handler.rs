@@ -138,9 +138,15 @@ role: "system".to_string(),
         thinking: crate::gateway::llm::provider::ThinkingMode::from_setting(&ctx.settings.thinking_mode),
     };
 
+    let provider = if ctx.settings.use_freerouter {
+        Some("free_router")
+    } else {
+        ctx.settings.provider.as_deref()
+    };
+
     let mut response = state
         .llm
-        .streaming_chat(request, ctx.settings.provider.as_deref(), user_id)
+        .streaming_chat(request, provider, user_id)
         .await?;
 
     while let Some(tool_calls) = &response.tool_calls {

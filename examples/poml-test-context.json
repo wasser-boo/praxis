@@ -108,6 +108,8 @@
     "active_skill": "poml_templates",
     "provider": null,
     "model": null,
+    "decision_profile": null,
+    "use_freerouter": false,
     "thinking_mode": "auto",
     "show_thinking": false,
     "vision_provider": null,
