@@ -418,6 +418,15 @@ impl EventHandler for DiscordHandler {
                     }
                     break;
                 }
+                Ok(IncomingMessage::Reasoning { user_id, content }) => {
+                    if user_id == pairing.user_id {
+                        // Persistent output, NOT one of the disposable "Thinking..."
+                        // status messages. Split without dropping any provider text.
+                        if let Err(e) = send_thinking_split(&ctx.http, msg.channel_id, &content).await {
+                            tracing::error!(%e, "Failed to send reasoning");
+                        }
+                    }
+                }
                 Ok(IncomingMessage::Feedback { content, .. }) => {
                     match msg.channel_id.say(&ctx.http, &content).await {
                         Ok(feedback_msg) => {
@@ -466,6 +475,23 @@ impl EventHandler for DiscordHandler {
                     if let Err(error) = crate::discord::commands::handle_skill_command(&self.db, &ctx, &command).await {
                         tracing::error!(%error, "Skill command response failed");
                     }
+                }
+                "show_thinking" => {
+                    let enabled = command.data.options.iter().find(|o| o.name == "enabled")
+                        .and_then(|o| o.value.as_bool());
+                    let reply = match (self.db.get_pairing_by_discord(&command.user.id.to_string()), enabled) {
+                        (Ok(Some(pairing)), Some(enabled)) => {
+                            match self.db.merge_context(&pairing.user_id, serde_json::json!({"settings.show_thinking":enabled})) {
+                                Ok(_) => format!("Thinking display: {}", if enabled { "on" } else { "off" }),
+                                Err(_) => "Could not save thinking visibility.".into(),
+                            }
+                        }
+                        _ => "Pair first, then use /show_thinking enabled:true or false.".into(),
+                    };
+                    let _ = command.create_response(&ctx.http,
+                        serenity::builder::CreateInteractionResponse::Message(
+                            serenity::builder::CreateInteractionResponseMessage::new().content(reply).ephemeral(true)
+                        )).await;
                 }
                 "thinking" => {
                     let discord_user_id = command.user.id.to_string();
@@ -1417,39 +1443,59 @@ impl EventHandler for DiscordHandler {
     }
 }
 
-/// Split a message into chunks of max 2000 characters (Discord limit).
-/// Tries to split at newlines first, then at spaces, then hard-cut.
+/// Lossless Discord chunks, conservatively counted in UTF-16 code units.
+/// Keep separators/indentation. A minimum of two units fits any Unicode scalar.
 pub fn split_message(content: &str, max_len: usize) -> Vec<String> {
-    if content.len() <= max_len {
-        return vec![content.to_string()];
-    }
-
+    let limit = max_len.max(2);
+    if content.is_empty() { return vec![String::new()]; }
     let mut chunks = Vec::new();
     let mut remaining = content;
-
-    while remaining.len() > max_len {
-        // The window must end on a char boundary: `max_len` is a byte count and
-        // multi-byte characters (emoji, kana) must never be cut in half.
-        let mut window_end = max_len;
-        while !remaining.is_char_boundary(window_end) {
-            window_end -= 1;
+    while !remaining.is_empty() {
+        let mut units = 0;
+        let mut end = 0;
+        for (i, ch) in remaining.char_indices() {
+            if units + ch.len_utf16() > limit { break; }
+            units += ch.len_utf16();
+            end = i + ch.len_utf8();
         }
-        // Try to split at newline
-        let split_pos = remaining[..window_end]
-            .rfind('\n')
-            .or_else(|| remaining[..window_end].rfind(' '))
-            .unwrap_or(window_end);
-
-        let (chunk, rest) = remaining.split_at(split_pos);
-        chunks.push(chunk.trim().to_string());
-        remaining = rest.trim_start();
+        if end < remaining.len() {
+            let window = &remaining[..end];
+            if let Some(i) = window.rfind('\n').or_else(|| window.rfind(' ')) {
+                end = i + 1; // Include separator; never trim the user's output.
+            }
+        }
+        let (chunk, rest) = remaining.split_at(end);
+        chunks.push(chunk.to_string());
+        remaining = rest;
     }
-
-    if !remaining.is_empty() {
-        chunks.push(remaining.to_string());
-    }
-
     chunks
+}
+
+/// Complete, clearly labelled thinking boxes. Split embedded fence runs too so
+/// model-supplied backticks cannot escape the box or swallow following output.
+pub fn thinking_boxes(content: &str) -> Vec<String> {
+    const PREFIX: &str = "**Thinking**\n```text\n";
+    const SUFFIX: &str = "\n```";
+    let budget = 2000 - PREFIX.encode_utf16().count() - SUFFIX.encode_utf16().count();
+    let mut out = Vec::new();
+    for chunk in split_message(content, budget) {
+        let mut rest = chunk.as_str();
+        while !rest.is_empty() {
+            let end = rest.find("```").map_or(rest.len(), |p| p + 2);
+            out.push(format!("{PREFIX}{}{SUFFIX}", &rest[..end]));
+            rest = &rest[end..];
+        }
+    }
+    out
+}
+
+async fn send_thinking_split(
+    http: &serenity::http::Http,
+    channel: serenity::model::id::ChannelId,
+    content: &str,
+) -> Result<(), serenity::Error> {
+    for part in thinking_boxes(content) { send_message_split(http, channel, &part).await?; }
+    Ok(())
 }
 
 /// Send a message to Discord, splitting if necessary.
@@ -1460,10 +1506,19 @@ pub async fn send_message_split(
 ) -> Result<(), serenity::Error> {
     let chunks = split_message(content, 2000);
     for chunk in chunks {
-        channel_id.say(http, &chunk).await?;
+        if !chunk.is_empty() {
+            channel_id.send_message(http, serenity::builder::CreateMessage::new()
+                .content(&chunk)
+                .allowed_mentions(serenity::builder::CreateAllowedMentions::new()
+                    .all_users(false).all_roles(false).everyone(false))).await?;
+        }
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "output_tests.rs"]
+mod output_tests;
 
 #[cfg(test)]
 mod discord_tests {
@@ -1490,12 +1545,12 @@ mod discord_tests {
         let content = "a".repeat(1990) + "\n" + &"b".repeat(100);
         let chunks = split_message(&content, 2000);
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0], "a".repeat(1990));
+        assert_eq!(chunks[0], "a".repeat(1990) + "\n");
 
         let spaced = "x".repeat(1995) + " yyyyy";
         let chunks = split_message(&spaced, 2000);
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0], "x".repeat(1995));
+        assert_eq!(chunks[0], "x".repeat(1995) + " ");
     }
 
     #[cfg(feature = "songbird")]
@@ -1568,7 +1623,7 @@ mod discord_tests {
 
         let chunks = split_message(&msg, 2000);
         assert_eq!(chunks.len(), 2);
-        assert!(chunks[0].ends_with('a'));
+        assert!(chunks[0].ends_with("a\n"));
         assert!(chunks[1].starts_with('b'));
     }
 

@@ -55,9 +55,11 @@ pub fn search(db: &Database, plugins: &PluginRegistry, user: &str, args: &Value)
     let tools: Vec<_> = matches.into_iter().take(limit).map(|(_, t)| t).collect();
     task_control::select_tools(user, tools.iter().filter(|t| !CORE.contains(&t.function.name.as_str())).map(|t| t.function.name.clone()).collect(), replace)?;
     Ok(json!({
-        "tools": tools.iter().map(|t| json!({"name":t.function.name, "description":t.function.description, "parameters":t.function.parameters})).collect::<Vec<_>>(),
+        // Full schemas are already attached to the very next request by
+        // definitions(). Duplicating them here bloats every subsequent turn.
+        "tools": tools.iter().map(|t| json!({"name":t.function.name, "description":t.function.description})).collect::<Vec<_>>(),
         "has_more": has_more,
-        "scope": "Available on the next model turn in this task only; disabled tools and permissions remain enforced. Refine the query rather than enumerate the catalog.",
+        "scope": "Activated for the next model turn in this task; full parameter schemas are in that request's tools. Disabled tools and permissions remain enforced. Refine the query rather than enumerate the catalog.",
     }).to_string())
 }
 

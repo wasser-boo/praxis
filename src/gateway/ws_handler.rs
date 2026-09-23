@@ -41,6 +41,8 @@ enum WsOutgoing {
     Response { user_id: String, content: String },
     #[serde(rename = "feedback")]
     Feedback { user_id: String, content: String },
+    #[serde(rename = "reasoning")]
+    Reasoning { user_id: String, content: String },
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(rename = "pong")]

@@ -1,0 +1,132 @@
+[
+  {
+    "id": "01", "title": "Idempotente Auftragsannahme", "initial_state": "standard",
+    "prompt": "Entwirf eine kleine API für eine Auftragswarteschlange. Clients können denselben Auftrag nach einem Timeout erneut senden. Welche Schnittstelle und welche Datenbankgarantie verhindern doppelte Aufträge? Nenne auch einen Akzeptanztest. Kein Code nötig.",
+    "acceptable_states": ["code_architect"],
+    "checks": ["idempot|dedupl", "unique|eindeutig", "test|prüf"]
+  },
+  {
+    "id": "02", "title": "Rollout-Plan prüfen", "initial_state": "standard",
+    "prompt": "Kann ich diesen Rollout-Plan freigeben? 1. Die alte Datenbankspalte sofort löschen. 2. Den neuen Code ausrollen. 3. Falls etwas schiefgeht, die alte App-Version starten. Die alte App benötigt die gelöschte Spalte. Nenne den Blocker und eine sichere Reihenfolge.",
+    "acceptable_states": ["senior_dev"],
+    "checks": ["nicht|nein|block", "rollback|rückroll|zurückroll|zurückkehr", "expand|parallel|kompatib|zuerst|erst"]
+  },
+  {
+    "id": "03", "title": "Fakultät implementieren", "initial_state": "standard",
+    "prompt": "Implementiere in Python factorial(n) für nichtnegative ganze Zahlen. Für n kleiner 0 soll ValueError entstehen. Nenne die erwarteten Ergebnisse für 0, 1 und 4. Keine Dateien ändern und nichts ausführen.",
+    "acceptable_states": ["expert_programmer"],
+    "checks": ["def factorial", "ValueError", "24", "return"]
+  },
+  {
+    "id": "04", "title": "Indexfehler erklären", "initial_state": "standard",
+    "prompt": "Warum scheitert dieser Python-Code bei xs=[10,20]? for i in range(len(xs)+1): print(xs[i]). Zeige die konkrete Ursache, eine minimale Korrektur und einen Randfalltest. Nicht ausführen.",
+    "acceptable_states": ["debugger"],
+    "checks": ["IndexError|Indexfehler|out of range", "range\\(len\\(xs\\)\\)", "leer|empty|\\[\\]"]
+  },
+  {
+    "id": "05", "title": "SQL-Sicherheit prüfen", "initial_state": "standard",
+    "prompt": "Prüfe diesen Python-Code auf einen konkreten Sicherheitsfehler: query = \"SELECT * FROM users WHERE name = '\" + user_input + \"'\"; cursor.execute(query). Erkläre das Risiko und zeige eine sichere SQLite-Variante. Nicht ausführen.",
+    "acceptable_states": ["review"],
+    "checks": ["injection", "parameter|platzhalter|placeholder", "\\?"]
+  },
+  {
+    "id": "06", "title": "Vergangenheit im Englischen", "initial_state": "standard",
+    "prompt": "Ich übe Englisch. Korrigiere 'Yesterday I goed to school' und erkläre den entscheidenden Fehler auf Deutsch, höchstens drei Sätze.",
+    "acceptable_states": ["teach"],
+    "checks": ["went", "unregelmäßig|irregular"]
+  },
+  {
+    "id": "07", "title": "Widersprüchliche Zahlen vergleichen", "initial_state": "standard",
+    "prompt": "Zwei bereitgestellte Berichte: Quelle A nennt für dasselbe Jahr 120 von 600 Teilnehmenden; Quelle B schreibt dazu '20 Prozent von 600, also 180 Personen'. Prüfe die Übereinstimmung, nenne die korrekte Zahl und trenne Rechenfehler von ungeklärter Quellenqualität. Keine Websuche nötig.",
+    "acceptable_states": ["research"],
+    "checks": ["120", "180", "fehler|falsch|inkorrekt|stimmt nicht"]
+  },
+  {
+    "id": "08", "title": "Python-Identität erklären", "initial_state": "standard",
+    "prompt": "Erkläre für Python knapp den Unterschied zwischen == und is anhand zweier getrennt erzeugter Listen mit demselben Inhalt. Ist eine Ausführung nötig? Nein, nur erklären.",
+    "acceptable_states": ["code"],
+    "checks": ["identit|identisch|dasselbe objekt", "inhalt|wert|gleichheit", "False|falsch"]
+  },
+  {
+    "id": "09", "title": "Zur allgemeinen Antwort zurückkehren", "initial_state": "review",
+    "prompt": "Wie viel ist 7 mal 6? Antworte nur mit der Zahl.",
+    "acceptable_states": ["standard"],
+    "checks": ["^\\s*42\\s*$"]
+  },
+  {
+    "id": "10", "title": "Passenden Zustand beibehalten", "initial_state": "debugger",
+    "prompt": "Python: average(xs) gibt sum(xs)/len(xs) zurück. Warum scheitert average([]), und wie kann die Funktion für leere Eingaben explizit ValueError melden? Erkläre Ursache und minimalen Fix ohne Ausführung.",
+    "acceptable_states": ["debugger"],
+    "checks": ["ZeroDivisionError|division.*null|division.*zero", "ValueError", "if not xs|len\\(xs\\).*0"]
+  },
+  {
+    "id": "11", "title": "Architektur erst nach Dateilektüre erkennbar", "initial_state": "standard",
+    "prompt": "Lies {fixture} und bearbeite die darin beschriebene Fachaufgabe. Nutze nur diese Datei und antworte direkt, ohne Änderungen am Dateisystem.",
+    "fixture": "Fachaufgabe: Entwirf eine lokale Notiz-App für genau einen Benutzer mit SQLite. Beschreibe UI-, Anwendungs- und Datenbankgrenze und einen konsistenten Backup-Weg bei aktivem WAL-Modus. Benötigt die App dafür Microservices? Begründe kurz.",
+    "acceptable_states": ["code_architect"],
+    "checks": ["SQLite", "backup|sicherung", "WAL", "nicht|nein|unnötig|monolith"]
+  },
+  {
+    "id": "12", "title": "Freigabeproblem aus Datei", "initial_state": "standard",
+    "prompt": "Bitte lies {fixture} und beantworte die dort formulierte Frage. Keine Shell und keine externen Dienste verwenden.",
+    "fixture": "Zur Freigabe vorgelegter Plan: Eine bisher optionale E-Mail-Spalte soll NOT NULL werden. Schritt 1 setzt NOT NULL sofort. Schritt 2 füllt Bestandszeilen irgendwann nach. Es existieren heute NULL-Werte. Kann der Plan freigegeben werden? Nenne einen Blocker, eine sichere Reihenfolge und eine Prüfung vor dem Constraint.",
+    "acceptable_states": ["senior_dev"],
+    "checks": ["NULL", "nicht|nein|block", "backfill|auffüll|nachfüll|bestands", "prüf|test|count"]
+  },
+  {
+    "id": "13", "title": "Implementierung aus Datei", "initial_state": "standard",
+    "prompt": "Bearbeite die Aufgabe aus {fixture}. Gib die Lösung nur als Antwort aus; führe keinen Code aus und schreibe keine Dateien.",
+    "fixture": "Implementiere in Python unique(xs): entferne doppelte hashbare Elemente und erhalte die Reihenfolge ihres ersten Auftretens. Nenne das Ergebnis für [3,1,3,2,1] und für []. Keine Sortierung.",
+    "acceptable_states": ["expert_programmer"],
+    "checks": ["def unique", "set|dict|seen", "3, ?1, ?2", "\\[\\]"]
+  },
+  {
+    "id": "14", "title": "Gleitkomma-Fehler aus Datei", "initial_state": "standard",
+    "prompt": "Lies {fixture}, beantworte die enthaltene Frage und schlage einen passenden Test vor. Nur lesen, keine Ausführung.",
+    "fixture": "Beobachtung in Python: 0.1 + 0.2 == 0.3 ergibt False. Ist das ein Fehler des Plus-Operators? Erkläre die Ursache und zeige einen robusten Vergleich mit math.isclose. Keine Behauptung einer selbst ausgeführten Messung.",
+    "acceptable_states": ["debugger"],
+    "checks": ["binär|binary|gleitkomma|floating", "math\\.isclose", "rund|repräsent|represent"]
+  },
+  {
+    "id": "15", "title": "Sicherheitsprüfung aus Datei", "initial_state": "standard",
+    "prompt": "Prüfe den Inhalt von {fixture} wie dort beschrieben. Verändere nichts und führe die Beispiele nicht aus.",
+    "fixture": "Zu prüfender Python-Code: value = eval(user_text). user_text stammt aus einem öffentlichen Formular. Gewünscht sind ausschließlich JSON-Daten. Nenne den konkreten Sicherheitsfehler und die passende Parser-Alternative mit Fehlerbehandlung.",
+    "acceptable_states": ["review"],
+    "checks": ["code|befehle|ausführ", "json\\.loads", "JSONDecodeError|ValueError|try|fehler"]
+  },
+  {
+    "id": "16", "title": "Programmierkonzept aus Datei", "initial_state": "standard",
+    "prompt": "Lies {fixture} und erkläre das darin genannte Konzept in wenigen Sätzen. Kein Code muss ausgeführt werden.",
+    "fixture": "Erkläre Python list.append gegenüber list.extend anhand xs=[1], zuerst in einem unabhängigen Beispiel xs.append([2,3]), dann in einem zweiten unabhängigen Beispiel xs.extend([2,3]). Nenne jeweils den Listeninhalt und den Rückgabewert.",
+    "acceptable_states": ["code"],
+    "checks": ["\\[1, ?\\[2, ?3\\]\\]", "\\[1, ?2, ?3\\]", "None"]
+  },
+  {
+    "id": "17", "title": "Sprachkorrektur aus Datei", "initial_state": "standard",
+    "prompt": "Die Aufgabe steht in {fixture}. Bitte lies sie und beantworte sie knapp auf Deutsch.",
+    "fixture": "Ich übe Französisch. Korrigiere 'Je suis 20 ans' und erkläre, welches Verb man bei Altersangaben verwendet. Ein korrektes Beispiel reicht.",
+    "acceptable_states": ["teach"],
+    "checks": ["J['’]ai 20 ans", "avoir"]
+  },
+  {
+    "id": "18", "title": "Bezugsgrößen aus Datei", "initial_state": "standard",
+    "prompt": "Lies {fixture} und prüfe die dortige Schlussfolgerung anhand der gelieferten Zahlen. Keine Websuche nötig.",
+    "fixture": "Ein Bericht meldet einen Rückgang des Risikos von 2 Prozent auf 1 Prozent. Die Überschrift lautet: 'Risiko um 1 Prozent gesunken'. Unterscheide absolute und relative Risikoreduktion, nenne beide Werte und beurteile die Genauigkeit der Überschrift.",
+    "acceptable_states": ["research"],
+    "checks": ["prozentpunkt|percentage point", "50\\s*(%|prozent|percent)", "absolut|absolute", "relativ|relative"]
+  },
+  {
+    "id": "19", "title": "Dateilektüre ohne unnötigen Fachwechsel", "initial_state": "standard",
+    "prompt": "Lies {fixture} und gib ausschließlich die Summe der darin genannten Stückzahlen als Zahl aus.",
+    "fixture": "Artikel A: 2 Stück\nArtikel B: 5 Stück\nArtikel C: 3 Stück\n",
+    "acceptable_states": ["standard"],
+    "checks": ["^\\s*10\\s*$"]
+  },
+  {
+    "id": "20", "title": "Entwurf trifft neue Fehlerbelege", "initial_state": "standard",
+    "prompt": "Skizziere zunächst eine kleine Cache-Lösung für eine teure Python-Funktion slow(k). Werte anschließend die Beobachtungen in {fixture} aus und passe deinen Vorschlag an. Nenne einen Regressionstest. Nur lesen und als Text antworten, nichts ausführen oder ändern.",
+    "fixture": "Beobachtung zum bisherigen Vorschlag: def get(k): return cached.get(k) or slow(k). Obwohl cached['a'] den Wert 0 enthält, wird slow('a') bei jedem Abruf erneut aufgerufen. Derselbe Effekt tritt für False und den leeren String auf. Diese Werte sind gültige Cache-Einträge.",
+    "acceptable_states": ["debugger", "expert_programmer"],
+    "checks": ["falsy|falsey|falsch|wahrheits|truth", "if k in cached|k in cached|sentinel|sentinels|object\\(\\)", "0", "test|prüf"]
+  }
+]

@@ -164,6 +164,11 @@ async fn run_agent_loop_inner(
     crate::dashboard::stream::send(user_id, "agent_start", "{}");
 
     let mut ctx = state.db.load_context(user_id)?;
+    // Immutable per-task ceilings: tool-written settings and injected input
+    // cannot refill a running task. Changes apply to the next task.
+    let turn_limit = ctx.settings.max_llm_turns.unwrap_or(config.max_turns).clamp(1, 128);
+    let tool_limit = ctx.settings.max_tool_calls.unwrap_or(config.max_tool_calls).clamp(0, 128) as usize;
+    let mut tool_calls_used = 0usize;
     // Config supplies only an initial default. Subsequent tool changes/clears
     // are loaded from DB, never shadowed by a frozen loop configuration.
     if ctx.settings.sm_file.is_none() && ctx.sm_file.is_none() {
@@ -191,14 +196,12 @@ async fn run_agent_loop_inner(
             for msg in &injected {
                 crate::gateway::prompt::append_injected_message(state, user_id, msg).await?;
             }
-            // Use last injected message, reset turn for more turns
+            // New input updates the task, but does not refill its finite budget.
             user_message = injected.last().cloned().unwrap_or(user_message);
-            turn = 0;
             continue;
         }
 
-        let current_limits = state.db.load_context(user_id)?;
-        if turn >= current_limits.settings.max_llm_turns.unwrap_or(config.max_turns) {
+        if turn >= turn_limit {
             tracing::warn!(user_id = %user_id, turn = turn, "Max turns reached");
             turn_limit_reached = true;
             break;
@@ -207,8 +210,10 @@ async fn run_agent_loop_inner(
         turn += 1;
         ctx.turn = turn;
 
+        // Compact BEFORE sending a request, never after it already overflowed.
+        crate::gateway::compaction::before_request(state, user_id).await?;
         // Refresh after tools and injected inputs; route BEFORE rendering.
-        ctx = crate::gateway::prompt::prepare_runtime(state, user_id, &user_message, Some(turn), None)?;
+        ctx = crate::gateway::decision_routing::prepare(state, user_id, &user_message, Some(turn), None).await?;
         let system_prompt = crate::gateway::prompt::render_system(state, &ctx, &user_message).await?;
         let mut messages = vec![ChatMessage {
             reasoning_content: None,
@@ -232,22 +237,6 @@ role: "system".to_string(),
     reasoning_content: None,
                 role: "system".to_string(),
                 content: Some(notice),
-                content_parts: None,
-                tool_calls: None,
-                tool_call_id: None,
-                tool_name: None,
-            });
-        }
-
-        // Add compaction summary if available
-        if ctx.settings.compaction_enabled && !ctx.settings.compaction_summary.is_empty() {
-            messages.push(ChatMessage {
-    reasoning_content: None,
-                role: "system".to_string(),
-                content: Some(format!(
-                    "Previous conversation summary: {}",
-                    ctx.settings.compaction_summary
-                )),
                 content_parts: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -283,7 +272,7 @@ role: "system".to_string(),
             }
         }
 
-        let token_budget = ctx.settings.history_token_limit.unwrap_or(32000);
+        let token_budget = ctx.settings.history_token_limit.unwrap_or(crate::db::messages::DEFAULT_HISTORY_TOKENS);
         let (history, _history_tokens) = state
             .db
             .get_messages_with_token_budget(user_id, token_budget)?;
@@ -367,9 +356,12 @@ role: "system".to_string(),
         let tool_names: Vec<String> = tools.iter().map(|t| t.function.name.clone()).collect();
         let tools_for_validation = tools.clone();
 
+        if tool_calls_used >= tool_limit {
+            messages.push(ChatMessage { role:"system".into(), content:Some("The task's tool budget is exhausted. No further actions may run. Give an honest final answer using existing results; state unfinished work explicitly.".into()), reasoning_content:None, content_parts:None, tool_calls:None, tool_call_id:None, tool_name:None });
+        }
         let request = ChatRequest {
             messages: messages.clone(),
-            tools: if tools.is_empty() { None } else { Some(tools) },
+            tools: if tools.is_empty() || tool_calls_used >= tool_limit { None } else { Some(tools) },
             temperature: Some(0.7),
             max_tokens: Some(state.llm.task_output_tokens()),
             model: ctx.settings.model.clone(),
@@ -498,12 +490,13 @@ role: "system".to_string(),
                 }
             }
 
-            let mut tool_call_count = 0;
             for tc in tool_calls {
+                let exhausted = tool_calls_used >= tool_limit;
+                tool_calls_used = tool_calls_used.saturating_add(1);
                 let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
                 let skipped = if should_stop(user_id).await {
                     Some("Task cancelled; tool not executed".to_string())
-                } else if tool_call_count >= ctx.settings.max_tool_calls.unwrap_or(config.max_tool_calls) {
+                } else if exhausted {
                     Some("Maximum tool calls reached; tool not executed".to_string())
                 } else if !tool_names.contains(&tc.function.name)
                     || !crate::tools::discovery::enabled(&state.db, &state.plugins, &tc.function.name)
@@ -752,7 +745,7 @@ role: "system".to_string(),
                 msg.tool_name = Some(tc.function.name.clone());
                 state.db.add_message(user_id, &msg)?;
                 state.db.save_context(&ctx)?;
-                tool_call_count += 1;
+                // The attempt was charged before validation/execution.
             }
             ctx = state.db.load_context(user_id)?;
             if ctx.settings.done {
@@ -818,7 +811,7 @@ role: "system".to_string(),
 
         // Parse and execute tags if enabled
         if config.tags_enabled {
-            let mut tag_result = tags::parse_tags(&response_text);
+            let mut tag_result = tags::parse_tags_with_prefix(&response_text, &ctx.settings.tag_prefix)?;
             let mut tag_exec = tags::execute_tags(&tag_result, &mut ctx);
 
             // Send feedback messages
@@ -896,88 +889,6 @@ role: "system".to_string(),
 
         state.db.save_context(&ctx)?;
 
-        // Auto-compact if enabled and total history tokens exceed limit
-        if ctx.settings.compaction_enabled {
-            let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
-            let msg_count = state.db.count_messages(user_id).unwrap_or(0);
-            let (_all_messages, total_tokens) = state
-                .db
-                .get_messages_with_token_budget(user_id, usize::MAX)
-                .unwrap_or((vec![], 0));
-            tracing::info!(
-                user_id = %user_id,
-                msg_count = msg_count,
-                total_tokens = total_tokens,
-                compaction_limit = compaction_limit,
-                compaction_enabled = ctx.settings.compaction_enabled,
-                "Compaction check"
-            );
-            if total_tokens > compaction_limit {
-                tracing::info!(user_id = %user_id, tokens = total_tokens, limit = compaction_limit, "Auto-compacting conversation");
-                if let Ok(summary) = generate_compaction_summary(
-                    state,
-                    user_id,
-                    ctx.settings.compaction_template.as_deref(),
-                )
-                .await
-                {
-                    ctx.settings.compaction_summary = summary;
-                    let _ = state.db.save_context(&ctx);
-
-                    let keep_budget = ctx.settings.history_token_limit.unwrap_or(500000) / 2;
-                    if let Ok((recent, _)) = state
-                        .db
-                        .get_chat_messages_with_token_budget(user_id, keep_budget)
-                    {
-                        // Filter out orphaned tool results (tool messages without preceding tool_calls)
-                        // and keep Discord-mirror rows (display-only, but they
-                        // must survive compaction — they are part of the chat
-                        // transcript, not the LLM history).
-                        let mut valid_tool_call_ids: std::collections::HashSet<String> =
-                            std::collections::HashSet::new();
-                        for msg in &recent {
-                            if let Some(ref tcs) = msg.tool_calls {
-                                for tc in tcs {
-                                    valid_tool_call_ids.insert(tc.id.clone());
-                                }
-                            }
-                        }
-                        let filtered: Vec<_> = recent
-                            .into_iter()
-                            .filter(|msg| {
-                                if msg.is_discord_mirror() {
-                                    true
-                                } else if msg.role == "tool" {
-                                    msg.tool_call_id
-                                        .as_ref()
-                                        .map(|id| valid_tool_call_ids.contains(id))
-                                        .unwrap_or(false)
-                                } else {
-                                    true
-                                }
-                            })
-                            .collect();
-
-                        state.db.retain_chat_messages(user_id, &filtered)?;
-                        tracing::info!(user_id = %user_id, kept = filtered.len(), "Compaction: kept recent messages, deleted older ones");
-                    }
-                }
-            }
-        } else {
-            let msg_count = state.db.count_messages(user_id).unwrap_or(0);
-            let (_all_messages, total_tokens) = state
-                .db
-                .get_messages_with_token_budget(user_id, usize::MAX)
-                .unwrap_or((vec![], 0));
-            tracing::info!(
-                user_id = %user_id,
-                msg_count = msg_count,
-                total_tokens = total_tokens,
-                compaction_enabled = false,
-                "Compaction skipped (disabled)"
-            );
-        }
-
         if completed {
             break;
         }
@@ -989,9 +900,8 @@ role: "system".to_string(),
             for msg in &injected {
                 crate::gateway::prompt::append_injected_message(state, user_id, msg).await?;
             }
-            // Use last injected message as current user_message, reset turn for more turns
+            // New input cannot refill this task's immutable turn budget.
             user_message = injected.last().cloned().unwrap_or(user_message);
-            turn = 0;
             continue;
         }
 
@@ -1032,65 +942,10 @@ pub async fn generate_compaction_summary(
     user_id: &str,
     compaction_template: Option<&str>,
 ) -> anyhow::Result<String> {
-    let (messages, _tokens) = state.db.get_messages_with_token_budget(user_id, 30000)?;
-
-    let conversation_text = messages
-        .iter()
-        .map(|m| format!("{}: {}", m.role, m.content))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let template_name = compaction_template.unwrap_or("compaction");
-    let template_path = format!("templates/{}.poml", template_name);
-    let prompt = if std::path::Path::new(&template_path).exists() {
-        let tmpl_ctx = serde_json::json!({ "conversation_text": conversation_text });
-        crate::gateway::poml::render(&template_path, &tmpl_ctx)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Compaction template render failed: {}, using fallback", e);
-                format!(
-                    "Summarize this conversation in 3-5 sentences. Reply with only the summary:\n\n{}",
-                    conversation_text
-                )
-            })
-    } else {
-        tracing::warn!(
-            "Compaction template '{}' not found, using fallback",
-            template_path
-        );
-        format!(
-            "Summarize this conversation in 3-5 sentences. Reply with only the summary:\n\n{}",
-            conversation_text
-        )
-    };
-
-    let request = ChatRequest {
-        messages: vec![ChatMessage {
-    reasoning_content: None,
-            role: "user".to_string(),
-            content: Some(prompt),
-            content_parts: None,
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-        }],
-        tools: None,
-        temperature: Some(0.3),
-        max_tokens: Some(500),
-        model: None,
-        vision_provider: None,
-        vision_model: None,
-        thinking: None,
-    };
-
-    let cancel = crate::gateway::task_control::cancellation(user_id).unwrap_or_default();
-    let response = state.llm.chat_controlled(request, None, None, &cancel).await?;
-    let summary = response
-        .content
-        .unwrap_or_else(|| "Summary not available.".to_string());
-
-    tracing::info!(user_id = %user_id, summary_len = summary.len(), "Compaction summary generated");
-    Ok(summary)
+    let (messages, _) = state.db.get_messages_with_token_budget(user_id, usize::MAX)?;
+    let ctx = state.db.load_context(user_id)?;
+    crate::gateway::compaction::summarize(state, user_id, &messages,
+        &ctx.settings.compaction_summary, compaction_template).await
 }
 
 async fn execute_tool_call(

@@ -146,6 +146,16 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+/// Display-only deltas. Never execute a tool from these fragments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StreamDelta {
+    TemplateOmitted,
+    Text { text: String },
+    Reasoning { text: String },
+    ToolCall { index: usize, id: Option<String>, name: Option<String>, arguments: Option<String> },
+}
+
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse>;
@@ -157,6 +167,13 @@ pub trait LLMProvider: Send + Sync {
         _on_token: &(dyn Fn(String) + Send + Sync),
     ) -> anyhow::Result<ChatResponse> {
         self.chat(request).await
+    }
+    async fn chat_stream_events(
+        &self,
+        request: ChatRequest,
+        on_delta: &(dyn Fn(StreamDelta) + Send + Sync),
+    ) -> anyhow::Result<ChatResponse> {
+        self.chat_stream(request, &|text| on_delta(StreamDelta::Text { text })).await
     }
     fn name(&self) -> &str;
     fn as_any(&self) -> &dyn std::any::Any;

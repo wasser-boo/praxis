@@ -57,15 +57,15 @@ pub(crate) async fn handle_message_inner(
     // One user-facing turn can require several tool-only LLM responses. Keep
     // this chat path bounded without mistaking a tool response for completion.
     // Snapshot the budget: a tool cannot grow its own budget during this task.
-    let tool_limit = ctx.settings.max_tool_calls.unwrap_or(5).max(0) as usize;
+    let tool_limit = ctx.settings.max_tool_calls.unwrap_or(5).clamp(0, 128) as usize;
     let mut tool_calls_used = 0usize;
     let mut current_tool_ids = std::collections::HashSet::new();
     let mut finalizing = tool_limit == 0;
-    let mut ctx = ctx;
-    // History stores the RAW input; the rendered template is used for the
-    // current request only (raw-storing policy).
-    let rendered_user = crate::gateway::prompt::render_user(state, &ctx, content).await?;
+    // Persist raw input, then route BEFORE either current-request template.
     state.db.add_message(user_id, &crate::db::messages::Message::user(content.to_string()))?;
+    crate::gateway::compaction::before_request(state, user_id).await?;
+    let mut ctx = crate::gateway::decision_routing::prepare(state, user_id, content, None, channel_id).await?;
+    let rendered_user = crate::gateway::prompt::render_user(state, &ctx, content).await?;
     let system_prompt = crate::gateway::prompt::render_system(state, &ctx, content).await?;
 
     let mut messages = Vec::new();
@@ -79,7 +79,7 @@ role: "system".to_string(),
         tool_name: None,
     });
 
-    let token_budget = ctx.settings.history_token_limit.unwrap_or(32000);
+    let token_budget = ctx.settings.history_token_limit.unwrap_or(crate::db::messages::DEFAULT_HISTORY_TOKENS);
     let (history, _tokens) = state
         .db
         .get_messages_with_token_budget(user_id, token_budget)?;
@@ -262,7 +262,8 @@ role: "system".to_string(),
 
         // Context tools must affect the very next LLM request, not be overwritten
         // by the pre-tool snapshot at the end of this handler.
-        ctx = crate::gateway::prompt::prepare_runtime(state, user_id, content, None, channel_id)?;
+        crate::gateway::compaction::before_request(state, user_id).await?;
+        ctx = crate::gateway::decision_routing::prepare(state, user_id, content, None, channel_id).await?;
         let mut followup_messages = Vec::new();
         followup_messages.push(ChatMessage {
             reasoning_content: None,
@@ -275,7 +276,7 @@ role: "system".to_string(),
         });
         let (history, _tokens) = state
             .db
-            .get_messages_with_token_budget(user_id, ctx.settings.history_token_limit.unwrap_or(500000))?;
+            .get_messages_with_token_budget(user_id, ctx.settings.history_token_limit.unwrap_or(crate::db::messages::DEFAULT_HISTORY_TOKENS))?;
 
         let image_msg_indices = crate::gateway::prompt::history_image_indices(
             &history, &current_tool_ids, state.llm.history_image_messages(),
@@ -1339,6 +1340,10 @@ mod backend_dispatch_tests;
 #[cfg(test)]
 #[path = "message_tool_loop_tests.rs"]
 mod message_tool_loop_tests;
+
+#[cfg(test)]
+#[path = "local_model_live_tests.rs"]
+mod local_model_live_tests;
 
 #[cfg(test)]
 #[path = "message_audio_tests.rs"]

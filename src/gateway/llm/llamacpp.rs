@@ -129,10 +129,13 @@ mod tests {
     }
 }
 
-#[async_trait]
-impl LLMProvider for LlamaCppProvider {
-    async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
+#[path = "llamacpp_stream.rs"]
+mod stream;
+#[path = "llamacpp_budget.rs"]
+mod budget;
+
+impl LlamaCppProvider {
+    fn request_body(&self, request: ChatRequest) -> serde_json::Value {
 
         // llama.cpp chat templates (e.g. Qwen3.6 GGUF) hard-reject system
         // messages that are not the FIRST message: 'Jinja Exception: System
@@ -224,10 +227,11 @@ impl LLMProvider for LlamaCppProvider {
             None => {}
         }
 
-        let mut req = self
-            .client
-            .post(&url)
-            .json(&body);
+        body
+    }
+
+    fn post_body(&self, body: &serde_json::Value) -> reqwest::RequestBuilder {
+        let mut req = self.client.post(format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'))).json(body);
 
         // GPU-Router (pgpu) vor dem LLM-Proxy: `X-Router-Wait` hält die
         // Verbindung auf kaltem Slot bis healthy (impliziter Wake), statt
@@ -246,12 +250,34 @@ impl LLMProvider for LlamaCppProvider {
             }
         }
 
-        let resp = req.send().await.map_err(super::error::ProviderError::from_reqwest)?;
+        req
+    }
+}
+
+#[async_trait]
+impl LLMProvider for LlamaCppProvider {
+    async fn chat_stream_events(&self, request: ChatRequest, on_delta: &(dyn Fn(StreamDelta) + Send + Sync)) -> anyhow::Result<ChatResponse> {
+        let (mut body, omitted) = self.fit_body(self.request_body(request)).await?;
+        if omitted { on_delta(StreamDelta::TemplateOmitted); }
+        body["stream"] = serde_json::json!(true);
+        body["stream_options"] = serde_json::json!({"include_usage":true});
+        let response = self.post_body(&body).send().await.map_err(super::error::ProviderError::from_reqwest)?;
+        stream::receive(response, on_delta).await
+    }
+
+    async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let (body, omitted) = self.fit_body(self.request_body(request)).await?;
+        let resp = self.post_body(&body).send().await.map_err(super::error::ProviderError::from_reqwest)?;
         let data = super::http::json(resp).await?;
         let choice = &data["choices"][0];
         let message = &choice["message"];
 
-        let content = message["content"].as_str().map(|s| s.to_string());
+        let mut content = message["content"].as_str().map(|s| s.to_string());
+        if omitted && message["tool_calls"].as_array().is_none_or(|c| c.is_empty()) {
+            if let Some(text) = content.as_mut().filter(|t|!t.is_empty()) {
+                text.push_str("\n\n"); text.push_str(budget::TEMPLATE_MARKER);
+            }
+        }
         let reasoning_content = message["reasoning_content"].as_str().map(|s| s.to_string());
         let tool_calls = message["tool_calls"].as_array().map(|calls| {
             calls

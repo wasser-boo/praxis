@@ -64,7 +64,9 @@ pub fn payload_error(status: u16, data: &Value) -> ProviderError {
         .and_then(|s| u16::try_from(s).ok())
         .filter(|s| (400..=599).contains(s));
     let status = embedded_status.unwrap_or(status);
-    let kind = if status == 402
+    let kind = if matches!(code, "exceed_context_size_error" | "context_length_exceeded" | "context_window_exceeded") {
+        ErrorKind::ContextWindow
+    } else if status == 402
         || matches!(
             code,
             "insufficient_quota"

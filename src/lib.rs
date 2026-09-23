@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod sm;
+pub mod sse;
 pub mod config;
 pub mod comfyui;
 pub mod context_cmd;

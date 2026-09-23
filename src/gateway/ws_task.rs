@@ -6,6 +6,14 @@ use futures_util::{
     SinkExt, StreamExt,
 };
 
+fn display_event(user: &str, event: &str, content: String) -> Option<WsOutgoing> {
+    match event {
+        "feedback" => Some(WsOutgoing::Feedback { user_id: user.into(), content }),
+        "reasoning" => Some(WsOutgoing::Reasoning { user_id: user.into(), content }),
+        _ => None,
+    }
+}
+
 pub(super) async fn handle(
     state: &GatewayState,
     user: &str,
@@ -21,11 +29,25 @@ pub(super) async fn handle(
     let mut connected = true;
     loop {
         tokio::select! {
-            result = &mut work => return result,
+            result = &mut work => {
+                // The provider can publish reasoning and finish in the same poll.
+                // Drain it BEFORE the final response; otherwise select! drops it.
+                while connected {
+                    match feedback.try_recv() {
+                        Ok(event) => {
+                            if let Some(message) = display_event(user, &event.event, event.data) {
+                                connected = sender.send(Message::Text(serde_json::to_string(&message)?)).await.is_ok();
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+                return result;
+            },
             event = feedback.recv(), if connected => {
                 if let Ok(event) = event {
-                    if event.event == "feedback" {
-                        let message = WsOutgoing::Feedback { user_id: user.into(), content: event.data };
+                    if let Some(message) = display_event(user, &event.event, event.data) {
                         if sender.send(Message::Text(serde_json::to_string(&message)?)).await.is_err() {
                             connected = false;
                             task_control::cancel(user);

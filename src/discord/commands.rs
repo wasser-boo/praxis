@@ -186,6 +186,13 @@ pub async fn setup_commands(http: &serenity::http::Http) -> anyhow::Result<()> {
         .add_string_choice("auto — provider default", "auto"))
         .dm_permission(true);
     http.create_global_command(&thinking_cmd).await?;
+    let show = serenity::builder::CreateCommand::new("show_thinking")
+        .description("Show the model's complete reasoning output (separate from its answer)")
+        .add_option(serenity::builder::CreateCommandOption::new(
+            serenity::model::application::CommandOptionType::Boolean,
+            "enabled", "Show reasoning, including long output split into messages"
+        ).required(true)).dm_permission(true);
+    http.create_global_command(&show).await?;
 
     tracing::info!("All discord commands registered");
     Ok(())

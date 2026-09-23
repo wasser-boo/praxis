@@ -32,6 +32,8 @@ macro_rules! asset {
 // A coverage regression guards all shipped POML/JSON/SM/skill dependencies.
 const BUNDLED_ASSETS: &[Asset] = &[
     asset!("contexts/standard.sm"),
+    asset!("contexts/20-tasks.sm"),
+    asset!("templates/20-tasks.poml"),
     asset!("workflows/tts-api.json"),
     asset!("workflows/tts-qwen3-api.json"),
     asset!("integrations/comfyui_audio/__init__.py"),

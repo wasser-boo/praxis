@@ -54,6 +54,8 @@ impl Default for Context {
     }
 }
 
+fn default_tag_prefix() -> String { crate::tags::DEFAULT_TAG_PREFIX.into() }
+
 fn default_mode() -> String {
     "agent".to_string()
 }
@@ -210,10 +212,19 @@ pub struct ContextSettings {
     pub current_template: String,
     #[serde(default)]
     pub tags_enabled: bool,
+    /// Literal prefix for workflow/template commands; configured by the user.
+    #[serde(default = "default_tag_prefix")]
+    pub tag_prefix: String,
+    /// Named decisions/*.json profile. None or "off" disables automatic routing.
+    #[serde(default)]
+    pub decision_profile: Option<String>,
     /// Toggle extended-reasoning output for the active model, per provider.
     /// "auto" (default) leaves provider defaults untouched.
     #[serde(default = "default_thinking_mode")]
     pub thinking_mode: String,
+    /// Show provider-supplied reasoning separately; never use it as a final answer.
+    #[serde(default)]
+    pub show_thinking: bool,
     #[serde(default)]
     pub llm_turn: i32,
     #[serde(default)]
@@ -408,7 +419,10 @@ impl Default for ContextSettings {
             active_state: None,
             current_template: String::new(),
             tags_enabled: false,
+            tag_prefix: default_tag_prefix(),
+            decision_profile: None,
             thinking_mode: "auto".to_string(),
+            show_thinking: false,
             llm_turn: 0,
             compaction_enabled: false,
             compaction_summary: String::new(),
@@ -533,6 +547,22 @@ impl Database {
         Ok(())
     }
 
+    /// Atomic commit after an asynchronous routing decision. Never changes the
+    /// active-session pointer or overwrites a concurrent user edit.
+    pub fn compare_and_save_context(&self, expected: &Context, next: &Context) -> anyhow::Result<bool> {
+        anyhow::ensure!(expected.user_id==next.user_id && expected.session_id==next.session_id,"Routing must preserve user/session identity");
+        let mut conn=self.conn();let tx=conn.transaction()?;
+        let raw:String=tx.query_row("SELECT data FROM contexts WHERE user_id=?1",[&expected.user_id],|r|r.get(0))?;
+        let base=decode_context(&raw)?;
+        if base.session_id!=expected.session_id { return Ok(false); }
+        let key=Self::context_key(&expected.user_id,&expected.session_id);
+        let raw:String=tx.query_row("SELECT data FROM contexts WHERE user_id=?1",[&key],|r|r.get(0))?;
+        let current=decode_context(&raw)?;
+        if serde_json::to_value(current)?!=serde_json::to_value(expected)? {return Ok(false);}
+        tx.execute("UPDATE contexts SET data=?2,updated_at=datetime('now') WHERE user_id=?1",rusqlite::params![key,serde_json::to_string(next)?])?;
+        tx.commit()?;Ok(true)
+    }
+
     pub fn merge_context(
         &self,
         user_id: &str,
@@ -551,6 +581,10 @@ impl Database {
         let mut ctx = self.load_context(user_id)?;
         let previous_template = ctx.settings.system_template.clone();
         let previous_skill = ctx.settings.active_skill.clone();
+        let previous_show_thinking = ctx.settings.show_thinking;
+        let previous_tag_prefix = ctx.settings.tag_prefix.clone();
+        let previous_decision_profile = ctx.settings.decision_profile.clone();
+        let previous_workflow = crate::gateway::prompt::workflow_name(&ctx).to_string();
         let mut data: serde_json::Value = serde_json::to_value(&ctx)?;
         let mut updates = updates;
         normalize_legacy_keys(&mut updates);
@@ -565,14 +599,38 @@ impl Database {
 
         // Both historical state locations are accepted; keep the runtime's
         // canonical top-level state and the settings mirror in sync.
-        if let Some(active) = updates.get("active_state")
+        let state_update = updates.get("active_state")
             .or_else(|| updates.get("settings.active_state"))
-            .or_else(|| updates.pointer("/settings/active_state"))
-        {
+            .or_else(|| updates.pointer("/settings/active_state"));
+        if let Some(active) = state_update {
             data["active_state"] = active.clone();
             if data["settings"].is_object() { data["settings"]["active_state"] = active.clone(); }
         }
         ctx = serde_json::from_value(data)?;
+        anyhow::ensure!(!from_agent || ctx.settings.decision_profile==previous_decision_profile,
+            "Decision profile selection is user/workflow-author policy, not model writable");
+        if from_agent && previous_decision_profile.as_deref().is_some_and(|p|p!="off") {
+            anyhow::ensure!(state_update.is_none() && crate::gateway::prompt::workflow_name(&ctx)==previous_workflow,
+                "State/workflow selection is managed by the Decision router; continue the task without overriding it");
+        }
+        if ctx.settings.decision_profile!=previous_decision_profile {
+            if let Some(name)=ctx.settings.decision_profile.as_deref().filter(|p|*p!="off") {
+                crate::gateway::decision_profiles::load(std::path::Path::new("decisions"),name)?;
+            }
+        }
+        if from_agent && state_update.is_some() {
+            if let Some(target) = ctx.active_state.as_deref() {
+                let workflow = crate::sm::load_file(crate::gateway::prompt::workflow_name(&ctx))
+                    .map_err(|e| anyhow::anyhow!("Cannot select workflow state: {e}"))?;
+                anyhow::ensure!(target != "_default" && workflow.states.contains_key(target),
+                    "Undefined workflow state: {target}; current state unchanged");
+            }
+        }
+        crate::tags::validate_tag_prefix(&ctx.settings.tag_prefix)?;
+        anyhow::ensure!(!from_agent || ctx.settings.tag_prefix == previous_tag_prefix,
+            "Tag prefix is user/template-author configuration, not model writable");
+        anyhow::ensure!(!from_agent || ctx.settings.show_thinking == previous_show_thinking,
+            "Thinking visibility is user-only");
         anyhow::ensure!(ctx.user_id == user_id, "Context user_id cannot be changed");
         if ctx.settings.system_template != previous_template {
             if let Some(name) = &ctx.settings.system_template {

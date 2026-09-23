@@ -205,6 +205,9 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/skills", axum::routing::get(list_skills))
         .route("/router-state", axum::routing::get(router_state))
         .route("/delegations/:user_id", axum::routing::get(list_delegations_route))
+        .route("/decision-profiles", axum::routing::get(super::decision_profiles::list))
+        .route("/decision-profiles/:name", axum::routing::get(super::decision_profiles::get).put(super::decision_profiles::save))
+        .route("/decision-probe", axum::routing::post(super::decision_profiles::probe))
         .route("/templates", axum::routing::get(list_templates))
         .route("/templates", axum::routing::post(create_template))
         .route("/templates/:name", axum::routing::get(get_template))
@@ -485,8 +488,13 @@ async fn list_chat_sessions(
                 let flat: String = text.trim().chars().take(120).collect();
                 flat
             });
+        let title: Option<String> = conn.query_row(
+            "SELECT json_extract(data, '$.custom_data.session_title') FROM contexts WHERE user_id=?1",
+            rusqlite::params![user_id], |row| row.get(0),
+        ).ok().flatten();
         sessions.push(serde_json::json!({
             "user_id": user_id,
+            "session_title": title,
             "username": username,
             "updated_at": updated_at,
             "message_count": message_count,
@@ -1611,7 +1619,7 @@ async fn begin_agent(
         });
         let _ = client
             .post(url)
-            .header("x-api-key", &gateway_key)
+            .bearer_auth(&gateway_key)
             .json(&body)
             .send()
             .await;
@@ -2017,7 +2025,7 @@ async fn chat_query(
             let body = serde_json::json!({"user_id": uid, "message": msg});
             let _ = client
                 .post("http://127.0.0.1:3537/v1/chat")
-                .header("x-api-key", &gateway_key)
+                .bearer_auth(&gateway_key)
                 .json(&body)
                 .send()
                 .await;

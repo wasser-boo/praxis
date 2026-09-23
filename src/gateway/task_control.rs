@@ -9,6 +9,10 @@ use tokio_util::sync::CancellationToken;
 struct TaskState {
     token: CancellationToken,
     tools: Mutex<HashSet<String>>,
+    show_thinking: std::sync::atomic::AtomicBool,
+    template_omitted: std::sync::atomic::AtomicBool,
+    compaction_claimed: std::sync::atomic::AtomicBool,
+    decision_entry_claimed: std::sync::atomic::AtomicBool,
 }
 static TASKS: Lazy<DashMap<String, Arc<TaskState>>> = Lazy::new(DashMap::new);
 
@@ -26,11 +30,36 @@ pub fn begin(user: &str) -> anyhow::Result<TaskGuard> {
             let state = Arc::new(TaskState {
                 token: CancellationToken::new(),
                 tools: Mutex::new(HashSet::new()),
+                show_thinking: std::sync::atomic::AtomicBool::new(false),
+                template_omitted: std::sync::atomic::AtomicBool::new(false),
+                compaction_claimed: std::sync::atomic::AtomicBool::new(false),
+                decision_entry_claimed: std::sync::atomic::AtomicBool::new(false),
             });
             entry.insert(state.clone());
             Ok(TaskGuard { user: user.into(), state })
         }
     }
+}
+pub const TEMPLATE_OMITTED_MARKER: &str = "--template not rendered context to big--";
+pub fn claim_decision_entry(user: &str) -> bool {
+    TASKS.get(user).is_some_and(|task| !task.decision_entry_claimed.swap(true,std::sync::atomic::Ordering::Relaxed))
+}
+pub fn claim_compaction(user: &str) -> bool {
+    TASKS.get(user).is_some_and(|task| !task.compaction_claimed.swap(true,std::sync::atomic::Ordering::Relaxed))
+}
+pub fn note_template_omitted(user: &str) {
+    if let Some(task) = TASKS.get(user) { task.template_omitted.store(true, std::sync::atomic::Ordering::Relaxed); }
+}
+pub fn template_omitted(user: &str) -> bool {
+    TASKS.get(user).is_some_and(|task| task.template_omitted.load(std::sync::atomic::Ordering::Relaxed))
+}
+pub fn set_show_thinking(user: &str, enabled: bool) {
+    if let Some(task) = TASKS.get(user) {
+        task.show_thinking.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+pub fn show_thinking(user: &str) -> bool {
+    TASKS.get(user).is_some_and(|task| task.show_thinking.load(std::sync::atomic::Ordering::Relaxed))
 }
 pub fn cancellation(user: &str) -> Option<CancellationToken> {
     TASKS.get(user).map(|entry| entry.token.clone())

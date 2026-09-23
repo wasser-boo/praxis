@@ -1,6 +1,6 @@
 use super::{
     error::{CallFailure, ErrorKind, ProviderError},
-    provider::{ChatRequest, ChatResponse, ContentPart, LLMProvider, ToolCall},
+    provider::{ChatRequest, ChatResponse, ContentPart, LLMProvider, ToolCall, StreamDelta},
     resilience::{self, interruptible, ProviderGate, ResilienceConfig},
     LLMRouter,
 };
@@ -208,28 +208,46 @@ impl LLMRouter {
                 let attempt_deadline = deadline
                     .min(attempt_start + Duration::from_millis(self.policy.request_timeout_ms));
                 let mut stream = StreamAttempt::new(user);
-                let on_token = |token: String| {
-                    if token.is_empty() {
-                        return;
-                    }
-                    stream.emitted.store(true, Ordering::Relaxed);
+                if let Some(user) = user { crate::dashboard::stream::send(user, "stream_start", "{}"); }
+                let on_delta = |delta: StreamDelta| {
                     if let Some(user) = user {
-                        let mut buf = [0u8; 4];
-                        for ch in token.chars() {
-                            crate::dashboard::stream::send(user, "char", ch.encode_utf8(&mut buf));
+                        match &delta {
+                            StreamDelta::TemplateOmitted => crate::gateway::task_control::note_template_omitted(user),
+                            StreamDelta::Text { text } if !text.is_empty() => {
+                                stream.emitted.store(true, Ordering::Relaxed);
+                                crate::dashboard::stream::send(user, "char", text);
+                            }
+                            StreamDelta::Reasoning { text } if crate::gateway::task_control::show_thinking(user) => {
+                                crate::dashboard::stream::send(user, "reasoning_delta", text);
+                            }
+                            StreamDelta::ToolCall { .. } => {
+                                if let Ok(data) = serde_json::to_string(&delta) {
+                                    crate::dashboard::stream::send(user, "tool_call_delta", &data);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 };
                 tracing::info!(provider = %label(name), attempt = attempts, "LLM attempt started");
                 let call = async {
                     if user.is_some() {
-                        p.chat_stream(req.clone(), &on_token).await
+                        p.chat_stream_events(req.clone(), &on_delta).await
                     } else {
                         p.chat(req.clone()).await
                     }
                 };
                 let result = match interruptible(attempt_deadline, cancel, call).await {
-                    Ok(Ok(response)) => validate_response(response),
+                    Ok(Ok(response)) => {
+                        // Include cutoff attempts too, without promoting reasoning to
+                        // final text. This event is separate from disposable status.
+                        if let Some(user) = user.filter(|u| crate::gateway::task_control::show_thinking(u)) {
+                            if let Some(text) = response.reasoning_content.as_deref().filter(|s| !s.is_empty()) {
+                                crate::dashboard::stream::send(user, "reasoning", text);
+                            }
+                        }
+                        validate_response(response)
+                    },
                     Ok(Err(error)) => Err(ProviderError::from_anyhow(&error)),
                     Err(mut error) => {
                         if error.kind == ErrorKind::Deadline && attempt_deadline < deadline {
@@ -239,7 +257,13 @@ impl LLMRouter {
                     }
                 };
                 match result {
-                    Ok(response) => {
+                    Ok(mut response) => {
+                        if user.is_some_and(crate::gateway::task_control::template_omitted) && response.tool_calls.is_none() {
+                            if let Some(text) = response.content.as_mut() {
+                                let marker = crate::gateway::task_control::TEMPLATE_OMITTED_MARKER;
+                                if !text.ends_with(marker) { text.push_str("\n\n"); text.push_str(marker); }
+                            }
+                        }
                         if let Some(usage) = &response.usage {
                             let actual = u64::from(usage.total_tokens).max(
                                 u64::from(usage.prompt_tokens) + u64::from(usage.completion_tokens),
@@ -249,6 +273,7 @@ impl LLMRouter {
                             }
                         }
                         stream.committed = true;
+                        if let Some(user) = user { crate::dashboard::stream::send(user, "stream_end", "{}"); }
                         if let (Some(user), Some(text)) =
                             (user, response.content.as_deref().filter(|s| !s.trim().is_empty()))
                         {
@@ -351,6 +376,10 @@ fn label(name: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
+#[path = "local_reliability_tests.rs"]
+mod local_reliability_tests;
+
 fn validate_response(mut response: ChatResponse) -> Result<ChatResponse, ProviderError> {
     if response
         .tool_calls
@@ -359,18 +388,14 @@ fn validate_response(mut response: ChatResponse) -> Result<ChatResponse, Provide
     {
         response.tool_calls = None;
     }
-    let truncated = response.finish_reason.as_deref() == Some("length");
-    let mut content = response.content.clone();
-    // Deep-thinking models can spend the whole output budget on the think
-    // phase; surface the reasoning as the response instead of failing. This
-    // must be written back to `response.content` (not only into the local), or
-    // the reply is delivered blank even though validation passed.
-    if content.as_deref().is_none_or(|text| text.trim().is_empty()) {
-        if let Some(reasoning) = response.reasoning_content.as_deref().filter(|r| !r.trim().is_empty()) {
-            content = Some(reasoning.to_string());
-        }
+    // A cutoff is never a final answer or a safe batch of actions. Recovery is
+    // bounded by the router's existing attempt, time and output-token ceilings.
+    if response.finish_reason.as_deref() == Some("length") {
+        return Err(ProviderError::new(ErrorKind::OutputLimit));
     }
-    let has_text = content.as_deref().is_some_and(|text| !text.trim().is_empty());
+    // Reasoning is displayed separately when requested, never promoted to an
+    // answer, persisted as assistant/tool history, or spoken by TTS.
+    let has_text = response.content.as_deref().is_some_and(|text| !text.trim().is_empty());
     // Repair and validate tool calls. A token-budget cutoff can land in the
     // middle of a call's JSON arguments (finish_reason=length); that is a
     // recoverable output limit, NOT an invalid provider response. Dropping the
@@ -386,6 +411,10 @@ fn validate_response(mut response: ChatResponse) -> Result<ChatResponse, Provide
                 call.id = format!("{}_{}", call.id, ids.len() + 1);
             }
             ids.insert(call.id.clone());
+        }
+        if call.function.name.trim().is_empty() {
+            cut_call = true;
+            continue;
         }
         if call.function.arguments.trim().is_empty() {
             // llama.cpp omits arguments for no-argument tools.
@@ -403,23 +432,10 @@ fn validate_response(mut response: ChatResponse) -> Result<ChatResponse, Provide
         }
         repaired.push(call);
     }
-    if repaired.is_empty() && !has_text {
-        // Nothing usable came back. A budget cutoff is recoverable: the router
-        // doubles max_tokens (bounded by retry_max_output_tokens) and retries.
-        return Err(ProviderError::new(if truncated {
-            ErrorKind::OutputLimit
-        } else {
-            ErrorKind::InvalidResponse
-        }));
-    }
-    if cut_call && !has_text && truncated {
-        // The only payload was a cut-off call: retry with a larger allowance.
-        return Err(ProviderError::new(ErrorKind::OutputLimit));
+    if cut_call || (repaired.is_empty() && !has_text) {
+        return Err(ProviderError::new(ErrorKind::InvalidResponse));
     }
     response.tool_calls = (!repaired.is_empty()).then_some(repaired);
-    // Persist the substituted reasoning so downstream consumers (agent loop,
-    // dashboard, TTS) see it as the assistant reply instead of an empty turn.
-    response.content = content;
     Ok(response)
 }
 

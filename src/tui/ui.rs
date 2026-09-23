@@ -89,7 +89,9 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(pad_to_width(&truncate(&s.name, 18), 18), style),
                 Span::styled(format!(" {}", key_hint), Style::default().fg(TEXT_DIM)),
             ]);
-            ListItem::new(line)
+            ListItem::new(vec![line, Line::from(Span::styled(
+                format!("  ctx: {}", s.id), Style::default().fg(TEXT_DIM)
+            ))])
         })
         .collect();
 
@@ -185,7 +187,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw("   "),
         Span::styled(
-            format!("» {} ", session_name),
+            format!("» {}  [context: {}] ", session_name, app.active_user_id()),
             Style::default().fg(TEXT_PRIMARY),
         ),
         Span::raw("  "),
@@ -207,7 +209,9 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) {
 
     // Build all lines, top-to-bottom.
     let mut lines: Vec<Line> = Vec::new();
-    if app.transcript.is_empty() {
+    let live = app.live.bubbles();
+    let transcript: Vec<_> = app.transcript.iter().chain(live.iter()).collect();
+    if transcript.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "No messages yet — type a message and press Enter.",
@@ -218,12 +222,12 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(TEXT_DIM),
         )));
     } else {
-        for (idx, b) in app.transcript.iter().enumerate() {
+        for (idx, b) in transcript.iter().enumerate() {
             let bubble_lines = render_bubble(b, bubble_max, app.username());
             for l in bubble_lines {
                 lines.push(l);
             }
-            if idx + 1 < app.transcript.len() {
+            if idx + 1 < transcript.len() {
                 lines.push(Line::from(""));
             }
         }
@@ -266,6 +270,9 @@ fn render_bubble(b: &Bubble, max_width: usize, username: &str) -> Vec<Line<'stat
             ACCENT_PURPLE,
             BG_BUBBLE_BOT,
             max_width,
+        ),
+        Bubble::Thinking { content } => bubble_block(
+            "Thinking", content, BubbleAlign::Left, TEXT_DIM, BG_BUBBLE_TOOL, max_width,
         ),
         Bubble::Tool { name, content } => bubble_block(
             &format!("⚙ {name}"),

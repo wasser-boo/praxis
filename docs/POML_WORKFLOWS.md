@@ -50,6 +50,28 @@ To select explicitly, use the dashboard's dotted context editor or these context
 
 In Discord `/context`, enter the text after `/context` in its **command** option. The `standard` router has no unconditional template assignment, so manual selections persist until a matching role-switch rule. Other workflows may deliberately assign a template on every state entry.
 
+### Opt-in real working states and the 20-task experiment
+
+`contexts/20-tasks.sm` and `templates/20-tasks.poml` are separate from the default persona workflow:
+
+```text
+/context set settings.sm_file=20-tasks active_state=standard
+```
+
+The model selects a declared **real `active_state`** using `set_context`. There are no keyword auto-rules or forced phase queue. State variables and the matching POML instructions are refreshed before subsequent model requests in both chat and agent paths. `sm_data.role` is a derived compatibility label, not the routing input. Invalid model-selected state names are rejected without changing the current state.
+
+The default `custom_data.state_eval_policy` is `continuous`: reevaluate after evidence/tool steps as well as on task entry. `entry` and `fixed` are experimental comparison arms, not claimed optimizations. `tests/fixtures/20-tasks.json` contains twenty natural user tasks and private observer rubrics; user tasks never ask for a switch. See `scripts/bench_state_machine.py` and [the reliability work log](LOCAL_MODEL_RELIABILITY.md) for measured results and limits. An offline scripted integration test is not live acceptance; more transitions alone are not a benefit.
+
+### Configurable response-tag prefix
+
+```text
+/context set settings.tag_prefix="!praxis"
+```
+
+Templates can interpolate `{{settings.tag_prefix}}`; generated `tag_instructions` use the same setting. With response tags enabled, `!praxis/done` and `!praxis/next` are parsed literally (including regex-special characters in a prefix). Default is `§`; historical `§done` remains compatible. Prefixes must be 1–16 characters without whitespace/control characters. Model-written context updates cannot alter the prefix.
+
+The requested relevance-filter/forget-before-template lifecycle tags are **not implemented yet**. Do not treat their names as an available delete API. The plan is reversible request-context filtering with explicit trusted-template authority, never deletion triggered by interpolated user/tool content.
+
 ### Customize a language lesson
 
 Save this object at `custom_data.language_learning` (do not replace unrelated `custom_data`):

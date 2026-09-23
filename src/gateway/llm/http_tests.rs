@@ -151,7 +151,8 @@ async fn resilience_http_all_adapters_retry_429_and_keep_request_identical() {
             Some("ok"),
             "{name}"
         );
-        let requests = server.received_requests().await.unwrap();
+        let requests: Vec<_> = server.received_requests().await.unwrap().into_iter()
+            .filter(|r| r.method == "POST").collect();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].body, requests[1].body);
         if *name == "ollama" {
@@ -184,7 +185,7 @@ async fn resilience_http_all_adapters_reject_permanent_and_empty_responses() {
             let r = LLMRouter::with_providers(vec![p], provider, vec![], policy());
             let e = r.chat(request(), None).await.unwrap_err().to_string();
             assert!(!e.contains("PRIVATE"), "{e}");
-            assert_eq!(server.received_requests().await.unwrap().len(), 1, "{name}");
+            assert_eq!(server.received_requests().await.unwrap().iter().filter(|r|r.method == "POST").count(), 1, "{name}");
         }
     }
 }
@@ -307,40 +308,38 @@ async fn resilience_transport_failure_diagnostics_never_expose_url_credentials()
 }
 
 #[tokio::test]
-async fn llamacpp_reasoning_only_surfaces_on_streaming_path() {
-    // Reproduces the reported qwen reasoning-model payload: the model spent the
-    // whole output budget on its chain-of-thought, so content is empty and only
-    // reasoning_content carries text, with finish_reason=length. This must NOT
-    // raise InvalidResponse, and the reasoning must be surfaced as the reply on
-    // the streaming path (llamacpp uses the default chat_stream -> chat()).
+async fn llamacpp_reasoning_cutoff_is_visible_but_never_a_final_answer() {
+    // Provider reasoning is visible when opted in, including cutoff attempts.
+    // It must not become a false final answer or an endlessly retried response.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "reasoning_content": "step-by-step reasoning that exhausted the budget"
-                },
-                "finish_reason": "length"
-            }],
-            "usage": {"prompt_tokens": 7, "completion_tokens": 4096, "total_tokens": 4103}
-        })))
+        .respond_with(ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(format!("data: {}\n\ndata: [DONE]\n\n", serde_json::json!({
+                "choices":[{"index":0,"delta":{"reasoning_content":"step-by-step reasoning that exhausted the budget"},"finish_reason":"length"}],
+                "usage":{"prompt_tokens":7,"completion_tokens":4096,"total_tokens":4103}
+            }))))
+        .expect(2)
         .mount(&server)
         .await;
     let (p, _, _) = adapter("llamacpp", server.uri());
     let r = LLMRouter::with_providers(vec![p], "llamacpp".into(), vec![], policy());
-    let response = r
-        .streaming_chat(request(), None, "llamacpp-reasoning-only")
-        .await
-        .expect("reasoning-only reply must not raise InvalidResponse");
-    assert_eq!(
-        response.content.as_deref(),
-        Some("step-by-step reasoning that exhausted the budget"),
-        "reasoning must be written back into content, not discarded"
-    );
-    assert_eq!(response.finish_reason.as_deref(), Some("length"));
+    let user = "llamacpp-reasoning-only";
+    let _guard = crate::gateway::task_control::begin(user).unwrap();
+    crate::gateway::task_control::set_show_thinking(user, true);
+    let mut events = crate::dashboard::stream::get_or_create(user).subscribe();
+    let error = r.streaming_chat(request(), None, user).await.unwrap_err();
+    assert!(error.to_string().contains("output token limit"), "{error}");
+    let mut reasoning = 0;
+    while let Ok(event) = events.try_recv() {
+        assert_ne!(event.event, "assistant");
+        if event.event == "reasoning" {
+            assert_eq!(event.data, "step-by-step reasoning that exhausted the budget");
+            reasoning += 1;
+        }
+    }
+    assert_eq!(reasoning, 2);
 }
 
 /// Reproduces the reported production failure: a reasoning model spends ~130 s

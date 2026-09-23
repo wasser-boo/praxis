@@ -162,6 +162,7 @@ async function loadTabData(tab) {
             case 'vm': await loadVM(); break;
             case 'contexts': await loadContexts(); break;
             case 'templates': await loadTemplates(); break;
+            case 'decision-profiles': await loadDecisionProfiles(); break;
             case 'tools': await loadTools(); break;
             case 'secrets': await loadSecrets(); break;
             case 'pairings': await loadPairings(); break;
@@ -319,7 +320,10 @@ const SLASH_COMMANDS = [
     },
     { name: '/compact', desc: 'Summarize history, keep recent messages', action: chatCompactCommand },
     { name: '/skill', desc: 'List skills / activate: /skill NAME | off', takesArgs: true, action: chatSkillCommand },
-    { name: '/thinking', desc: 'Thinking mode: /thinking on|off|auto', takesArgs: true, action: chatThinkingCommand },
+    { name: '/thinking', desc: 'Thinking: off|low|medium|high|xhigh|auto', takesArgs: true, action: chatThinkingCommand },
+    { name: '/show_thinking', desc: 'Show reasoning: on|off', takesArgs: true, action: chatShowThinkingCommand },
+    { name: '/rename', desc: 'Rename active session; context ID stays unchanged', takesArgs: true,
+        action: raw => renameChatSession(chatUserId, String(raw || '').replace(/^\/rename\b/i, '').trim()) },
     { name: '/delegations', desc: 'Show delegated subtasks (status + result)', action: chatDelegationsCommand },
     { name: '/avatar', desc: 'Change your avatar', action: () => showAvatarModal('user') },
     { name: '/botavatar', desc: 'Change bot avatar', action: () => showAvatarModal('bot') },
@@ -370,11 +374,22 @@ async function chatSkillCommand(rawLine) {
     }
 }
 
-// /thinking on|off|auto: set settings.thinking_mode via context exec.
+async function chatShowThinkingCommand(rawLine) {
+    const arg = String(rawLine || '').replace(/^\/show_thinking\b/i, '').trim().toLowerCase();
+    if (!['on', 'off'].includes(arg)) { addChatMessage('system', 'Usage: /show_thinking on|off'); return; }
+    try {
+        await apiFetch(`/api/contexts/${encodeURIComponent(chatUserId)}`, {
+            method: 'PUT', body: JSON.stringify({ settings: { show_thinking: arg === 'on' } })
+        });
+        addChatMessage('system', `Thinking display: ${arg}.`);
+    } catch (err) { addChatMessage('feedback', err.message); }
+}
+
+// Generation effort and display visibility are independent settings.
 async function chatThinkingCommand(rawLine) {
     const arg = (typeof rawLine === 'string' ? rawLine.replace(/^\/thinking\b/i, '').trim().toLowerCase() : '');
-    if (!['on', 'off', 'auto'].includes(arg)) {
-        addChatMessage('system', 'Usage: /thinking on|off|auto');
+    if (!['on', 'off', 'auto', 'low', 'medium', 'high', 'xhigh'].includes(arg)) {
+        addChatMessage('system', 'Usage: /thinking off|low|medium|high|xhigh|on|auto');
         return;
     }
     try {
@@ -478,6 +493,19 @@ function renderSlashActive() {
     });
 }
 
+async function dispatchChatCommand(raw) {
+    const head = raw.trim().split(/\s+/)[0].toLowerCase();
+    const cmd = SLASH_COMMANDS.find(c => c.name === head);
+    if (!cmd) return false;
+    const input = document.getElementById('chat-input');
+    input.value = ''; input.style.height = 'auto';
+    const box = document.getElementById('slash-commands');
+    if (box) box.style.display = 'none';
+    try { await cmd.action(cmd.takesArgs ? raw : undefined); }
+    catch (err) { console.error('Slash command error:', err); }
+    return true;
+}
+
 function runSlashCommand(name) {
     const cmd = SLASH_COMMANDS.find(c => c.name === name);
     if (!cmd) return;
@@ -490,8 +518,12 @@ function runSlashCommand(name) {
     input.focus();
     input.setSelectionRange(newBefore.length, newBefore.length);
     document.getElementById('slash-commands').style.display = 'none';
-    // Execute the command
-    try { cmd.action(); } catch (err) { console.error('Slash command error:', err); }
+    if (cmd.takesArgs) {
+        input.value = cmd.name + ' ';
+        input.setSelectionRange(input.value.length, input.value.length);
+    } else {
+        dispatchChatCommand(cmd.name);
+    }
 }
 
 function chatKeyDown(e) {
@@ -505,6 +537,10 @@ function chatKeyDown(e) {
         renderSlashActive();
         items[slashActiveIndex]?.scrollIntoView({ block: 'nearest' });
         return;
+    }
+    if (e.key === 'Enter' && !e.shiftKey && SLASH_COMMANDS.some(c =>
+        c.name === String(e.target.value || '').trim().split(/\s+/)[0].toLowerCase())) {
+        e.preventDefault(); chatSendMessage(); return;
     }
     if (visible && e.key === 'Enter') {
         e.preventDefault();
@@ -652,6 +688,8 @@ async function chatStopAgent() {
 async function chatSendMessage() {
     const input = document.getElementById('chat-input');
     const msg = input.value.trim();
+    // Shared by Enter and the Send button; commands never enter model history.
+    if (msg.startsWith('/') && await dispatchChatCommand(msg)) return;
     if (!msg && chatAttachments.length === 0) return;
     // The persisted TTS switch may already be on after a reload. Unlock the
     // SAME player during Send/Enter, not only when toggling the switch.
@@ -916,7 +954,52 @@ function startChatStream() {
             if (d.data) addChatMessage('feedback', d.data);
         } catch (err) { console.error('[SSE feedback error]', err); }
     });
+    let reasoningMsg = null;
+    let reasoningText = '';
+    let toolPreviews = new Map();
+    const previewText = (node, text) => {
+        const el = node?.querySelector('.msg-content');
+        if (el) {
+            let box = el.querySelector('pre.model-output');
+            if (!box) { box = document.createElement('pre'); box.className = 'model-output'; box.style.whiteSpace = 'pre-wrap'; el.replaceChildren(box); }
+            box.textContent = text;
+        }
+        autoScrollChat();
+    };
+    es.addEventListener('stream_start', () => {
+        if (!current()) return;
+        reasoningMsg = null; reasoningText = ''; toolPreviews = new Map();
+    });
+    for (const event of ['reasoning_delta', 'reasoning']) {
+        es.addEventListener(event, (e) => {
+            if (!current()) return;
+            try {
+                const text = JSON.parse(e.data).data || '';
+                reasoningText = event === 'reasoning' ? text : reasoningText + text;
+                if (!reasoningMsg) reasoningMsg = addChatMessage('feedback', 'Thinking');
+                previewText(reasoningMsg, 'Thinking\n' + reasoningText);
+            } catch (err) { console.error('[SSE reasoning]', err); }
+        });
+    }
+    es.addEventListener('tool_call_delta', (e) => {
+        if (!current()) return;
+        try {
+            const delta = JSON.parse(JSON.parse(e.data).data);
+            let preview = toolPreviews.get(delta.index);
+            if (!preview) {
+                preview = { name: '', args: '', node: addChatMessage('feedback', 'Tool call — generating, not executed') };
+                toolPreviews.set(delta.index, preview);
+            }
+            preview.name += delta.name || ''; preview.args += delta.arguments || '';
+            previewText(preview.node, `Tool call — generating, not executed\n${preview.name}\n${preview.args}`);
+        } catch (err) { console.error('[SSE tool preview]', err); }
+    });
+    es.addEventListener('stream_end', () => {
+        if (!current()) return;
+        for (const p of toolPreviews.values()) previewText(p.node, `Tool call — received; execution reported separately\n${p.name}\n${p.args}`);
+    });
     es.addEventListener('stream_abort', () => {
+        if (current()) for (const p of toolPreviews.values()) previewText(p.node, `Tool call — aborted, not executed\n${p.name}\n${p.args}`);
         if (!current()) return;
         // A failed/cancelled generation is never a completed reply. Remove its
         // provisional bubble so a subsequent call cannot append duplicate text.
@@ -1613,6 +1696,7 @@ async function mergeServerChatSessions() {
             if (!s.user_id) continue;
             const existing = chatSessions.find(c => c.id === s.user_id);
             if (existing) {
+                if (s.session_title && existing.name !== s.session_title) { existing.name = s.session_title; changed = true; }
                 if (!existing.name && s.preview) {
                     existing.name = s.preview.replace(/\s+/g, ' ').slice(0, 40);
                     changed = true;
@@ -1622,7 +1706,7 @@ async function mergeServerChatSessions() {
             const preview = (s.preview || '').replace(/\s+/g, ' ').trim().slice(0, 40);
             chatSessions.push({
                 id: s.user_id,
-                name: preview || s.username || s.user_id.slice(0, 12),
+                name: s.session_title || preview || s.username || s.user_id.slice(0, 12),
                 username: s.username || chatUsername,
                 server: true,
             });
@@ -1688,11 +1772,27 @@ function renderChatSessionList() {
         const label = s.name || s.username || s.id;
         return `
         <div class="chat-session ${s.id === chatUserId ? 'active' : ''}" onclick="switchChatSession('${escapeHtml(s.id)}')">
-            <span class="session-name" ondblclick="event.stopPropagation();startRenameSession('${escapeHtml(s.id)}', this)">${escapeHtml(label)}</span>
+            <span class="session-name" title="Context: ${escapeHtml(s.id)}" ondblclick="event.stopPropagation();startRenameSession('${escapeHtml(s.id)}', this)">${escapeHtml(label)}<small style="display:block;overflow-wrap:anywhere;opacity:0.65">Context: ${escapeHtml(s.id)}</small></span>
             ${chatSessions.length > 1 ? `<span class="session-del" onclick="event.stopPropagation();deleteChatSession('${escapeHtml(s.id)}')">×</span>` : ''}
         </div>
     `;
     }).join('');
+}
+
+async function renameChatSession(id, name) {
+    const title = name.trim();
+    if (!title || [...title].length > 128) { addChatMessage('feedback', 'Session name must contain 1–128 characters.'); return false; }
+    try {
+        const res = await apiFetch(`/api/contexts/${encodeURIComponent(id)}`, {
+            method: 'PUT', body: JSON.stringify({ 'custom_data.session_title': title })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const session = chatSessions.find(s => s.id === id);
+        if (session) session.name = title;
+        saveChatSessions(); renderChatSessionList();
+        addChatMessage('system', `Session “${title}” — context: ${id}`);
+        return true;
+    } catch (err) { addChatMessage('feedback', 'Rename failed: ' + err.message); return false; }
 }
 
 function startRenameSession(id, el) {
@@ -1707,12 +1807,12 @@ function startRenameSession(id, el) {
     el.replaceWith(input);
     input.focus();
     input.select();
-    const save = () => {
+    let saving = false;
+    const save = async () => {
+        if (saving) return;
+        saving = true;
         const newName = input.value.trim();
-        if (newName && newName !== oldName) {
-            s.name = newName;
-            saveChatSessions();
-        }
+        if (newName && newName !== oldName) await renameChatSession(id, newName);
         renderChatSessionList();
     };
     input.addEventListener('blur', save);
@@ -2155,6 +2255,78 @@ async function saveTemplate(name) {
             : `<div style="color:var(--error,#f44)">${escapeHtml(data.error || '')}</div>`;
     }
     if (data.success) loadTemplates();
+}
+
+// ═══ Decision profiles: editable files, raw classification-only probe ═══
+async function loadDecisionProfiles() {
+    const list = document.getElementById('decision-profiles-list');
+    try {
+        const res = await apiGet('/api/decision-profiles');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Could not list profiles');
+        list.replaceChildren();
+        for (const name of data.profiles || []) {
+            const row = document.createElement('div'); row.className = 'data-item';
+            const label = document.createElement('span'); label.className = 'name'; label.textContent = name + '.json';
+            const button = document.createElement('button'); button.className = 'btn btn-sm'; button.textContent = 'Edit / test';
+            button.addEventListener('click', () => editDecisionProfile(name));
+            row.append(label, button); list.append(row);
+        }
+        if (!list.childElementCount) list.textContent = 'No Decision profiles yet.';
+    } catch (err) { list.textContent = err.message; }
+}
+async function editDecisionProfile(name = '') {
+    const response = await apiGet('/api/decision-profiles/' + encodeURIComponent(name || 'task-router'));
+    const data = await response.json();
+    if (name && !response.ok) { alert(data.error || 'Could not read profile'); return; }
+    const content = response.ok ? data.content : JSON.stringify({
+        endpoint: 'http://127.0.0.1:11440/v1/decision', model: 'CHANGE_ME',
+        instructions: 'Describe your task categories here.',
+        schema: {category: {type: 'enum', choices: ['A']}},
+        state_field: 'category', state_map: {A: 'YOUR_DECLARED_STATE'},
+        reevaluate: 'every_step', timeout_ms: 2000, minimum_probability: 0.8
+    }, null, 2);
+    showModal('Decision profile', `
+        <p>Model, instructions and schema follow the Decision Playground protocol. The endpoint must serve the selected model; this editor does not download models or rent hardware. Do not put credentials in this JSON.</p>
+        <div class="form-group"><label>Profile name (without .json)</label><input id="decision-profile-name" value="${escapeHtml(name)}" ${name ? 'readonly' : ''}></div>
+        <textarea id="decision-profile-json" class="code-editor" style="min-height:360px">${escapeHtml(content)}</textarea>
+        <button class="btn btn-primary" onclick="saveDecisionProfile()">Save JSON file</button>
+        <p id="decision-profile-save-status"></p>
+        <div class="form-group"><label>Raw test contexts (separate with a line containing ---)</label><textarea id="decision-probe-input" class="code-editor" style="min-height:100px"></textarea></div>
+        <p>Test uses the current editor draft. It does not render input_template or change any context/state/history.</p>
+        <button class="btn" id="decision-probe-button" onclick="probeDecisionProfile()">Test classification only</button>
+        <pre id="decision-probe-result" style="white-space:pre-wrap"></pre>`);
+}
+async function saveDecisionProfile() {
+    const status = document.getElementById('decision-profile-save-status');
+    try {
+        const name = document.getElementById('decision-profile-name').value.trim();
+        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) throw new Error('Use 1–64 letters, digits, _ or -; start with a letter/digit.');
+        const content = document.getElementById('decision-profile-json').value;
+        JSON.parse(content);
+        const res = await apiFetch('/api/decision-profiles/' + encodeURIComponent(name), {method:'PUT', body:JSON.stringify({content})});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Save failed');
+        status.textContent = 'Saved decisions/' + name + '.json. Select it via settings.decision_profile in the context or .sm.';
+        document.getElementById('decision-profile-name').readOnly = true;
+        await loadDecisionProfiles();
+    } catch (err) { status.textContent = err.message; }
+}
+async function probeDecisionProfile() {
+    const output = document.getElementById('decision-probe-result');
+    const button = document.getElementById('decision-probe-button');
+    button.disabled = true;
+    try {
+        const profile = JSON.parse(document.getElementById('decision-profile-json').value);
+        const contexts = document.getElementById('decision-probe-input').value.replace(/\r\n/g, '\n').split(/^---\s*$/m).map(s => s.trim()).filter(Boolean);
+        if (!contexts.length) throw new Error('Enter at least one synthetic test context.');
+        output.textContent = 'Classifying…';
+        const res = await apiFetch('/api/decision-probe', {method:'POST', body:JSON.stringify({profile, contexts})});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Probe failed');
+        output.textContent = JSON.stringify(data, null, 2);
+    } catch (err) { output.textContent = err.message; }
+    finally { button.disabled = false; }
 }
 
 // ═══ Tools ════════════════════════════════════════════════════════════════

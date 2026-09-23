@@ -19,6 +19,7 @@ fn discovery_is_bounded_task_local_and_respects_disabled_tools() {
         let _task = task_control::begin(&user).unwrap();
         let result: serde_json::Value = serde_json::from_str(&search(&db, &plugins, &user, &json!({"query":"brave", "limit":1})).unwrap()).unwrap();
         assert_eq!(result["tools"][0]["name"], "brave_web_search");
+        assert!(result["tools"][0].get("parameters").is_none(), "Schemas belong in the next request's tools, not twice in history");
         assert!(definitions(&db, &plugins, &user).unwrap().iter().any(|t| t.function.name == "brave_web_search"));
         assert!(!definitions(&db, &plugins, "other-user").unwrap().iter().any(|t| t.function.name == "brave_web_search"));
         search(&db, &plugins, &user, &json!({"query":"memory_set"})).unwrap();

@@ -19,6 +19,7 @@ pub enum ErrorKind {
     QueueFull,
     Deadline,
     TokenBudget,
+    ContextWindow,
 }
 
 impl ErrorKind {
@@ -52,6 +53,7 @@ impl fmt::Display for ErrorKind {
             Self::QueueFull => "LLM queue full; try again later",
             Self::Deadline => "LLM time budget exhausted (including queue, requests and retry waits)",
             Self::TokenBudget => "request exceeds configured LLM_TOKENS_PER_MINUTE; reduce context/output or increase the limit",
+            Self::ContextWindow => "request exceeds the model context window even after safe history/tool-output selection; shorten the current input, simplify instructions/tools, or use a larger window (saved history and tool results are unchanged)",
         })
     }
 }

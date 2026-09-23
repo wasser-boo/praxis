@@ -1,6 +1,12 @@
 use super::Database;
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_HISTORY_TOKENS: usize = 32_000;
+
+#[cfg(test)]
+#[path = "history_budget_tests.rs"]
+mod history_budget_tests;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallData {
     pub id: String,
@@ -316,19 +322,32 @@ impl Database {
             })
         })?;
 
+        // Budget whole user turns, not individual rows: a tool receipt must
+        // never be detached from the assistant call that produced it. Keep the
+        // current turn intact even if oversized; provider preflight must fit it
+        // against the actual complete-request context, not silently lose input.
+        let mut turn = Vec::new();
+        let mut turn_tokens = 0usize;
         for row in rows {
             let msg = row?;
-            // Discord-mirror rows are display-only; never replay them into the
-            // LLM conversation history.
-            if msg.is_discord_mirror() {
-                continue;
+            if msg.is_discord_mirror() { continue; }
+            turn_tokens = turn_tokens.saturating_add(estimate_message_tokens(&msg));
+            let boundary = msg.role == "user";
+            turn.push(msg);
+            if boundary {
+                if !messages.is_empty() && total_tokens.saturating_add(turn_tokens) > token_budget {
+                    turn.clear();
+                    break;
+                }
+                total_tokens = total_tokens.saturating_add(turn_tokens);
+                messages.append(&mut turn);
+                turn_tokens = 0;
+                if total_tokens >= token_budget { break; }
             }
-            let tokens = estimate_message_tokens(&msg);
-            if total_tokens + tokens > token_budget && !messages.is_empty() {
-                break;
-            }
-            total_tokens += tokens;
-            messages.push(msg);
+        }
+        if !turn.is_empty() && (messages.is_empty() || total_tokens.saturating_add(turn_tokens) <= token_budget) {
+            total_tokens = total_tokens.saturating_add(turn_tokens);
+            messages.append(&mut turn);
         }
 
         messages.reverse();
@@ -433,6 +452,27 @@ impl Database {
 
     /// Compaction must keep the original rows: delete/reinsert changes reply
     /// identities and discards their saved audio (including still-running TTS).
+    /// Atomically replace summarized rows with a handoff. CAS the prior summary
+    /// and session so a concurrent manual clear/switch cannot erase new work.
+    pub fn commit_compaction(&self, user: &str, session: &str, previous: &str, summary: &str, prefix: &[Message]) -> anyhow::Result<()> {
+        anyhow::ensure!(!summary.trim().is_empty() && !prefix.is_empty(), "Empty compaction");
+        let ids: Vec<i64> = prefix.iter().filter_map(|m|m.id).collect();
+        anyhow::ensure!(ids.len()==prefix.len(), "Compaction requires saved message IDs");
+        let mut conn=self.conn();
+        let tx=conn.transaction()?;
+        let key=self.resolve_user_key(&tx,user);
+        let raw:String=tx.query_row("SELECT data FROM contexts WHERE user_id=?1",[&key],|r|r.get(0))?;
+        let ctx:crate::db::contexts::Context=serde_json::from_str(&raw)?;
+        anyhow::ensure!(ctx.session_id==session && ctx.settings.compaction_summary==previous,"Session/summary changed during compaction");
+        let ids=serde_json::to_string(&ids)?;
+        let count:i64=tx.query_row("SELECT count(*) FROM messages WHERE user_id=?1 AND id IN (SELECT value FROM json_each(?2))",rusqlite::params![key,ids],|r|r.get(0))?;
+        anyhow::ensure!(count as usize==prefix.len(),"History changed during compaction");
+        tx.execute("UPDATE contexts SET data=json_set(data,'$.settings.compaction_summary',?2),updated_at=datetime('now') WHERE user_id=?1",rusqlite::params![key,summary])?;
+        tx.execute("DELETE FROM messages WHERE user_id=?1 AND id IN (SELECT value FROM json_each(?2)) AND role NOT IN ('discord_user','discord_bot')",rusqlite::params![key,ids])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn retain_chat_messages(&self, user_id: &str, messages: &[Message]) -> anyhow::Result<()> {
         let ids: Vec<_> = messages.iter().filter_map(|m| m.id).collect();
         anyhow::ensure!(ids.len() == messages.len(), "Cannot retain messages without DB ids");
@@ -461,6 +501,22 @@ impl Database {
 mod db_tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn compaction_commit_updates_only_the_active_session_handoff() {
+        let (db,_dir)=test_db();
+        let mut ctx=db.load_context("user1").unwrap();
+        ctx.session_id="other-session".into();
+        db.save_context(&ctx).unwrap();
+        db.add_message("user1",&Message::user("old goal".into())).unwrap();
+        db.add_message("user1",&Message::assistant("old verified result".into())).unwrap();
+        let prefix=db.get_messages("user1",100).unwrap();
+        db.add_message("user1",&Message::user("current task".into())).unwrap();
+        db.commit_compaction("user1","other-session","","verified handoff",&prefix).unwrap();
+        assert_eq!(db.load_context("user1").unwrap().settings.compaction_summary,"verified handoff");
+        assert_eq!(db.load_session_context("user1","default").unwrap().settings.compaction_summary,"");
+        assert_eq!(db.get_messages("user1",100).unwrap()[0].content,"current task");
+    }
 
     fn test_db() -> (Database, TempDir) {
         let dir = TempDir::new().unwrap();

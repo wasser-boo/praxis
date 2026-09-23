@@ -810,6 +810,11 @@ fn set_nested_value(context: &mut serde_json::Value, path: &str, value: serde_js
         current = current.as_object_mut().unwrap().get_mut(*part).unwrap();
     }
 
+    // Optional namespaces such as sm_data start as null in a fresh context.
+    // The final parent must become an object too, not silently drop state vars.
+    if !current.is_object() {
+        *current = serde_json::json!({});
+    }
     if let Some(obj) = current.as_object_mut() {
         obj.insert(parts.last().unwrap().to_string(), value);
     }

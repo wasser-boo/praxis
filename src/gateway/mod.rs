@@ -3,6 +3,18 @@ pub mod auth;
 pub mod cron_scheduler;
 pub mod delegation;
 pub mod http_handler;
+pub mod client_api;
+pub mod compaction;
+pub mod decision_profiles;
+pub mod decision_client;
+pub mod decision_routing;
+pub mod workflow_actions;
+#[cfg(test)]
+mod decision_tests;
+#[cfg(test)]
+mod workflow_action_tests;
+#[cfg(test)]
+mod state_machine_tests;
 pub mod llm;
 pub mod message_handler;
 pub mod poml;
@@ -63,12 +75,15 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
     let app = axum::Router::new()
         .route("/health", axum::routing::get(http_handler::health_check))
         .route("/api/auth/login", axum::routing::post(auth::login_handler))
-        .route("/v1/chat", axum::routing::post(http_handler::chat_handler))
         .with_state(state.clone());
 
     let protected = axum::Router::new()
+        .merge(client_api::routes())
+        .route("/v1/chat", axum::routing::post(http_handler::chat_handler))
         .route("/ws", axum::routing::get(ws_handler::ws_handler))
         .route("/api/status", axum::routing::get(http_handler::status))
+        .route("/v1/events/:user", axum::routing::get(http_handler::events))
+        .route("/v1/stop/:user", axum::routing::post(http_handler::stop))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
