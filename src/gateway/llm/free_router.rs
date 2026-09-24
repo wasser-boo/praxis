@@ -55,8 +55,19 @@ impl LLMProvider for FreeRouterProvider {
             }
         }
 
+        tracing::debug!(?body, "FreeRouter request body");
+
         let resp = req.send().await.map_err(super::error::ProviderError::from_reqwest)?;
-        let data = super::http::json(resp).await?;
+        let status = resp.status();
+        let response_text = resp.text().await.unwrap_or_default();
+        
+        if !status.is_success() {
+            tracing::error!(status = %status, body = %response_text, "FreeRouter error response");
+        } else {
+            tracing::debug!(body = %response_text, "FreeRouter success response");
+        }
+        
+        let data: serde_json::Value = serde_json::from_str(&response_text)?;
         let choice = &data["choices"][0];
         let message = &choice["message"];
 
