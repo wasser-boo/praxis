@@ -67,6 +67,8 @@ const BUNDLED_ASSETS: &[Asset] = &[
     asset!("templates/shared/blueprint.poml"),
     asset!("templates/shared/runtime.poml"),
     asset!("templates/shared/runtime_minimal.poml"),
+    asset!("templates/shared/output_format.poml"),
+    asset!("templates/shared/state_base.poml"),
     asset!("templates/discovery/skills.poml"),
     asset!("templates/shared/task_inputs.poml"),
     asset!("templates/tasks/plan.poml"),
@@ -79,22 +81,22 @@ const BUNDLED_ASSETS: &[Asset] = &[
     asset!("templates/tasks/transcript_check.poml"),
     asset!("templates/states/standard/standard.poml"),
     asset!("templates/states/standard/standard.json"),
-    asset!("templates/states/teach/teach.poml"),
     asset!("templates/states/teach/teach.json"),
-    asset!("templates/states/code/code.poml"),
+    asset!("templates/states/teach/teach.poml"),
     asset!("templates/states/code/code.json"),
-    asset!("templates/states/code_architect/code_architect.poml"),
+    asset!("templates/states/code/code.poml"),
     asset!("templates/states/code_architect/code_architect.json"),
-    asset!("templates/states/senior_dev/senior_dev.poml"),
+    asset!("templates/states/code_architect/code_architect.poml"),
     asset!("templates/states/senior_dev/senior_dev.json"),
-    asset!("templates/states/expert_programmer/expert_programmer.poml"),
+    asset!("templates/states/senior_dev/senior_dev.poml"),
     asset!("templates/states/expert_programmer/expert_programmer.json"),
-    asset!("templates/states/debugger/debugger.poml"),
+    asset!("templates/states/expert_programmer/expert_programmer.poml"),
     asset!("templates/states/debugger/debugger.json"),
-    asset!("templates/states/review/review.poml"),
+    asset!("templates/states/debugger/debugger.poml"),
     asset!("templates/states/review/review.json"),
-    asset!("templates/states/research/research.poml"),
+    asset!("templates/states/review/review.poml"),
     asset!("templates/states/research/research.json"),
+    asset!("templates/states/research/research.poml"),
     asset!("skills/code_review/skill.json"),
     asset!("skills/code_review/skill.poml"),
     asset!("skills/debug/skill.json"),
@@ -156,11 +158,11 @@ pub struct InstallReport {
     pub backup_dir: Option<PathBuf>,
 }
 
-/// Fill missing bundled assets only. Existing prompt/SM/skill/configuration files
-/// are never replaced. `update_dashboard` explicitly allows replacing DIFFERENT
-/// bundled static files, with a recoverable backup of every previous file.
+/// Fill missing bundled assets. If `overwrite` is true, replaces ALL existing bundled assets.
+/// If `update_dashboard` is true, also updates dashboard files (with backup).
+/// Existing prompt/SM/skill/configuration files are replaced when `overwrite` is true.
 /// Each file is atomic; this is not a cross-file transaction.
-pub fn install(directory: &Path, update_dashboard: bool) -> anyhow::Result<InstallReport> {
+pub fn install(directory: &Path, update_dashboard: bool, overwrite: bool) -> anyhow::Result<InstallReport> {
     fs::create_dir_all(directory)
         .with_context(|| format!("Cannot create asset directory {}", directory.display()))?;
     let root = directory.canonicalize()?;
@@ -184,7 +186,7 @@ pub fn install(directory: &Path, update_dashboard: bool) -> anyhow::Result<Insta
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(error.into()),
         };
-        let update = existing && update_dashboard && asset.path.starts_with("static/");
+        let update = existing && (update_dashboard && asset.path.starts_with("static/") || overwrite);
         if existing && !update {
             report.preserved.push(asset.path);
             continue;

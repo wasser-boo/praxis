@@ -500,11 +500,24 @@ pub fn build_tool_definitions(
         "None" => ToolDiscoveryMode::None,
         _ => ToolDiscoveryMode::DescriptionOnly,
     };
-    // If no explicit filters, allow all default-enabled tools
-    let allowed_names = None::<&[String]>;
-    let allowed_cats = None::<&[ToolCategory]>;
-
-    let mut tools = filter_tools_for_request(allowed_names, allowed_cats, full_names, full_cats.as_deref(), discovery_mode);
+    // Determine allowed tools from state config
+    // If state explicitly configures tools, use as allow-list; otherwise allow all
+    let has_explicit_config = !ctx_settings.full_tool_schemas.is_empty()
+        || !ctx_settings.full_tool_categories.is_empty()
+        || ctx_settings.tool_groups.as_ref().is_some_and(|g| !g.is_empty());
+    
+    let allowed_names = if has_explicit_config {
+        Some(full_schemas.as_slice())
+    } else {
+        None
+    };
+    let allowed_cats = if has_explicit_config {
+        Some(parse_tool_categories(&ctx_settings.full_tool_categories))
+    } else {
+        None
+    };
+    
+    let mut tools = filter_tools_for_request(allowed_names.as_deref(), allowed_cats.as_deref(), full_names, full_cats.as_deref(), discovery_mode);
     
     // Merge plugin tools - also filter them by state settings
     if let Some(plugins) = plugin_tools {

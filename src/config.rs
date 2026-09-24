@@ -51,6 +51,8 @@ pub struct Config {
     pub dashboard_tls: bool,
     pub dashboard_admin_password: String,
     pub data_dir: String,
+    /// Installation root directory (where templates/, contexts/ are located)
+    pub root_dir: String,
     pub rust_log: String,
     pub vm_enabled: bool,
     pub vm_cpu_cores: u32,
@@ -121,6 +123,7 @@ impl Config {
                 .unwrap_or(false),
             dashboard_admin_password: env::var("DASHBOARD_ADMIN_PASSWORD").unwrap_or_default(),
             data_dir: env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string()),
+            root_dir: env::var("ROOT_DIR").unwrap_or_else(|_| ".".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             vm_enabled: env::var("VM_ENABLED")
                 .map(|v| v == "true" || v == "1")

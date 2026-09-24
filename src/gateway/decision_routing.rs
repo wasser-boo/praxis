@@ -7,7 +7,7 @@ use std::{path::Path,time::Instant};
 
 pub async fn prepare(state:&GatewayState,user:&str,input:&str,turn:Option<i32>,channel:Option<&str>)->anyhow::Result<Context> {
     let ctx=prompt::prepare_runtime(state,user,input,turn,channel)?;
-    route_in(Path::new("."),state,ctx,input,channel).await
+    route_in(std::path::Path::new(&state.config.root_dir),state,ctx,input,channel).await
 }
 
 pub(crate) async fn route_in(root:&Path,state:&GatewayState,ctx:Context,input:&str,channel:Option<&str>)->anyhow::Result<Context> {

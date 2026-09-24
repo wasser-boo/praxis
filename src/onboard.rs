@@ -674,7 +674,7 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
     // One complete bundle for onboarding and repair, including all relative
     // POML imports, canonical contexts/*.sm, native skills and bitmap branding.
     // Preserve existing user customizations instead of overwriting prompts.
-    let assets = crate::assets::install(std::path::Path::new("."), false)?;
+    let assets = crate::assets::install(std::path::Path::new("."), false, false)?;
     println!("Installed {} runtime assets; preserved {} existing files.", assets.created.len(), assets.preserved.len());
     println!("For dashboard upgrades without reconfiguring: ./praxis repair-assets --update-dashboard");
 

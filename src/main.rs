@@ -36,6 +36,9 @@ enum Cli {
         /// Also update bundled dashboard files, backing up changed files first
         #[arg(long)]
         update_dashboard: bool,
+        /// Overwrite ALL existing bundled assets (not just dashboard), use with caution
+        #[arg(long)]
+        overwrite: bool,
     },
     /// Manage the Praxis system service
     Service {
@@ -322,10 +325,10 @@ async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // Offline repair must not load .env, unlock secrets, initialize a database
     // or start services. It only touches the explicit public-asset allow-list.
-    if let Cli::RepairAssets { directory, update_dashboard } = &cli {
-        let report = praxis::assets::install(directory, *update_dashboard)?;
-        println!("Assets in {}: {} created, {} preserved, {} dashboard files updated.", directory.display(), report.created.len(), report.preserved.len(), report.updated.len());
-        if let Some(backup) = &report.backup_dir { println!("Previous dashboard files: {}", backup.display()); }
+    if let Cli::RepairAssets { directory, update_dashboard, overwrite } = &cli {
+        let report = praxis::assets::install(directory, *update_dashboard, *overwrite)?;
+        println!("Assets in {}: {} created, {} preserved, {} updated.", directory.display(), report.created.len(), report.preserved.len(), report.updated.len());
+        if let Some(backup) = &report.backup_dir { println!("Previous files backed up to: {}", backup.display()); }
         println!("Configuration, secrets, databases and service state were not changed.");
         return Ok(());
     }
@@ -1560,7 +1563,7 @@ mod tests {
     fn test_cli_parsing_repair_assets() {
         let cli = Cli::try_parse_from(["praxis", "repair-assets", "--directory", "/synthetic/install", "--update-dashboard"]).unwrap();
         match cli {
-            Cli::RepairAssets { directory, update_dashboard } => {
+            Cli::RepairAssets { directory, update_dashboard, overwrite } => {
                 assert_eq!(directory, std::path::PathBuf::from("/synthetic/install"));
                 assert!(update_dashboard);
             }

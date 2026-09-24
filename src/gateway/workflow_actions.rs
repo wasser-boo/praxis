@@ -25,8 +25,15 @@ fn workflow_directive(path:&Path,prefix:&str)->anyhow::Result<Option<String>> {
 /// Plan a bounded fixed point: SM → template → optional workflow selection.
 /// No DB/network/write operations; errors leave the caller's context untouched.
 pub fn plan(root:&Path,original:&Context,input:&str,plugins:&PluginRegistry,channel:Option<&str>)->anyhow::Result<Context> {
+    // If system_template is explicitly set to a non-default value, skip routing
+    // Default system_template is None or "standard"; "states/standard/standard" is a resolved value, not a default
+    let skip_routing = original.settings.system_template.as_deref().is_some_and(|s| s != "standard" && s != "states/standard/standard");
+    
     let mut candidate=original.clone();let mut seen=HashSet::new();
     for _ in 0..4 {
+        if skip_routing {
+            return Ok(candidate);
+        }
         let old_workflow=super::prompt::workflow_name(&candidate).to_string();
         super::prompt::route_context_once(root,&mut candidate,input,plugins,channel)?;
         let workflow=super::prompt::workflow_name(&candidate).to_string();

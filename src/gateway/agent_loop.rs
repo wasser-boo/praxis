@@ -175,7 +175,7 @@ async fn run_agent_loop_inner(
     if ctx.settings.sm_file.is_none() && ctx.sm_file.is_none() {
         ctx.sm_file = config.sm_file.clone();
     }
-    crate::gateway::prompt::route_context(std::path::Path::new("."), &mut ctx, &user_message, &state.plugins, None)?;
+    crate::gateway::prompt::route_context(std::path::Path::new(&state.config.root_dir), &mut ctx, &user_message, &state.plugins, None)?;
     state.db.save_context(&ctx)?;
     // Store the RAW user input; render_user runs per request (raw-storing policy).
     state.db.add_message(

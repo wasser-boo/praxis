@@ -60,6 +60,9 @@ pub struct StateMachine {
     pub overrides: Vec<SmOverride>,
     #[serde(default)]
     pub secret_overrides: Vec<SmSecretOverride>,
+    /// User-defined tool groups: name -> list of tool names (can reference other groups)
+    #[serde(default)]
+    pub tool_groups: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -228,6 +231,12 @@ pub fn parse(content: &str) -> Result<StateMachine, SmError> {
             Some("secrets") => {
                 let secret_overr = parse_secret_override(trimmed, line_num)?;
                 sm.secret_overrides.push(secret_overr);
+            }
+            Some("tool_groups") => {
+                let (key, value) = parse_assignment(trimmed, line_num)?;
+                // Parse array value like [tool1, tool2] or single tool
+                let tools = parse_array(&value);
+                sm.tool_groups.insert(key, tools);
             }
             _ => {
                 if trimmed.contains('=') && !trimmed.contains("->") {
@@ -441,11 +450,68 @@ fn parse_secret_override(line: &str, line_num: usize) -> Result<SmSecretOverride
     })
 }
 
+/// Resolve tool groups and add to context settings
+fn apply_tool_groups(sm: &StateMachine, context: &mut serde_json::Value) {
+    if sm.tool_groups.is_empty() {
+        return;
+    }
+    
+    // Resolve all groups (expand references to other groups)
+    let resolved = resolve_tool_groups(&sm.tool_groups);
+    
+    // Add to context settings.tool_groups
+    let settings = context
+        .get_mut("settings")
+        .and_then(|s| s.as_object_mut());
+    
+    if let Some(settings_obj) = settings {
+        let mut existing_groups = settings_obj
+            .get("tool_groups")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
+            .unwrap_or_default();
+        
+        // Add all resolved tool group names
+        for group_name in resolved.keys() {
+            if !existing_groups.contains(group_name) {
+                existing_groups.push(group_name.clone());
+            }
+        }
+        
+        settings_obj.insert("tool_groups".to_string(), serde_json::to_value(existing_groups).unwrap());
+    }
+}
+
+/// Resolve tool groups recursively (expand references to other groups)
+fn resolve_tool_groups(groups: &HashMap<String, Vec<String>>) -> HashMap<String, Vec<String>> {
+    let mut resolved = HashMap::new();
+    
+    for (group_name, tools) in groups {
+        let mut expanded = Vec::new();
+        for tool in tools {
+            if groups.contains_key(tool) {
+                // This tool name references another group - expand recursively
+                let sub_expanded = resolve_tool_groups(groups);
+                if let Some(sub_tools) = sub_expanded.get(tool) {
+                    expanded.extend(sub_tools.clone());
+                }
+            } else {
+                expanded.push(tool.clone());
+            }
+        }
+        resolved.insert(group_name.clone(), expanded);
+    }
+    resolved
+}
+
 /// Apply SM workflow to context. Returns secret overrides.
 pub fn apply_to_context(
     sm: &StateMachine,
     context: &mut serde_json::Value,
 ) -> Vec<(String, String)> {
+    // Resolve tool groups and add to context settings
+    apply_tool_groups(sm, context);
+    
     let active_state = context
         .get("active_state")
         .and_then(|v| v.as_str())

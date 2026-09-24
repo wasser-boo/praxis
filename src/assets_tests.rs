@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 fn onboarding_assets_install_every_bundled_file_and_executable() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("fresh-install");
-    let report = install(&root, false).unwrap();
+    let report = install(&root, false, false).unwrap();
     assert_eq!(report.created.len(), BUNDLED_ASSETS.len());
     assert!(report.updated.is_empty());
     for asset in BUNDLED_ASSETS {
@@ -114,14 +114,14 @@ fn onboarding_assets_repair_preserves_configuration_and_customizations() {
     for (name, text) in saved {
         std::fs::write(dir.path().join(name), text).unwrap();
     }
-    install(dir.path(), false).unwrap();
+    install(dir.path(), false, false).unwrap();
     for (name, text) in saved {
         assert_eq!(
             std::fs::read_to_string(dir.path().join(name)).unwrap(),
             text
         );
     }
-    let again = install(dir.path(), false).unwrap();
+    let again = install(dir.path(), false, false).unwrap();
     assert!(again.created.is_empty() && again.updated.is_empty());
     assert!(again.backup_dir.is_none());
 }
@@ -129,10 +129,10 @@ fn onboarding_assets_repair_preserves_configuration_and_customizations() {
 #[test]
 fn onboarding_assets_dashboard_update_is_explicit_and_backed_up() {
     let dir = tempfile::tempdir().unwrap();
-    install(dir.path(), false).unwrap();
+    install(dir.path(), false, false).unwrap();
     std::fs::write(dir.path().join("static/app.js"), "// previous UI").unwrap();
     std::fs::write(dir.path().join("templates/standard.poml"), "custom prompt").unwrap();
-    let report = install(dir.path(), true).unwrap();
+    let report = install(dir.path(), true, false).unwrap();
     assert_eq!(report.updated, vec!["static/app.js"]);
     assert_eq!(
         std::fs::read_to_string(report.backup_dir.unwrap().join("static/app.js")).unwrap(),
@@ -153,7 +153,7 @@ fn onboarding_assets_dashboard_update_is_explicit_and_backed_up() {
 #[test]
 fn onboarding_assets_dashboard_audio_upgrade_is_complete_and_idempotent() {
     let dir = tempfile::tempdir().unwrap();
-    install(dir.path(), false).unwrap();
+    install(dir.path(), false, false).unwrap();
     // Simulate a pre-audio-player installation with an existing dashboard.
     std::fs::remove_file(dir.path().join("static/chat-audio.js")).unwrap();
     let old_dashboard = ["static/index.html", "static/style.css", "static/app.js"];
@@ -166,7 +166,7 @@ fn onboarding_assets_dashboard_audio_upgrade_is_complete_and_idempotent() {
         std::fs::write(dir.path().join(name), "synthetic user data; preserve exactly").unwrap();
     }
 
-    let report = install(dir.path(), true).unwrap();
+    let report = install(dir.path(), true, false).unwrap();
     assert_eq!(report.created, vec!["static/chat-audio.js"]);
     assert_eq!(report.updated, old_dashboard);
     for name in old_dashboard {
@@ -185,7 +185,7 @@ fn onboarding_assets_dashboard_audio_upgrade_is_complete_and_idempotent() {
         assert_eq!(std::fs::read(dir.path().join(asset.path)).unwrap(), asset.bytes);
     }
     assert!(std::fs::read_to_string(dir.path().join("static/index.html")).unwrap().contains("/static/chat-audio.js?"));
-    let again = install(dir.path(), true).unwrap();
+    let again = install(dir.path(), true, false).unwrap();
     assert!(again.created.is_empty() && again.updated.is_empty());
     assert!(again.backup_dir.is_none());
 }
@@ -199,7 +199,7 @@ fn onboarding_assets_reject_symlink_destinations_without_following_them() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("static")).unwrap();
         symlink(outside.path(), dir.path().join(path)).unwrap();
-        assert!(install(dir.path(), true).is_err());
+        assert!(install(dir.path(), true, false).is_err());
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 }
@@ -207,7 +207,7 @@ fn onboarding_assets_reject_symlink_destinations_without_following_them() {
 #[test]
 fn onboarding_assets_every_installed_workflow_state_resolves_its_template() {
     let dir = tempfile::tempdir().unwrap();
-    install(dir.path(), false).unwrap();
+    install(dir.path(), false, false).unwrap();
     for asset in BUNDLED_ASSETS.iter().filter(|a| a.path.ends_with(".sm")) {
         let sm = crate::sm::load_file_in(&dir.path().join("contexts"), asset.path).unwrap();
         assert!(!sm.states.is_empty());
@@ -224,7 +224,7 @@ fn onboarding_assets_every_installed_workflow_state_resolves_its_template() {
 #[ignore = "requires real Node and POML_CLI; all data is synthetic"]
 async fn onboarding_assets_first_message_and_active_skill_render_from_fresh_install() {
     let dir = tempfile::tempdir().unwrap();
-    install(dir.path(), false).unwrap();
+    install(dir.path(), false, false).unwrap();
     let db = crate::db::Database::new(&dir.path().join("synthetic-db")).unwrap();
     crate::db::tools::init_default_tools(&db).unwrap();
     let mut ctx = crate::db::contexts::Context {

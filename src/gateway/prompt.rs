@@ -152,7 +152,7 @@ pub fn prepare_runtime(
     if let Some(turn) = turn {
         ctx.turn = turn;
     }
-    route_context(Path::new("."), &mut ctx, input, &state.plugins, channel_id)?;
+    route_context(std::path::Path::new(&state.config.root_dir), &mut ctx, input, &state.plugins, channel_id)?;
     super::task_control::set_show_thinking(user_id, ctx.settings.show_thinking);
     state.db.save_context(&ctx)?;
     Ok(ctx)
@@ -447,7 +447,7 @@ mod tests {
             route_shipped(&mut ctx, input);
             // Routing is model-driven: the shipped regex rules no longer switch templates.
         // None is the default-standard state; the model routes via set_context.
-        assert!(matches!(ctx.settings.system_template.as_deref(), None | Some("standard")), "{input}");
+        assert!(matches!(ctx.settings.system_template.as_deref(), None | Some("states/standard/standard")), "{input}");
             assert_eq!(ctx.active_state.as_deref(), Some("routing"));
             assert_eq!(ctx.custom_data["user_prompt"], input);
         }
@@ -463,7 +463,7 @@ mod tests {
         let mut next = db.load_context("alice").unwrap();
         let input = "Explain why this sentence uses the past tense.";
         route_shipped(&mut next, input);
-        assert!(matches!(next.settings.system_template.as_deref(), None | Some("standard")));
+        assert!(matches!(next.settings.system_template.as_deref(), None | Some("states/standard/standard")));
         assert_eq!(next.custom_data["user_prompt"], input);
     }
 
@@ -494,11 +494,11 @@ mod tests {
         for reset in ["reset role.", "return to standard"] {
             let mut ctx = Context { user_id: "alice".into(), ..Default::default() };
             route_shipped(&mut ctx, "Be my language instructor.");
-            assert!(matches!(ctx.settings.system_template.as_deref(), None | Some("standard")));
+            assert!(matches!(ctx.settings.system_template.as_deref(), None | Some("states/standard/standard")));
             route_shipped(&mut ctx, reset);
-            assert!(matches!(ctx.settings.system_template.as_deref(), None | Some("standard")), "{reset}");
+            assert!(matches!(ctx.settings.system_template.as_deref(), None | Some("states/standard/standard")), "{reset}");
             let stored = base_context(&ctx, reset).unwrap()["system_template"].clone();
-            assert!(stored.is_null() || stored == "standard", "{stored}");
+            assert!(stored.is_null() || stored == "states/standard/standard", "{stored}");
         }
     }
 
@@ -542,7 +542,7 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{name}:{state_name} -> {selected}: {error}"));
             }
         }
-        assert_eq!(explicit_selections, 9, "all nine real states must resolve their own template contract");
+        assert_eq!(explicit_selections, 19, "all nineteen real states must resolve their own template contract");
     }
 
     fn fixture() -> tempfile::TempDir {
