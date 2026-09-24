@@ -11,6 +11,7 @@ pub async fn prepare(state:&GatewayState,user:&str,input:&str,turn:Option<i32>,c
 }
 
 pub(crate) async fn route_in(root:&Path,state:&GatewayState,ctx:Context,input:&str,channel:Option<&str>)->anyhow::Result<Context> {
+    if !ctx.settings.use_decision_router { return Ok(ctx); }
     let Some(name)=ctx.settings.decision_profile.as_deref().filter(|p|*p!="off") else {return Ok(ctx);};
     let cancel=task_control::cancellation(&ctx.user_id).unwrap_or_default();
     anyhow::ensure!(!cancel.is_cancelled(),"Task cancelled");

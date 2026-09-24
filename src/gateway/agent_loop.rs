@@ -1,6 +1,7 @@
 use crate::sm;
 use crate::gateway::llm::provider::{ChatMessage, ChatRequest, ToolCall};
 use crate::gateway::GatewayState;
+use crate::tools::registry::build_tool_definitions;
 use crate::tags::{self, TagExecution};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -350,7 +351,7 @@ role: "system".to_string(),
         }
 
         // Only bootstrap tools and schemas discovered during this owned task.
-        let tools = crate::tools::discovery::definitions(&state.db, &state.plugins, user_id)?;
+        let tools = build_tool_definitions(&ctx.settings);
 
         // Clone tool names and definitions for validation before moving tools into request
         let tool_names: Vec<String> = tools.iter().map(|t| t.function.name.clone()).collect();

@@ -56,6 +56,8 @@ impl Default for Context {
 
 fn default_tag_prefix() -> String { crate::tags::DEFAULT_TAG_PREFIX.into() }
 
+fn default_true() -> bool { true }
+
 fn default_mode() -> String {
     "agent".to_string()
 }
@@ -218,6 +220,9 @@ pub struct ContextSettings {
     /// Named decisions/*.json profile. None or "off" disables automatic routing.
     #[serde(default)]
     pub decision_profile: Option<String>,
+    /// Explicit toggle for Decision Router. When false, routing is skipped regardless of decision_profile.
+    #[serde(default = "default_true")]
+    pub use_decision_router: bool,
     /// Toggle extended-reasoning output for the active model, per provider.
     /// "auto" (default) leaves provider defaults untouched.
     #[serde(default = "default_thinking_mode")]
@@ -238,6 +243,18 @@ pub struct ContextSettings {
     // Legacy saved setting; model-facing tool responses now default to full text.
     // Per-call _output controls replace this destructive global clipping limit.
     pub tool_result_limit: Option<usize>,
+    /// Explicit list of tool names that receive full parameter schemas in LLM requests.
+    /// Other allowed tools get empty schemas (description-only). Controls payload size.
+    #[serde(default)]
+    pub full_tool_schemas: Vec<String>,
+    /// Tool categories that receive full parameter schemas. Options:
+    /// Action, Discovery, SkillLoader, AgentControl, Memory, Context
+    #[serde(default)]
+    pub full_tool_categories: Vec<String>,
+    /// Mode for tool discovery in search_tools results.
+    /// Full = full schemas, DescriptionOnly = name+desc only, None = no tools.
+    #[serde(default)]
+    pub tool_discovery_mode: String,
     #[serde(default)]
     pub compaction_token_limit: Option<usize>,
     #[serde(default)]
@@ -336,9 +353,6 @@ fn default_feedback_template() -> String {
 fn default_thinking_mode() -> String {
     "auto".to_string()
 }
-fn default_true() -> bool {
-    true
-}
 fn default_screenshot_limit() -> usize {
     5000
 }
@@ -434,7 +448,11 @@ impl Default for ContextSettings {
             tool_result_limit: None,
             compaction_token_limit: None,
             compaction_template: None,
+            full_tool_schemas: Vec::new(),
+            full_tool_categories: Vec::new(),
+            tool_discovery_mode: String::new(),
             use_freerouter: false,
+            use_decision_router: true,
             system_template: None,
             active_skill: None,
             provider: None,

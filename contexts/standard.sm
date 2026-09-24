@@ -8,3 +8,4 @@
 
 [state routing]
 sm_data.persona_roles = "standard, code, code_architect, senior_dev, expert_programmer, debugger, review, teach, research"
+settings.full_tool_schemas = ["execute_terminal", "read_file", "write_file", "edit_file", "agent_complete", "agent_next"]
