@@ -2333,17 +2333,24 @@ async function probeDecisionProfile() {
 
 async function loadTools() {
     try {
-        const res = await apiGet('/api/tools');
+        const res = await apiGet('/api/tools/all');
         const data = await res.json();
         const list = document.getElementById('tools-list');
         if (!data.tools || data.tools.length === 0) {
             list.innerHTML = '<div class="data-item"><span class="name">No tools found</span></div>'; return;
         }
-        list.innerHTML = data.tools.map(t => {
+        // Sort: plugin tools first, then builtin tools
+        const sortedTools = [...data.tools].sort((a, b) => {
+            if (a.source === 'plugin' && b.source !== 'plugin') return -1;
+            if (a.source !== 'plugin' && b.source === 'plugin') return 1;
+            return a.name.localeCompare(b.name);
+        });
+        list.innerHTML = sortedTools.map(t => {
             const safeName = escapeHtml(t.name);
             const nameArg = JSON.stringify(String(t.name || ''));
+            const sourceBadge = t.source === 'plugin' ? '<span class="badge badge-plugin">Plugin</span>' : '<span class="badge badge-builtin">Builtin</span>';
             return `<div class="data-item tool-item">
-                <div class="tool-copy"><span class="name">${safeName}</span><span class="meta">${escapeHtml(t.description || '')}</span></div>
+                <div class="tool-copy"><span class="name">${safeName} ${sourceBadge}</span><span class="meta">${escapeHtml(t.description || '')}</span></div>
                 <button type="button" class="toggle ${t.is_enabled ? 'active' : ''}" aria-label="${t.is_enabled ? 'Disable' : 'Enable'} ${safeName}" aria-pressed="${t.is_enabled ? 'true' : 'false'}" onclick='toggleTool(${nameArg}, ${!t.is_enabled})'></button>
             </div>`;
         }).join('');
