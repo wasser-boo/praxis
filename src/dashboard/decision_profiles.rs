@@ -28,7 +28,7 @@ pub struct Probe {profile:DecisionProfile,contexts:Vec<String>}
 pub async fn probe(Json(probe):Json<Probe>)->Result<Json<Value>,Error> {
     let start=std::time::Instant::now();
     let results=decision_client::decide(&probe.profile,probe.contexts,&tokio_util::sync::CancellationToken::new()).await
-        .map_err(|_|bad("Decision request failed or returned invalid/incomplete results; no state changed"))?;
+        .map_err(|e|bad(format!("Decision error: {e}")))?;
     Ok(Json(json!({"results":results.iter().map(|d|json!({
         "label":d.label,"state":probe.profile.state_map.get(&d.label),"probability":d.probability,
         "meets_threshold":d.probability>=probe.profile.minimum_probability,
