@@ -214,6 +214,7 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/templates/:name", axum::routing::put(update_template))
         .route("/templates/:name", axum::routing::delete(delete_template))
         .route("/tools", axum::routing::get(list_tools))
+        .route("/tools/all", axum::routing::get(list_all_tools))
         .route("/tools/:name", axum::routing::put(update_tool))
         .route("/memory/:user_id", axum::routing::get(get_memory))
         .route("/memory/:user_id", axum::routing::put(update_memory))
@@ -915,6 +916,42 @@ async fn list_tools(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let tools = crate::db::tools::list(&state.db).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "tools": tools })))
+}
+
+async fn list_all_tools(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Built-in tools from registry
+    let builtin: Vec<_> = crate::tools::registry::all_tool_meta()
+        .iter()
+        .map(|m| serde_json::json!({
+            "name": m.name,
+            "description": m.description,
+            "category": format!("{:?}", m.category),
+            "parameters": m.params_schema,
+            "source": "builtin",
+            "default_enabled": m.default_enabled,
+        }))
+        .collect();
+    
+    // Plugin tools
+    let plugins_dir = std::env::var("PLUGINS_DIR").unwrap_or_else(|_| "./plugins".into());
+    let plugins = crate::plugins::load_all_plugins(std::path::Path::new(&plugins_dir));
+    let plugin_tools: Vec<_> = plugins
+        .enabled_tools()
+        .iter()
+        .map(|t| serde_json::json!({
+            "name": t.name,
+            "description": t.description,
+            "category": "Plugin",
+            "parameters": t.parameters,
+            "source": "plugin",
+            "default_enabled": true,
+        }))
+        .collect();
+    
+    let all = [builtin, plugin_tools].concat();
+    Ok(Json(serde_json::json!({ "tools": all, "total": all.len() })))
 }
 
 async fn update_tool(

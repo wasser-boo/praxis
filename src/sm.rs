@@ -456,7 +456,7 @@ pub fn apply_to_context(
     if let Some(default_state) = sm.states.get("_default") {
         for (key, value) in &default_state.variables {
             if get_nested_value(context.as_object().unwrap_or(&serde_json::Map::new()), key).is_none() {
-                set_nested_value(context, key, serde_json::Value::String(value.clone()));
+                set_nested_value(context, key, parse_json_or_string(value));
             }
         }
     }
@@ -465,7 +465,7 @@ pub fn apply_to_context(
     // so auto conditions can reference state variables (e.g. regex patterns)
     if let Some(state) = sm.states.get(&active_state) {
         for (key, value) in &state.variables {
-            set_nested_value(context, key, serde_json::Value::String(value.clone()));
+            set_nested_value(context, key, parse_json_or_string(value));
         }
     }
 
@@ -481,7 +481,7 @@ pub fn apply_to_context(
     if resolved_state != active_state {
         if let Some(state) = sm.states.get(&resolved_state) {
             for (key, value) in &state.variables {
-                set_nested_value(context, key, serde_json::Value::String(value.clone()));
+                set_nested_value(context, key, parse_json_or_string(value));
             }
         }
     }
@@ -787,6 +787,15 @@ pub fn transition_to(
     } else {
         false
     }
+}
+
+fn parse_json_or_string(s: &str) -> serde_json::Value {
+    // Try to parse as JSON first (for arrays, objects)
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+        return v;
+    }
+    // Fallback to string
+    serde_json::Value::String(s.to_string())
 }
 
 fn set_nested_value(context: &mut serde_json::Value, path: &str, value: serde_json::Value) {
