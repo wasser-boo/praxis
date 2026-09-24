@@ -19,5 +19,5 @@
 
   <output-format>Summary: files changed, key diffs, verification done. No private deliberation.</output-format>
 
-  <include src="../../shared/runtime.poml" />
+  <include src="../../shared/state_base.poml" />
 </poml>

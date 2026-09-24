@@ -506,12 +506,56 @@ pub fn build_tool_definitions(
 
     let mut tools = filter_tools_for_request(allowed_names, allowed_cats, full_names, full_cats.as_deref(), discovery_mode);
     
-    // Merge plugin tools (they always get full schema as they're explicitly enabled)
+    // Merge plugin tools - also filter them by state settings
     if let Some(plugins) = plugin_tools {
         for plugin_tool in plugins {
             // Check if tool already exists (static registry override)
-            if !tools.iter().any(|t| t.function.name == plugin_tool.function.name) {
-                tools.push(plugin_tool.clone());
+            if tools.iter().any(|t| t.function.name == plugin_tool.function.name) {
+                continue;
+            }
+            // Apply same state-based filtering to plugin tools
+            // Plugin tools are treated as "Plugin" category
+            let plugin_category = ToolCategory::Discovery; // or add a Plugin category
+            
+            // Check if plugin tool is allowed by state settings
+            let is_allowed = if full_names.is_some() {
+                // Check if in full_tool_schemas
+                full_names.as_ref().unwrap().iter().any(|s| s.as_str() == plugin_tool.function.name.as_str())
+            } else if full_cats.is_some() {
+                // Check if Plugin category is in full_tool_categories
+                full_cats.as_ref().unwrap().contains(&ToolCategory::Discovery)
+            } else {
+                // No explicit full schema config - use discovery mode
+                matches!(discovery_mode, ToolDiscoveryMode::Full)
+            };
+            
+            if is_allowed {
+                let params = if discovery_mode == ToolDiscoveryMode::Full {
+                    plugin_tool.function.parameters.clone()
+                } else {
+                    json!({"type": "object", "properties": {}})
+                };
+                tools.push(crate::gateway::llm::provider::ToolDefinition {
+                    tool_type: "function".into(),
+                    function: crate::gateway::llm::provider::FunctionDefinition {
+                        name: plugin_tool.function.name.clone(),
+                        description: plugin_tool.function.description.clone(),
+                        parameters: params,
+                    },
+                });
+            } else if discovery_mode == ToolDiscoveryMode::None {
+                // Skip entirely
+                continue;
+            } else {
+                // DescriptionOnly mode - add with empty schema
+                tools.push(crate::gateway::llm::provider::ToolDefinition {
+                    tool_type: "function".into(),
+                    function: crate::gateway::llm::provider::FunctionDefinition {
+                        name: plugin_tool.function.name.clone(),
+                        description: plugin_tool.function.description.clone(),
+                        parameters: json!({"type": "object", "properties": {}}),
+                    },
+                });
             }
         }
     }

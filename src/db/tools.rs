@@ -1,5 +1,6 @@
 use super::Database;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tool {
@@ -11,6 +12,41 @@ pub struct Tool {
 
 fn tools_file(db: &Database) -> std::path::PathBuf {
     db.data_dir().join("tools.json")
+}
+
+fn plugin_tools_file(db: &Database) -> std::path::PathBuf {
+    db.data_dir().join("plugin_tools.json")
+}
+
+fn load_plugin_tools(db: &Database) -> anyhow::Result<HashMap<String, bool>> {
+    let path = plugin_tools_file(db);
+    if path.exists() {
+        let data = std::fs::read_to_string(&path)?;
+        Ok(serde_json::from_str(&data)?)
+    } else {
+        Ok(HashMap::new())
+    }
+}
+
+fn save_plugin_tools(db: &Database, tools: &HashMap<String, bool>) -> anyhow::Result<()> {
+    let path = plugin_tools_file(db);
+    let json = serde_json::to_string_pretty(tools)?;
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
+pub fn get_plugin_tool_enabled(db: &Database, name: &str) -> bool {
+    load_plugin_tools(db).ok().and_then(|m| m.get(name).copied()).unwrap_or(true)
+}
+
+pub fn set_plugin_tool_enabled(db: &Database, name: &str, enabled: bool) -> anyhow::Result<()> {
+    let mut tools = load_plugin_tools(db)?;
+    tools.insert(name.to_string(), enabled);
+    save_plugin_tools(db, &tools)
+}
+
+pub fn list_plugin_tools(db: &Database) -> anyhow::Result<HashMap<String, bool>> {
+    load_plugin_tools(db)
 }
 
 fn load_tools(db: &Database) -> anyhow::Result<Vec<Tool>> {

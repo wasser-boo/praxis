@@ -931,6 +931,7 @@ async fn list_all_tools(
             "parameters": m.params_schema,
             "source": "builtin",
             "default_enabled": m.default_enabled,
+            "is_enabled": crate::db::tools::get(&state.db, m.name).map(|t| t.is_enabled).unwrap_or(m.default_enabled),
         }))
         .collect();
     
@@ -947,6 +948,7 @@ async fn list_all_tools(
             "parameters": t.parameters,
             "source": "plugin",
             "default_enabled": true,
+            "is_enabled": crate::db::tools::get_plugin_tool_enabled(&state.db, &t.name),
         }))
         .collect();
     

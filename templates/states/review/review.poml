@@ -21,5 +21,5 @@
 
   <output-format>Structured review: summary, critical issues, warnings, suggestions, praise. File:line for each.</output-format>
 
-  <include src="../../shared/runtime.poml" />
+  <include src="../../shared/state_base.poml" />
 </poml>

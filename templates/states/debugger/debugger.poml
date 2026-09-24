@@ -27,5 +27,5 @@
 
   <output-format>Investigation log: hypothesis → test → evidence → conclusion. Final: root cause, fix, verification. No private deliberation.</output-format>
 
-  <include src="../../shared/runtime.poml" />
+  <include src="../../shared/state_base.poml" />
 </poml>

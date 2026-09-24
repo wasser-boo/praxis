@@ -19,5 +19,5 @@
 
   <output-format>Structured: summary, findings with citations, confidence, open questions. No private deliberation.</output-format>
 
-  <include src="../../shared/runtime.poml" />
+  <include src="../../shared/state_base.poml" />
 </poml>

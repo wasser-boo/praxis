@@ -66,6 +66,7 @@ const BUNDLED_ASSETS: &[Asset] = &[
     asset!("templates/blueprints/researcher.json"),
     asset!("templates/shared/blueprint.poml"),
     asset!("templates/shared/runtime.poml"),
+    asset!("templates/shared/runtime_minimal.poml"),
     asset!("templates/discovery/skills.poml"),
     asset!("templates/shared/task_inputs.poml"),
     asset!("templates/tasks/plan.poml"),
