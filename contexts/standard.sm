@@ -3,9 +3,78 @@
 # carry the persona catalog. Manual settings.system_template choices stick; a
 # stale name falls back to standard at render time.
 @name "Standard profile routing"
-@version "2.0"
-@steps [routing]
+@version "3.0"
+@steps [routing, standard, teach, code, code_architect, senior_dev, expert_programmer, debugger, review, research]
 
 [state routing]
+settings.system_template = "states/standard/standard"
 sm_data.persona_roles = "standard, code, code_architect, senior_dev, expert_programmer, debugger, review, teach, research"
-settings.full_tool_schemas = ["execute_terminal", "read_file", "write_file", "edit_file", "agent_complete", "agent_next"]
+settings.tool_groups = ["core_files", "agent_basic"]
+settings.tool_discovery_mode = "DescriptionOnly"
+
+[state standard]
+settings.system_template = "states/standard/standard"
+settings.tool_groups = ["core_files", "agent_basic"]
+settings.tool_discovery_mode = "DescriptionOnly"
+
+[state teach]
+settings.system_template = "states/teach/teach"
+settings.tool_groups = ["agent_basic"]
+settings.tool_discovery_mode = "DescriptionOnly"
+
+[state code]
+settings.system_template = "states/code/code"
+settings.tool_groups = ["coding", "agent_basic"]
+settings.tool_discovery_mode = "DescriptionOnly"
+
+[state code_architect]
+settings.system_template = "states/code_architect/code_architect"
+settings.tool_groups = ["agent_basic", "context"]
+settings.tool_discovery_mode = "DescriptionOnly"
+
+[state senior_dev]
+settings.system_template = "states/senior_dev/senior_dev"
+settings.tool_groups = ["agent_basic", "context"]
+settings.tool_discovery_mode = "DescriptionOnly"
+
+[state expert_programmer]
+settings.system_template = "states/expert_programmer/expert_programmer"
+settings.tool_groups = ["coding", "agent_basic"]
+settings.tool_discovery_mode = "DescriptionOnly"
+
+[state debugger]
+settings.system_template = "states/debugger/debugger"
+settings.tool_groups = ["coding", "agent_basic", "context"]
+settings.tool_discovery_mode = "DescriptionOnly"
+
+[state review]
+settings.system_template = "states/review/review"
+settings.tool_groups = ["agent_basic", "context"]
+settings.tool_discovery_mode = "DescriptionOnly"
+
+[state research]
+settings.system_template = "states/research/research"
+settings.tool_groups = ["discovery", "agent_basic", "context"]
+settings.tool_discovery_mode = "Full"
+
+[transitions]
+routing -> standard : when sm_data.role == "standard"
+routing -> code : when sm_data.role == "code"
+routing -> code_architect : when sm_data.role == "code_architect"
+routing -> senior_dev : when sm_data.role == "senior_dev"
+routing -> expert_programmer : when sm_data.role == "expert_programmer"
+routing -> debugger : when sm_data.role == "debugger"
+routing -> review : when sm_data.role == "review"
+routing -> teach : when sm_data.role == "teach"
+routing -> research : when sm_data.role == "research"
+
+# Return to routing after task completion
+standard -> routing : when sm_data.role == "standard"
+code -> routing : when sm_data.role == "standard"
+code_architect -> routing : when sm_data.role == "standard"
+senior_dev -> routing : when sm_data.role == "standard"
+expert_programmer -> routing : when sm_data.role == "standard"
+debugger -> routing : when sm_data.role == "standard"
+review -> routing : when sm_data.role == "standard"
+teach -> routing : when sm_data.role == "standard"
+research -> routing : when sm_data.role == "standard"

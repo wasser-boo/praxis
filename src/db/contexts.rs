@@ -251,6 +251,11 @@ pub struct ContextSettings {
     /// Action, Discovery, SkillLoader, AgentControl, Memory, Context
     #[serde(default)]
     pub full_tool_categories: Vec<String>,
+    /// Named tool groups to expand into full_tool_schemas.
+    /// Pre-defined: core_files, core_terminal, coding, agent_basic, context, memory,
+    /// discovery, skills, discord, vm, cron
+    #[serde(default)]
+    pub tool_groups: Option<Vec<String>>,
     /// Mode for tool discovery in search_tools results.
     /// Full = full schemas, DescriptionOnly = name+desc only, None = no tools.
     #[serde(default)]
@@ -450,6 +455,7 @@ impl Default for ContextSettings {
             compaction_template: None,
             full_tool_schemas: Vec::new(),
             full_tool_categories: Vec::new(),
+            tool_groups: None,
             tool_discovery_mode: String::new(),
             use_freerouter: false,
             use_decision_router: true,

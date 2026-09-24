@@ -118,7 +118,7 @@ role: "system".to_string(),
         }
     }
 
-    let tool_defs = build_tool_definitions(&ctx.settings);
+    let tool_defs = build_tool_definitions(&ctx.settings, Some(&state.plugins.tool_definitions()));
 
     // Clone tool names and definitions for validation before moving tool_defs into request
     let mut tool_names: Vec<String> = tool_defs.iter().map(|t| t.function.name.clone()).collect();
@@ -337,7 +337,7 @@ role: "system".to_string(),
 
         // Keep tools available after use_skill/read_file/etc. Refresh definitions
         // as well as context, so newly disabled tools cannot run next round.
-        let tool_defs = build_tool_definitions(&ctx.settings);
+        let tool_defs = build_tool_definitions(&ctx.settings, Some(&state.plugins.tool_definitions()));
         tool_names = tool_defs.iter().map(|t| t.function.name.clone()).collect();
         tools_for_validation = tool_defs.clone();
         finalizing = tool_calls_used >= tool_limit;

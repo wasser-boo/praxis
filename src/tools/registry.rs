@@ -3,6 +3,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +33,23 @@ pub struct ToolMeta {
 
 /// Static registry initialized once at startup
 static TOOL_REGISTRY: Lazy<Vec<ToolMeta>> = Lazy::new(build_registry);
+
+/// Pre-defined tool groups for reuse across states
+static TOOL_GROUPS: Lazy<HashMap<&'static str, Vec<&'static str>>> = Lazy::new(|| {
+    let mut m = HashMap::new();
+    m.insert("core_files", vec!["read_file", "write_file", "edit_file"]);
+    m.insert("core_terminal", vec!["execute_terminal", "read_file", "write_file"]);
+    m.insert("coding", vec!["execute_terminal", "read_file", "write_file", "edit_file", "search_tools"]);
+    m.insert("agent_basic", vec!["agent_complete", "agent_next", "agent_feedback"]);
+    m.insert("context", vec!["get_context", "set_context", "read_tool_result"]);
+    m.insert("memory", vec!["memory_get", "memory_set", "learn_fact", "learn_preference", "learn_topic"]);
+    m.insert("discovery", vec!["search_tools", "search_skills"]);
+    m.insert("skills", vec!["search_skills", "use_skill"]);
+    m.insert("discord", vec!["discord_send_message", "discord_send_embed", "discord_upload_file"]);
+    m.insert("vm", vec!["vm_start", "vm_stop", "vm_shell", "vm_keys", "vm_mouse", "vm_screenshot", "vm_file_transfer", "vm_snapshot", "vm_shared_folder"]);
+    m.insert("cron", vec!["cron_add", "cron_delete", "cron_list", "cron_toggle", "cron_run"]);
+    m
+});
 
 fn build_registry() -> Vec<ToolMeta> {
     vec![
@@ -449,14 +467,28 @@ pub fn parse_tool_categories(cats: &[String]) -> Vec<ToolCategory> {
     }).collect()
 }
 
-/// Build filtered tool definitions from context settings
+/// Build filtered tool definitions from context settings, merging with plugin tools
 pub fn build_tool_definitions(
     ctx_settings: &crate::db::contexts::ContextSettings,
+    plugin_tools: Option<&[crate::gateway::llm::provider::ToolDefinition]>, // dynamic plugin tools
 ) -> Vec<crate::gateway::llm::provider::ToolDefinition> {
-    let full_names = if ctx_settings.full_tool_schemas.is_empty() {
+    // Expand tool_groups into full_tool_schemas
+    let mut full_schemas = ctx_settings.full_tool_schemas.clone();
+    if let Some(groups) = &ctx_settings.tool_groups {
+        for group in groups {
+            if let Some(tools) = TOOL_GROUPS.get(group.as_str()) {
+                for tool in tools {
+                    if !full_schemas.contains(&tool.to_string()) {
+                        full_schemas.push(tool.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let full_names = if full_schemas.is_empty() {
         None
     } else {
-        Some(ctx_settings.full_tool_schemas.as_slice())
+        Some(full_schemas.as_slice())
     };
     let full_cats = if ctx_settings.full_tool_categories.is_empty() {
         None
@@ -472,7 +504,18 @@ pub fn build_tool_definitions(
     let allowed_names = None::<&[String]>;
     let allowed_cats = None::<&[ToolCategory]>;
 
-    filter_tools_for_request(allowed_names, allowed_cats, full_names, full_cats.as_deref(), discovery_mode)
+    let mut tools = filter_tools_for_request(allowed_names, allowed_cats, full_names, full_cats.as_deref(), discovery_mode);
+    
+    // Merge plugin tools (they always get full schema as they're explicitly enabled)
+    if let Some(plugins) = plugin_tools {
+        for plugin_tool in plugins {
+            // Check if tool already exists (static registry override)
+            if !tools.iter().any(|t| t.function.name == plugin_tool.function.name) {
+                tools.push(plugin_tool.clone());
+            }
+        }
+    }
+    tools
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -351,7 +351,7 @@ role: "system".to_string(),
         }
 
         // Only bootstrap tools and schemas discovered during this owned task.
-        let tools = build_tool_definitions(&ctx.settings);
+        let tools = build_tool_definitions(&ctx.settings, Some(&state.plugins.tool_definitions()));
 
         // Clone tool names and definitions for validation before moving tools into request
         let tool_names: Vec<String> = tools.iter().map(|t| t.function.name.clone()).collect();
