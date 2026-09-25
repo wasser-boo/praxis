@@ -471,6 +471,7 @@ pub fn parse_tool_categories(cats: &[String]) -> Vec<ToolCategory> {
 pub fn build_tool_definitions(
     ctx_settings: &crate::db::contexts::ContextSettings,
     plugin_tools: Option<&[crate::gateway::llm::provider::ToolDefinition]>, // dynamic plugin tools
+    db: Option<&crate::db::Database>, // for checking plugin tool enabled state
 ) -> Vec<crate::gateway::llm::provider::ToolDefinition> {
     // Expand tool_groups into full_tool_schemas
     let mut full_schemas = ctx_settings.full_tool_schemas.clone();
@@ -526,10 +527,16 @@ pub fn build_tool_definitions(
             if tools.iter().any(|t| t.function.name == plugin_tool.function.name) {
                 continue;
             }
+            // Check if plugin tool is enabled in DB (per-tool enable/disable)
+            // Plugin tools default to enabled unless explicitly disabled in plugin_tools.json
+            let plugin_enabled = db
+                .map(|db| crate::db::tools::get_plugin_tool_enabled(db, &plugin_tool.function.name))
+                .unwrap_or(true);
+            if !plugin_enabled {
+                continue; // Skip disabled plugin tools
+            }
             // Apply same state-based filtering to plugin tools
             // Plugin tools are treated as "Plugin" category
-            let plugin_category = ToolCategory::Discovery; // or add a Plugin category
-            
             // Check if plugin tool is allowed by state settings
             let is_allowed = if full_names.is_some() {
                 // Check if in full_tool_schemas

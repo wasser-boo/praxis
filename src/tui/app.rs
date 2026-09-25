@@ -7,7 +7,7 @@ use crate::tui::ui;
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-        EventStream, KeyCode, KeyEventKind, KeyModifiers,
+        EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{
@@ -38,6 +38,7 @@ pub const SLASH_COMMANDS: &[SlashCmd] = &[
     SlashCmd { name: "/show_thinking", desc: "Show reasoning: on|off" },
     SlashCmd { name: "/rename", desc: "Rename the current session" },
     SlashCmd { name: "/delete", desc: "Delete the current session" },
+    SlashCmd { name: "/plugins", desc: "List plugin tools (use: /plugins [enable|disable] <tool_name>)" },
     SlashCmd { name: "/help", desc: "Show available commands" },
     SlashCmd { name: "/quit", desc: "Exit the TUI" },
 ];
@@ -107,6 +108,8 @@ pub struct App {
     pub show_sidebar: bool,
     /// Vertical scroll offset (0 = pinned to bottom).
     pub scroll_offset: u16,
+    /// Track if user was at bottom before new messages (for auto-scroll).
+    pub at_bottom: bool,
     /// Track whether the agent loop is currently running for the active session.
     pub agent_active: bool,
 
@@ -139,6 +142,7 @@ impl App {
             popup: Popup::None,
             show_sidebar: true,
             scroll_offset: 0,
+            at_bottom: true,
             agent_active: false,
             status_msg: None,
             should_quit: false,
@@ -163,6 +167,7 @@ impl App {
         self.live = Default::default();
         self.seen_keys.clear();
         self.scroll_offset = 0;
+        self.at_bottom = true;
         self.input.clear();
         self.cursor = 0;
         self.attachments.clear();
@@ -862,6 +867,21 @@ async fn handle_event(ev: Event, app: &mut App) {
             app.update_popup();
         }
         Event::Key(k) if k.kind == KeyEventKind::Press => handle_key(app, k.code, k.modifiers).await,
+        Event::Mouse(me) => {
+            match me.kind {
+                MouseEventKind::ScrollUp => {
+                    app.scroll_offset = app.scroll_offset.saturating_add(3);
+                    app.at_bottom = false;
+                }
+                MouseEventKind::ScrollDown => {
+                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                    if app.scroll_offset == 0 {
+                        app.at_bottom = true;
+                    }
+                }
+                _ => {}
+            }
+        }
         _ => {}
     }
 }
@@ -883,10 +903,14 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         }
         (KeyCode::PageUp, _) => {
             app.scroll_offset = app.scroll_offset.saturating_add(5);
+            app.at_bottom = false;
             return;
         }
         (KeyCode::PageDown, _) => {
             app.scroll_offset = app.scroll_offset.saturating_sub(5);
+            if app.scroll_offset == 0 {
+                app.at_bottom = true;
+            }
             return;
         }
         (KeyCode::Char(c), KeyModifiers::ALT) if c.is_ascii_digit() => {
