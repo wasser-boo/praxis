@@ -24,6 +24,8 @@ pub struct Config {
     pub llm_resilience: crate::gateway::llm::resilience::ResilienceConfig,
     pub openai_api_key: Option<String>,
     pub openai_model: String,
+    /// Model for the Codex (ChatGPT subscription) provider.
+    pub codex_model: String,
     pub openai_api_base: String,
     pub anthropic_api_key: Option<String>,
     pub anthropic_model: String,
@@ -73,6 +75,7 @@ impl Config {
             llm_resilience: crate::gateway::llm::resilience::ResilienceConfig::from_env(),
             openai_api_key: env::var("OPENAI_API_KEY").ok(),
             openai_model: env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string()),
+            codex_model: env::var("CODEX_MODEL").unwrap_or_else(|_| crate::gateway::llm::codex::DEFAULT_MODEL.to_string()),
             openai_api_base: env::var("OPENAI_API_BASE")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
             anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok(),
@@ -226,5 +229,50 @@ mod security_tests {
             ..Config::from_env()
         };
         assert!(config.validate().is_ok());
+    }
+}
+
+/// Choose the installation root holding templates/, contexts/, plugins/, skills/.
+/// `ROOT_DIR` always wins (relative values resolve against the cwd). Without it,
+/// prefer the cwd when it already contains templates/, then the executable's
+/// directory when that does, else leave the process where it is.
+pub fn resolve_install_root(
+    env_root: Option<std::path::PathBuf>,
+    cwd: Option<std::path::PathBuf>,
+    exe_dir: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let has_assets = |dir: &std::path::Path| dir.join("templates").is_dir();
+    if let Some(root) = env_root.filter(|r| !r.as_os_str().is_empty()) {
+        let root = if root.is_absolute() { root } else { cwd.clone()?.join(root) };
+        return root.canonicalize().ok().or(Some(root));
+    }
+    if let Some(cwd) = cwd.as_ref().filter(|d| has_assets(d)) {
+        return cwd.canonicalize().ok();
+    }
+    if let Some(exe_dir) = exe_dir.filter(|d| has_assets(d)) {
+        return exe_dir.canonicalize().ok();
+    }
+    None
+}
+
+#[cfg(test)]
+mod install_root_tests {
+    use super::resolve_install_root;
+
+    #[test]
+    fn install_root_prefers_env_then_cwd_assets_then_exe_dir() {
+        let install = tempfile::tempdir().unwrap();
+        std::fs::create_dir(install.path().join("templates")).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let canon = install.path().canonicalize().unwrap();
+
+        // Started from an unrelated cwd: use the executable's directory.
+        assert_eq!(resolve_install_root(None, Some(elsewhere.path().into()), Some(install.path().into())), Some(canon.clone()));
+        // Started inside the install dir: keep it.
+        assert_eq!(resolve_install_root(None, Some(install.path().into()), Some(elsewhere.path().into())), Some(canon.clone()));
+        // ROOT_DIR wins even without assets present.
+        assert_eq!(resolve_install_root(Some(elsewhere.path().into()), Some(install.path().into()), Some(install.path().into())), Some(elsewhere.path().canonicalize().unwrap()));
+        // Nothing sensible: do not move.
+        assert_eq!(resolve_install_root(None, Some(elsewhere.path().into()), Some(elsewhere.path().into())), None);
     }
 }

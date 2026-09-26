@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod codex;
 pub mod embeddings;
 pub mod error;
 mod http;
@@ -40,6 +41,20 @@ impl LLMRouter {
                 config.openai_model.clone(),
                 config.openai_api_base.clone(),
             )));
+        }
+
+        if let Some(auth) = codex::CodexAuth::from_secrets(secrets) {
+            // Refreshed tokens go back into the live store (and disk when the
+            // gateway holds the master key) so restarts do not log the user out.
+            let on_refresh: codex::OnRefresh = Box::new(|auth: &codex::CodexAuth| {
+                let mut secrets = crate::db::secrets::get_secrets();
+                auth.store(&mut secrets);
+                crate::db::secrets::init_secrets(secrets.clone());
+                if let Err(error) = crate::db::secrets::persist_if_unlocked(&secrets) {
+                    tracing::warn!(%error, "Codex tokens refreshed in memory only");
+                }
+            });
+            providers.push(Box::new(codex::CodexProvider::new(auth, config.codex_model.clone(), Some(on_refresh))));
         }
 
         if let Some(key) = secrets.anthropic_api_key.as_ref().filter(|key| !key.trim().is_empty()) {

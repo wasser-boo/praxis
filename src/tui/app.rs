@@ -39,6 +39,8 @@ pub const SLASH_COMMANDS: &[SlashCmd] = &[
     SlashCmd { name: "/rename", desc: "Rename the current session" },
     SlashCmd { name: "/delete", desc: "Delete the current session" },
     SlashCmd { name: "/plugins", desc: "List plugin tools (use: /plugins [enable|disable] <tool_name>)" },
+    SlashCmd { name: "/login", desc: "Provider login on the gateway: /login | /login codex | /login <provider> <api_key> [model] [api_base]" },
+    SlashCmd { name: "/logout", desc: "Remove a provider credential: /logout <provider>" },
     SlashCmd { name: "/help", desc: "Show available commands" },
     SlashCmd { name: "/quit", desc: "Exit the TUI" },
 ];
@@ -427,6 +429,9 @@ impl App {
                     ),
                 });
             }
+            "/login" | "/logout" => {
+                self.run_login(&name, &_rest).await;
+            }
             "/quit" | "/exit" => {
                 self.should_quit = true;
             }
@@ -434,6 +439,67 @@ impl App {
                 self.flash(format!("unknown command: {name}"));
             }
         }
+    }
+
+    /// Provider login. Always executed by the gateway (local or remote), because
+    /// that is the process that talks to the model; a remote TUI therefore logs
+    /// the remote machine in. Credentials travel once, over the authenticated
+    /// gateway connection, and are not stored by the TUI.
+    async fn run_login(&mut self, verb: &str, rest: &str) {
+        let args = shell_words(rest);
+        let request = match parse_login_args(verb, &args) {
+            Ok(None) => {
+                match self.gateway_get("/v1/providers").await {
+                    Ok(v) => {
+                        let text = v["text"].as_str().unwrap_or("No provider information").to_string();
+                        self.transcript.push(Bubble::Banner { kind: BannerKind::Info, content: text });
+                    }
+                    Err(e) => self.transcript.push(Bubble::Banner { kind: BannerKind::Error, content: format!("/login: {e}") }),
+                }
+                return;
+            }
+            Ok(Some(request)) => request,
+            Err(usage) => { self.flash(usage); return; }
+        };
+        self.flash(format!("Contacting gateway for {} login…", request["provider"].as_str().unwrap_or("provider")));
+        match self.gateway_post("/v1/providers/login", request).await {
+            Ok(v) => {
+                let mut content = v["message"].as_str().unwrap_or("Done").to_string();
+                let setup: Vec<&str> = v["setup"].as_array().map(|a| a.iter().filter_map(|s| s.as_str()).collect()).unwrap_or_default();
+                if !setup.is_empty() {
+                    content.push_str("\n\nNext steps:\n  ");
+                    content.push_str(&setup.join("\n  "));
+                }
+                let kind = if v["status"] == "pending" { BannerKind::Info } else { BannerKind::AgentStop };
+                self.transcript.push(Bubble::Banner { kind, content });
+            }
+            Err(e) => self.transcript.push(Bubble::Banner { kind: BannerKind::Error, content: format!("{verb}: {e}") }),
+        }
+    }
+
+    async fn gateway_get(&self, path: &str) -> anyhow::Result<serde_json::Value> {
+        if let Some(remote) = &self.remote {
+            return remote.request(reqwest::Method::GET, path, None).await;
+        }
+        let response = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?
+            .get(format!("{}{path}", self.gateway_url.trim_end_matches('/'))).bearer_auth(&self.gateway_api_key).send().await
+            .map_err(|_| anyhow::anyhow!("Gateway not reachable at {} (is `praxis run` running?)", self.gateway_url))?;
+        anyhow::ensure!(response.status().is_success(), "Gateway returned HTTP {}", response.status().as_u16());
+        Ok(response.json().await?)
+    }
+
+    async fn gateway_post(&self, path: &str, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        // Login can take a while (endpoint probes, spawning the Codex CLI).
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(60)).build()?;
+        let response = client.post(format!("{}{path}", self.gateway_url.trim_end_matches('/'))).bearer_auth(&self.gateway_api_key).json(&body).send().await
+            .map_err(|_| anyhow::anyhow!("Gateway not reachable at {} (is `praxis run` running?)", self.gateway_url))?;
+        let status = response.status();
+        let value: serde_json::Value = response.json().await.unwrap_or_default();
+        if !status.is_success() {
+            let detail = value["error"].as_str().unwrap_or("request failed");
+            anyhow::bail!("{detail} (HTTP {})", status.as_u16());
+        }
+        Ok(value)
     }
 
     fn run_context_command(&mut self, line: &str) {
@@ -1150,5 +1216,92 @@ mod tests {
         // Keep the tempdir alive for the test by leaking it (cheap).
         Box::leak(Box::new(dir));
         App::new(db, "http://127.0.0.1:0".into(), "x".into(), ".".into())
+    }
+}
+
+
+/// Minimal shell-like splitting: whitespace separated, single/double quotes group.
+fn shell_words(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut has_token = false;
+    for ch in input.chars() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => current.push(c),
+            (None, '"') | (None, '\'') => { quote = Some(ch); has_token = true; }
+            (None, c) if c.is_whitespace() => { if has_token || !current.is_empty() { out.push(std::mem::take(&mut current)); has_token = false; } }
+            (None, c) => { current.push(c); has_token = true; }
+        }
+    }
+    if has_token || !current.is_empty() { out.push(current); }
+    out
+}
+
+/// Turn `/login …` / `/logout …` arguments into a gateway request.
+/// `Ok(None)` means "show status".
+fn parse_login_args(verb: &str, args: &[String]) -> Result<Option<serde_json::Value>, String> {
+    let usage = "Usage: /login | /login codex [--auth-json '<json>'] | /login <openai|anthropic|openrouter|minimax|mimo> <api_key> [model] [api_base] | /login <ollama|llamacpp> [api_base] [model] | /logout <provider>";
+    let Some(provider) = args.first() else {
+        return if verb == "/logout" { Err(usage.into()) } else { Ok(None) };
+    };
+    let provider = provider.to_ascii_lowercase();
+    if verb == "/logout" {
+        return Ok(Some(serde_json::json!({"provider": provider, "logout": true})));
+    }
+    let mut request = serde_json::json!({"provider": provider});
+    let rest = &args[1..];
+    match provider.as_str() {
+        "codex" => {
+            if let Some(i) = rest.iter().position(|a| a == "--auth-json") {
+                let json = rest.get(i + 1).ok_or(usage)?;
+                request["auth_json"] = serde_json::json!(json);
+            }
+            if let Some(model) = rest.iter().find(|a| !a.starts_with("--") && !a.starts_with('{')) {
+                request["model"] = serde_json::json!(model);
+            }
+        }
+        "ollama" | "llamacpp" => {
+            for arg in rest {
+                if arg.starts_with("http://") || arg.starts_with("https://") { request["api_base"] = serde_json::json!(arg); }
+                else if request.get("model").is_none() { request["model"] = serde_json::json!(arg); }
+                else { request["api_key"] = serde_json::json!(arg); }
+            }
+        }
+        _ => {
+            let key = rest.first().ok_or(usage)?;
+            request["api_key"] = serde_json::json!(key);
+            for arg in &rest[1..] {
+                if arg.starts_with("http://") || arg.starts_with("https://") { request["api_base"] = serde_json::json!(arg); }
+                else { request["model"] = serde_json::json!(arg); }
+            }
+        }
+    }
+    Ok(Some(request))
+}
+
+#[cfg(test)]
+mod login_parse_tests {
+    use super::*;
+
+    #[test]
+    fn login_arguments_map_to_gateway_requests() {
+        assert_eq!(parse_login_args("/login", &[]).unwrap(), None);
+        assert!(parse_login_args("/logout", &[]).is_err());
+        let r = parse_login_args("/login", &shell_words("openai sk-test-1234 gpt-4.1 https://proxy.example/v1")).unwrap().unwrap();
+        assert_eq!(r["api_key"], "sk-test-1234");
+        assert_eq!(r["model"], "gpt-4.1");
+        assert_eq!(r["api_base"], "https://proxy.example/v1");
+        assert!(parse_login_args("/login", &shell_words("anthropic")).is_err(), "key required");
+        let r = parse_login_args("/login", &shell_words("ollama http://gpu:11434 qwen3:8b")).unwrap().unwrap();
+        assert_eq!(r["api_base"], "http://gpu:11434");
+        assert_eq!(r["model"], "qwen3:8b");
+        let r = parse_login_args("/login", &shell_words("codex --auth-json '{\"tokens\":{}}' gpt-5")).unwrap().unwrap();
+        assert_eq!(r["auth_json"], "{\"tokens\":{}}");
+        assert_eq!(r["model"], "gpt-5");
+        let r = parse_login_args("/logout", &shell_words("Codex")).unwrap().unwrap();
+        assert_eq!(r["logout"], true);
+        assert_eq!(r["provider"], "codex");
     }
 }

@@ -69,6 +69,7 @@ const BUNDLED_ASSETS: &[Asset] = &[
     asset!("templates/shared/runtime_minimal.poml"),
     asset!("templates/shared/output_format.poml"),
     asset!("templates/shared/state_base.poml"),
+    asset!("templates/shared/roles.poml"),
     asset!("templates/discovery/skills.poml"),
     asset!("templates/shared/task_inputs.poml"),
     asset!("templates/tasks/plan.poml"),

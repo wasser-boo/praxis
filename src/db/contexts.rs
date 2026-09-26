@@ -243,19 +243,28 @@ pub struct ContextSettings {
     // Legacy saved setting; model-facing tool responses now default to full text.
     // Per-call _output controls replace this destructive global clipping limit.
     pub tool_result_limit: Option<usize>,
-    /// Explicit list of tool names that receive full parameter schemas in LLM requests.
-    /// Other allowed tools get empty schemas (description-only). Controls payload size.
+    /// Tools the current state activates. Each entry is a tool name (built-in or
+    /// plugin) or a group name from `tool_group_definitions`, e.g.
+    /// `["coding", "execute_terminal", "brave_web_search"]`. When non-empty this is
+    /// the allow-list sent to the model; activated tools get full schemas.
+    #[serde(default)]
+    pub activated_tools: Vec<String>,
+    /// Legacy: explicit tool names that receive full schemas. Merged into `activated_tools`.
     #[serde(default)]
     pub full_tool_schemas: Vec<String>,
     /// Tool categories that receive full parameter schemas. Options:
     /// Action, Discovery, SkillLoader, AgentControl, Memory, Context
     #[serde(default)]
     pub full_tool_categories: Vec<String>,
-    /// Named tool groups to expand into full_tool_schemas.
-    /// Pre-defined: core_files, core_terminal, coding, agent_basic, context, memory,
-    /// discovery, skills, discord, vm, cron
+    /// Legacy: group names to activate. Merged into `activated_tools`.
     #[serde(default)]
     pub tool_groups: Option<Vec<String>>,
+    /// Tool group definitions: group name -> members (tool names or other group
+    /// names, including plugin tools). There are no built-in groups; a workflow
+    /// `[tool_groups]` section is merged in on every routing pass and users may
+    /// add groups via `set_context settings.tool_group_definitions.<name>`.
+    #[serde(default)]
+    pub tool_group_definitions: std::collections::HashMap<String, Vec<String>>,
     /// Mode for tool discovery in search_tools results.
     /// Full = full schemas, DescriptionOnly = name+desc only, None = no tools.
     #[serde(default)]
@@ -453,9 +462,11 @@ impl Default for ContextSettings {
             tool_result_limit: None,
             compaction_token_limit: None,
             compaction_template: None,
+            activated_tools: Vec::new(),
             full_tool_schemas: Vec::new(),
             full_tool_categories: Vec::new(),
             tool_groups: None,
+            tool_group_definitions: std::collections::HashMap::new(),
             tool_discovery_mode: String::new(),
             use_freerouter: false,
             use_decision_router: true,

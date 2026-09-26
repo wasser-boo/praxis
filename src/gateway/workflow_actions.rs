@@ -25,10 +25,18 @@ fn workflow_directive(path:&Path,prefix:&str)->anyhow::Result<Option<String>> {
 /// Plan a bounded fixed point: SM → template → optional workflow selection.
 /// No DB/network/write operations; errors leave the caller's context untouched.
 pub fn plan(root:&Path,original:&Context,input:&str,plugins:&PluginRegistry,channel:Option<&str>)->anyhow::Result<Context> {
-    // If system_template is explicitly set to a non-default value, skip routing
-    // Default system_template is None or "standard"; "states/standard/standard" is a resolved value, not a default
-    let skip_routing = original.settings.system_template.as_deref().is_some_and(|s| s != "standard" && s != "states/standard/standard");
-    
+    // A MANUAL system_template choice sticks and disables workflow routing.
+    // A template that some state of the active workflow selects is the
+    // workflow's own output, so routing must keep running; otherwise the first
+    // state switch would freeze the context in that state forever.
+    let skip_routing = match original.settings.system_template.as_deref() {
+        None | Some("standard") => false,
+        Some(template) => {
+            let workflow = crate::sm::load_file_in(&root.join("contexts"), super::prompt::workflow_name(original)).ok();
+            !workflow.is_some_and(|sm| sm.states.values().any(|s| s.variables.get("settings.system_template").is_some_and(|t| t == template)))
+        }
+    };
+
     let mut candidate=original.clone();let mut seen=HashSet::new();
     for _ in 0..4 {
         if skip_routing {

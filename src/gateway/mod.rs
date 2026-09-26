@@ -4,6 +4,7 @@ pub mod cron_scheduler;
 pub mod delegation;
 pub mod http_handler;
 pub mod client_api;
+pub mod providers;
 pub mod compaction;
 pub mod decision_profiles;
 pub mod decision_client;
@@ -15,6 +16,8 @@ mod decision_tests;
 mod workflow_action_tests;
 #[cfg(test)]
 mod state_machine_tests;
+#[cfg(test)]
+mod template_render_tests;
 pub mod llm;
 pub mod message_handler;
 pub mod poml;
@@ -28,12 +31,32 @@ pub mod ws_handler;
 
 use std::sync::Arc;
 
+/// Hot-swappable LLM router: `/login` and provider changes replace the router
+/// without restarting the gateway. Callers take a snapshot with `get()`.
+#[derive(Clone)]
+pub struct LlmHandle(Arc<std::sync::RwLock<Arc<llm::LLMRouter>>>);
+
+impl LlmHandle {
+    pub fn new(router: llm::LLMRouter) -> Self {
+        Self(Arc::new(std::sync::RwLock::new(Arc::new(router))))
+    }
+    pub fn get(&self) -> Arc<llm::LLMRouter> {
+        self.0.read().map(|g| g.clone()).unwrap_or_else(|e| e.into_inner().clone())
+    }
+    pub fn swap(&self, router: llm::LLMRouter) {
+        match self.0.write() {
+            Ok(mut guard) => *guard = Arc::new(router),
+            Err(poisoned) => *poisoned.into_inner() = Arc::new(router),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct GatewayState {
     pub db: crate::db::Database,
     pub config: crate::config::Config,
     pub secrets: crate::db::secrets::Secrets,
-    pub llm: Arc<llm::LLMRouter>,
+    pub llm: LlmHandle,
     pub plugins: Arc<crate::plugins::PluginRegistry>,
     pub event_tx: tokio::sync::broadcast::Sender<crate::event_channel::GatewayEvent>,
     pub start_time: std::time::Instant,
@@ -56,8 +79,9 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
         &plugins_dir,
     )));
 
-    let llm = Arc::new(llm::LLMRouter::new(&config, &secrets));
-    llm.validate_configuration()?;
+    // Endpoint/model choices made with /login live in the secret store.
+    let llm = LlmHandle::new(llm::LLMRouter::new(&providers::effective_config(&config, &secrets), &secrets));
+    llm.get().validate_configuration()?;
 
     let state = GatewayState {
         db: db.clone(),

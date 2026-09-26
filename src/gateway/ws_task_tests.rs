@@ -79,7 +79,7 @@ async fn resilience_websocket_forwards_retries_and_accepts_ping_stop_while_busy(
             db,
             config: crate::config::Config::from_env(),
             secrets: Default::default(),
-            llm: Arc::new(llm),
+            llm: crate::gateway::LlmHandle::new(llm),
             plugins: Arc::new(crate::plugins::PluginRegistry::new()),
             event_tx: tokio::sync::broadcast::channel(16).0,
             start_time: std::time::Instant::now(),

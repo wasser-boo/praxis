@@ -64,7 +64,7 @@ async fn decision_router_applies_real_state_and_preserves_history_on_failure() {
         ctx.settings.sm_file=Some("test".into());ctx.settings.decision_profile=Some("routing".into());db.save_context(&ctx).unwrap();
         db.add_message(&ctx.user_id,&crate::db::messages::Message::user("Find the error".into())).unwrap();
         let state=super::GatewayState {db:db.clone(),config:crate::config::Config::from_env(),secrets:Default::default(),
-            llm:std::sync::Arc::new(super::llm::LLMRouter::with_providers(vec![],"unused".into(),vec![],Default::default())),
+            llm:super::LlmHandle::new(super::llm::LLMRouter::with_providers(vec![],"unused".into(),vec![],Default::default())),
             plugins:std::sync::Arc::new(crate::plugins::PluginRegistry::new()),event_tx:tokio::sync::broadcast::channel(16).0,start_time:std::time::Instant::now()};
         let guard=super::task_control::begin(&ctx.user_id).unwrap();
         let result=super::decision_routing::route_in(root.path(),&state,ctx.clone(),"Find the error",None).await.unwrap();

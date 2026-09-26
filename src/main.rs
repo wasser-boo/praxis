@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "praxis")]
@@ -319,6 +319,27 @@ fn load_dotenv() {
             }
         }
     }
+    pin_install_root();
+}
+
+/// Praxis reads templates/, contexts/, plugins/ and skills/ relative to its
+/// installation root. Resolve that root once and make it the process working
+/// directory so `~/praxis/praxis` started from any cwd (or a service) uses
+/// `~/praxis/templates`, never the directory the shell happened to be in.
+/// Precedence: ROOT_DIR, then the cwd if it holds templates/, then the
+/// executable's directory if it does, otherwise the cwd unchanged.
+fn pin_install_root() {
+    let root = praxis::config::resolve_install_root(
+        std::env::var_os("ROOT_DIR").map(PathBuf::from),
+        std::env::current_dir().ok(),
+        std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)),
+    );
+    let Some(root) = root else { return };
+    if std::env::set_current_dir(&root).is_ok() {
+        std::env::set_var("ROOT_DIR", &root);
+    } else {
+        eprintln!("Warning: cannot use installation root {}", root.display());
+    }
 }
 
 async fn run() -> anyhow::Result<()> {
@@ -568,6 +589,9 @@ async fn run_services(
 
     // Initialize global secrets
     praxis::db::secrets::init_secrets(secrets.clone());
+    if let Some(password) = master_password.as_deref() {
+        praxis::db::secrets::retain_master_password(password);
+    }
 
     // Build config, overriding sensitive fields from secrets if available
     let mut config = praxis::config::Config::from_env();

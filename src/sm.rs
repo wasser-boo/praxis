@@ -60,7 +60,9 @@ pub struct StateMachine {
     pub overrides: Vec<SmOverride>,
     #[serde(default)]
     pub secret_overrides: Vec<SmSecretOverride>,
-    /// User-defined tool groups: name -> list of tool names (can reference other groups)
+    /// Workflow-defined tool groups from a `[tool_groups]` section:
+    /// name -> list of tool names (may reference other groups, including built-ins).
+    /// Merged into `settings.tool_group_definitions` on every routing pass.
     #[serde(default)]
     pub tool_groups: HashMap<String, Vec<String>>,
 }
@@ -181,6 +183,10 @@ pub fn parse(content: &str) -> Result<StateMachine, SmError> {
                     current_state_name = None;
                     current_section = Some("secrets".to_string());
                 }
+                "tool_groups" => {
+                    current_state_name = None;
+                    current_section = Some("tool_groups".to_string());
+                }
                 other => {
                     return Err(SmError::ParseError(format!(
                         "Line {}: Unknown section [{}]",
@@ -233,9 +239,22 @@ pub fn parse(content: &str) -> Result<StateMachine, SmError> {
                 sm.secret_overrides.push(secret_overr);
             }
             Some("tool_groups") => {
+                // `name = [tool_a, "tool_b", other_group]` or `name = single_tool`
                 let (key, value) = parse_assignment(trimmed, line_num)?;
-                // Parse array value like [tool1, tool2] or single tool
-                let tools = parse_array(&value);
+                if key.is_empty()
+                    || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                {
+                    return Err(SmError::ParseError(format!(
+                        "Line {}: tool group name '{}' must be non-empty and use only [A-Za-z0-9_-]",
+                        line_num + 1,
+                        key
+                    )));
+                }
+                let tools: Vec<String> = parse_array(&value)
+                    .into_iter()
+                    .map(|t| t.trim_matches('"').to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect();
                 sm.tool_groups.insert(key, tools);
             }
             _ => {
@@ -450,58 +469,22 @@ fn parse_secret_override(line: &str, line_num: usize) -> Result<SmSecretOverride
     })
 }
 
-/// Resolve tool groups and add to context settings
+/// Merge workflow `[tool_groups]` definitions into
+/// `settings.tool_group_definitions`. Defining a group does NOT activate it;
+/// states opt in with `settings.tool_groups = ["name"]`. Workflow definitions
+/// override same-named context entries (so edits to the .sm propagate), while
+/// user-added groups with other names are preserved.
 fn apply_tool_groups(sm: &StateMachine, context: &mut serde_json::Value) {
     if sm.tool_groups.is_empty() {
         return;
     }
-    
-    // Resolve all groups (expand references to other groups)
-    let resolved = resolve_tool_groups(&sm.tool_groups);
-    
-    // Add to context settings.tool_groups
-    let settings = context
-        .get_mut("settings")
-        .and_then(|s| s.as_object_mut());
-    
-    if let Some(settings_obj) = settings {
-        let mut existing_groups = settings_obj
-            .get("tool_groups")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
-            .unwrap_or_default();
-        
-        // Add all resolved tool group names
-        for group_name in resolved.keys() {
-            if !existing_groups.contains(group_name) {
-                existing_groups.push(group_name.clone());
-            }
-        }
-        
-        settings_obj.insert("tool_groups".to_string(), serde_json::to_value(existing_groups).unwrap());
+    for (name, tools) in &sm.tool_groups {
+        set_nested_value(
+            context,
+            &format!("settings.tool_group_definitions.{name}"),
+            serde_json::to_value(tools).unwrap_or(serde_json::Value::Null),
+        );
     }
-}
-
-/// Resolve tool groups recursively (expand references to other groups)
-fn resolve_tool_groups(groups: &HashMap<String, Vec<String>>) -> HashMap<String, Vec<String>> {
-    let mut resolved = HashMap::new();
-    
-    for (group_name, tools) in groups {
-        let mut expanded = Vec::new();
-        for tool in tools {
-            if groups.contains_key(tool) {
-                // This tool name references another group - expand recursively
-                let sub_expanded = resolve_tool_groups(groups);
-                if let Some(sub_tools) = sub_expanded.get(tool) {
-                    expanded.extend(sub_tools.clone());
-                }
-            } else {
-                expanded.push(tool.clone());
-            }
-        }
-        resolved.insert(group_name.clone(), expanded);
-    }
-    resolved
 }
 
 /// Apply SM workflow to context. Returns secret overrides.
@@ -540,8 +523,19 @@ pub fn apply_to_context(
         None => return Vec::new(),
     };
 
-    // Auto-rules: always evaluate to allow automatic state transitions
-    let resolved_state = resolve_auto_state(sm, obj, &active_state);
+    // Auto-rules drive model/workflow-side state switching. While a Decision
+    // profile owns routing, its selected state must not be overridden here.
+    let decision_owns_state = obj
+        .get("settings")
+        .is_some_and(|s| {
+            s.get("use_decision_router").and_then(|v| v.as_bool()).unwrap_or(true)
+                && s.get("decision_profile").and_then(|v| v.as_str()).is_some_and(|p| !p.is_empty() && p != "off")
+        });
+    let resolved_state = if decision_owns_state {
+        resolve_auto_state(&StateMachine { auto_rules: Vec::new(), ..sm.clone() }, obj, &active_state)
+    } else {
+        resolve_auto_state(sm, obj, &active_state)
+    };
 
     // Apply resolved state variables (may override current state if auto-rule triggered)
     if resolved_state != active_state {
@@ -551,6 +545,11 @@ pub fn apply_to_context(
             }
         }
     }
+
+    // State variables are state-scoped: anything another state sets but the
+    // resolved state does not falls back to `_default` or is removed, so a
+    // state cannot inherit the previous state's template or tool allowance.
+    reset_foreign_state_variables(sm, context, &resolved_state);
 
     set_nested_value(
         context,
@@ -576,6 +575,37 @@ pub fn apply_to_context(
     secret_changes
 }
 
+/// Remove (or reset to `_default`) every variable declared by some other state
+/// but not by `state_name`.
+fn reset_foreign_state_variables(sm: &StateMachine, context: &mut serde_json::Value, state_name: &str) {
+    let canon = |k: &str| crate::db::contexts::canonical_context_key(k).into_owned();
+    let own: std::collections::HashSet<String> = sm
+        .states
+        .get(state_name)
+        .map(|s| s.variables.keys().map(|k| canon(k)).collect())
+        .unwrap_or_default();
+    let defaults: HashMap<String, &String> = sm
+        .states
+        .get("_default")
+        .map(|s| s.variables.iter().map(|(k, v)| (canon(k), v)).collect())
+        .unwrap_or_default();
+    let mut foreign: Vec<String> = sm
+        .states
+        .iter()
+        .filter(|(name, _)| name.as_str() != "_default" && name.as_str() != state_name)
+        .flat_map(|(_, s)| s.variables.keys().map(|k| canon(k)))
+        .filter(|key| !own.contains(key))
+        .collect();
+    foreign.sort();
+    foreign.dedup();
+    for key in foreign {
+        match defaults.get(&key) {
+            Some(value) => set_nested_value(context, &key, parse_json_or_string(value)),
+            None => remove_nested_value(context, &key),
+        }
+    }
+}
+
 fn resolve_auto_state(
     sm: &StateMachine,
     context: &serde_json::Map<String, serde_json::Value>,
@@ -586,8 +616,9 @@ fn resolve_auto_state(
             return rule.target_state.clone();
         }
     }
-    // Fall back to current state if set, otherwise first step or first state key
-    if !current_state.is_empty() && sm.states.contains_key(current_state) {
+    // Fall back to current state if set, otherwise first step or first state key.
+    // `_default` holds fallback variables and is never a real state.
+    if !current_state.is_empty() && current_state != "_default" && sm.states.contains_key(current_state) {
         return current_state.to_string();
     }
     sm.steps
@@ -838,12 +869,14 @@ pub fn transition_to(
         let before = context.pointer("/settings/active_skill").cloned();
         let mut candidate = context.clone();
         for (key, value) in &state.variables {
-            set_nested_value(&mut candidate, key, serde_json::Value::String(value.clone()));
+            set_nested_value(&mut candidate, key, parse_json_or_string(value));
         }
         if candidate.pointer("/settings/active_skill").cloned() != before { return false; }
+        // Same typing as apply_to_context: arrays/objects/bools stay JSON.
         for (key, value) in &state.variables {
-            set_nested_value(context, key, serde_json::Value::String(value.clone()));
+            set_nested_value(context, key, parse_json_or_string(value));
         }
+        reset_foreign_state_variables(sm, context, target_state);
         set_nested_value(
             context,
             "active_state",
@@ -892,6 +925,22 @@ fn set_nested_value(context: &mut serde_json::Value, path: &str, value: serde_js
     }
     if let Some(obj) = current.as_object_mut() {
         obj.insert(parts.last().unwrap().to_string(), value);
+    }
+}
+
+fn remove_nested_value(context: &mut serde_json::Value, path: &str) {
+    let path = crate::db::contexts::canonical_context_key(path);
+    let parts: Vec<&str> = path.split('.').collect();
+    let Some((last, parents)) = parts.split_last() else { return };
+    let mut current = context;
+    for part in parents {
+        match current.get_mut(*part) {
+            Some(next) => current = next,
+            None => return,
+        }
+    }
+    if let Some(obj) = current.as_object_mut() {
+        obj.remove(*last);
     }
 }
 
@@ -1470,5 +1519,101 @@ used_tools.last_call =~ tool_regex && used_tools.last_args.action == "left" -> u
 
         assert_eq!(ctx["active_state"], "done");
         assert_eq!(ctx["mode"], "idle");
+    }
+}
+
+#[cfg(test)]
+mod sm_tool_group_tests {
+    use super::*;
+
+    #[test]
+    fn tool_groups_section_defines_groups_without_activating_them() {
+        let input = r#"
+@steps [research, chat]
+
+[tool_groups]
+web = [brave_web_search, "read_file"]
+agent_basic = [agent_complete, agent_next]
+research_kit = [web, agent_basic]
+
+[state research]
+settings.activated_tools = ["research_kit", "execute_terminal"]
+
+[state chat]
+settings.activated_tools = ["agent_basic"]
+"#;
+        let sm = parse(input).unwrap();
+        assert_eq!(sm.tool_groups["web"], vec!["brave_web_search", "read_file"]);
+        assert_eq!(sm.tool_groups["research_kit"], vec!["web", "agent_basic"]);
+
+        let mut ctx = serde_json::json!({
+            "active_state": "chat",
+            "settings": {"tool_group_definitions": {"web": ["stale"], "mine": ["memory_get"]}}
+        });
+        apply_to_context(&sm, &mut ctx);
+        let defs = &ctx["settings"]["tool_group_definitions"];
+        assert_eq!(defs["web"], serde_json::json!(["brave_web_search", "read_file"]), "workflow wins for same name");
+        assert_eq!(defs["mine"], serde_json::json!(["memory_get"]), "user groups are preserved");
+        assert_eq!(ctx["settings"]["activated_tools"], serde_json::json!(["agent_basic"]), "defining does not activate");
+
+        let settings: crate::db::contexts::ContextSettings = serde_json::from_value(ctx["settings"].clone()).unwrap();
+        let expanded = crate::tools::registry::expand_tool_groups(&["research_kit".into(), "execute_terminal".into()], &settings.tool_group_definitions);
+        assert_eq!(expanded, vec!["brave_web_search", "read_file", "agent_complete", "agent_next", "execute_terminal"]);
+    }
+
+    #[test]
+    fn transition_to_keeps_json_typed_state_values() {
+        let sm = parse("[state a]\nsettings.activated_tools = [\"read_file\"]\nsettings.tags_enabled = true\n").unwrap();
+        let mut ctx = serde_json::json!({"active_state": "start", "settings": {}});
+        assert!(transition_to(&sm, &mut ctx, "a"));
+        assert_eq!(ctx["settings"]["activated_tools"], serde_json::json!(["read_file"]));
+        assert_eq!(ctx["settings"]["tags_enabled"], serde_json::json!(true));
+        let _: crate::db::contexts::ContextSettings = serde_json::from_value(ctx["settings"].clone()).unwrap();
+    }
+
+    #[test]
+    fn state_variables_do_not_leak_into_other_states() {
+        let sm = parse(r#"
+settings.tool_discovery_mode = "DescriptionOnly"
+[state a]
+settings.system_template = "a"
+settings.activated_tools = ["read_file"]
+settings.tool_discovery_mode = "Full"
+[state b]
+settings.system_template = "b"
+"#).unwrap();
+        let mut ctx = serde_json::json!({"active_state": "a", "settings": {"tags_enabled": true}});
+        apply_to_context(&sm, &mut ctx);
+        assert_eq!(ctx["settings"]["tool_discovery_mode"], "Full");
+        ctx["active_state"] = serde_json::json!("b");
+        apply_to_context(&sm, &mut ctx);
+        assert_eq!(ctx["settings"]["system_template"], "b");
+        assert!(ctx["settings"].get("activated_tools").is_none(), "foreign state variable removed");
+        assert_eq!(ctx["settings"]["tool_discovery_mode"], "DescriptionOnly", "falls back to _default");
+        assert_eq!(ctx["settings"]["tags_enabled"], true, "unmanaged keys untouched");
+        assert!(transition_to(&sm, &mut ctx, "a"));
+        assert_eq!(ctx["settings"]["activated_tools"], serde_json::json!(["read_file"]));
+        // _default is not a selectable state.
+        ctx["active_state"] = serde_json::json!("_default");
+        apply_to_context(&sm, &mut ctx);
+        assert_eq!(ctx["active_state"], "a");
+    }
+
+    #[test]
+    fn auto_rules_yield_to_an_active_decision_profile() {
+        let sm = parse("[state a]\n[state b]\n[auto]\nsm_data.role == \"b\" -> use b\n").unwrap();
+        let mut ctx = serde_json::json!({"active_state": "a", "sm_data": {"role": "b"}, "settings": {"decision_profile": "tasks"}});
+        apply_to_context(&sm, &mut ctx);
+        assert_eq!(ctx["active_state"], "a");
+        ctx["settings"]["decision_profile"] = serde_json::json!("off");
+        apply_to_context(&sm, &mut ctx);
+        assert_eq!(ctx["active_state"], "b");
+    }
+
+    #[test]
+    fn tool_group_names_are_validated() {
+        assert!(parse("[tool_groups]\nbad.name = [read_file]\n").is_err());
+        assert!(parse("[tool_groups]\n= [read_file]\n").is_err());
+        assert!(parse("[tool_groups]\nok_name-1 = read_file\n").is_ok());
     }
 }

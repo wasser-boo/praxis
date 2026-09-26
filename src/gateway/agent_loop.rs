@@ -1,7 +1,7 @@
 use crate::sm;
 use crate::gateway::llm::provider::{ChatMessage, ChatRequest, ToolCall};
 use crate::gateway::GatewayState;
-use crate::tools::registry::build_tool_definitions;
+use crate::tools::registry::build_tool_definitions_for_user;
 use crate::tags::{self, TagExecution};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -283,7 +283,7 @@ role: "system".to_string(),
             crate::gateway::prompt::render_user(state, &ctx, &user_message).await?;
 
         let image_msg_indices = crate::gateway::prompt::history_image_indices(
-            &history, &current_tool_ids, state.llm.history_image_messages(),
+            &history, &current_tool_ids, state.llm.get().history_image_messages(),
         );
         let omitted_history_images = history.iter()
             .filter(|m| m.content_parts.as_ref().is_some_and(|p| !p.is_empty()))
@@ -351,7 +351,7 @@ role: "system".to_string(),
         }
 
         // Only bootstrap tools and schemas discovered during this owned task.
-        let tools = build_tool_definitions(&ctx.settings, Some(&state.plugins.tool_definitions()), Some(&state.db));
+        let tools = build_tool_definitions_for_user(&ctx.settings, Some(&state.plugins.tool_definitions()), Some(&state.db), user_id);
 
         // Clone tool names and definitions for validation before moving tools into request
         let tool_names: Vec<String> = tools.iter().map(|t| t.function.name.clone()).collect();
@@ -364,7 +364,7 @@ role: "system".to_string(),
             messages: messages.clone(),
             tools: if tools.is_empty() || tool_calls_used >= tool_limit { None } else { Some(tools) },
             temperature: Some(0.7),
-            max_tokens: Some(state.llm.task_output_tokens()),
+            max_tokens: Some(state.llm.get().task_output_tokens()),
             model: ctx.settings.model.clone(),
             vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
             vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
@@ -409,7 +409,7 @@ role: "system".to_string(),
 
         // Call LLM
         let response = match state
-            .llm
+            .llm.get()
             .streaming_chat(request, provider, user_id)
             .await
         {

@@ -41,7 +41,7 @@ pub async fn health_check(State(state): State<GatewayState>) -> Json<HealthRespo
 }
 
 pub async fn status(State(state): State<GatewayState>) -> Json<StatusResponse> {
-    let providers: Vec<String> = state.llm.provider_names();
+    let providers: Vec<String> = state.llm.get().provider_names();
     let default_provider = state.config.use_provider.clone();
 
     Json(StatusResponse {

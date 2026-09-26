@@ -54,7 +54,7 @@ async fn local_model_live_state_task() -> anyhow::Result<()> {
     };
     let state=GatewayState {
         db:db.clone(),config:crate::config::Config::from_env(),secrets:Default::default(),
-        llm:Arc::new(LLMRouter::with_providers(vec![Box::new(provider)],"llamacpp".into(),vec![],ResilienceConfig {max_attempts:1,..Default::default()})),
+        llm:crate::gateway::LlmHandle::new(LLMRouter::with_providers(vec![Box::new(provider)],"llamacpp".into(),vec![],ResilienceConfig {max_attempts:1,..Default::default()})),
         plugins:Arc::new(crate::plugins::PluginRegistry::new()),
         event_tx:tokio::sync::broadcast::channel(16).0,start_time:Instant::now(),
     };

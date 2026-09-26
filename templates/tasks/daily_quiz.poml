@@ -1,5 +1,5 @@
 <poml>
-  <include src="../language_instructor.poml" />
+  <include src="../personas/language_teacher.poml" />
   <task>
     <p>Offer a short spaced-repetition quiz from the due items above. Ask one question at a time and wait for a real learner response. Use at most five due items; never pretend all five were answered in one agent turn.</p>
     <p>If the learner wants Discord buttons, discover ask_questions with search_tools first. Use four plausible answer options (one correct and three distractors) without revealing the correct choice. Otherwise use ordinary conversational questions. No external-tool availability may be assumed.</p>

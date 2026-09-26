@@ -1164,14 +1164,24 @@ async fn update_secrets(Json(update): Json<SecretsUpdate>) -> Result<String, Sta
         if let Err(_e) = crate::db::secrets::save_secrets(&secrets, password) {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
-        crate::db::secrets::init_secrets(secrets);
+        crate::db::secrets::init_secrets(secrets.clone());
+        reload_llm_router(&secrets);
         Ok(format!("Secrets saved and encrypted.{}", skipped_note))
     } else {
-        crate::db::secrets::init_secrets(secrets);
+        crate::db::secrets::init_secrets(secrets.clone());
+        reload_llm_router(&secrets);
         Ok(format!(
             "Secrets updated in memory. Provide master_password to persist to disk.{}",
             skipped_note
         ))
+    }
+}
+
+/// Provider keys changed in the dashboard take effect without a restart.
+fn reload_llm_router(secrets: &crate::db::secrets::Secrets) {
+    if let Some(state) = crate::gateway::state_ref() {
+        let config = crate::gateway::providers::effective_config(&state.config, secrets);
+        state.llm.swap(crate::gateway::llm::LLMRouter::new(&config, secrets));
     }
 }
 

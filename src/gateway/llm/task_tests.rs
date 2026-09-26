@@ -133,7 +133,7 @@ async fn resilience_gateway_histories_survive_retries_and_exhaustion_on_both_pat
                 db: db.clone(),
                 config: crate::config::Config::from_env(),
                 secrets: Default::default(),
-                llm: Arc::new(router),
+                llm: crate::gateway::LlmHandle::new(router),
                 plugins: Arc::new(crate::plugins::PluginRegistry::new()),
                 event_tx: tokio::sync::broadcast::channel(16).0,
                 start_time: std::time::Instant::now(),

@@ -49,6 +49,23 @@ With an updated binary, repair an older installation without reconfiguring or re
 
 This restores missing workflows, templates/includes, skills and icons. Existing prompts/settings/data remain unchanged; replaced dashboard files are backed up. Use the working directory of `praxis run`, then refresh the browser. Do not rerun interactive onboarding just for this. See [installation repair](docs/POML_WORKFLOWS.md#repair-an-incomplete-onboarding-installation).
 
+### Provider login from the TUI
+
+Start the chat TUI (`praxis chat`, or `praxis chat --gateway-url https://host:3537 --gateway-key …` for a remote gateway) and use `/login`. Login always runs on the **gateway machine** — the process that talks to the model — so a remote TUI logs the remote backend in. The router is rebuilt in place; no restart.
+
+```
+/login                                   # status of every provider + how to log in
+/login codex                             # ChatGPT subscription via the Codex CLI (device auth on the gateway host)
+/login codex --auth-json '<~/.codex/auth.json>'   # or import tokens from another machine
+/login openai sk-… [model] [api_base]    # same for anthropic, openrouter, minimax, mimo
+/login ollama http://gpu-box:11434 qwen3:8b       # local servers: endpoint + model (also llamacpp)
+/logout openai
+```
+
+After a successful login the TUI prints the exact `/context set settings.provider=… settings.model=…` lines for the current session; `USE_PROVIDER` in `.env` sets the default. Credentials are stored in the encrypted secret store when the gateway holds the master key (`MASTER_KEY_FILE`/`MASTER_KEY`/prompt at start; disable retention with `PRAXIS_RETAIN_MASTER_KEY=0`), otherwise they live until restart. `CODEX_MODEL` sets the Codex default model (`gpt-5-codex`).
+
+Praxis resolves `templates/`, `contexts/`, `plugins/`, `skills/` from its installation root: `ROOT_DIR` if set, else the working directory when it contains `templates/`, else the executable's directory.
+
 ## Configuration (.env)
 
 ```env
@@ -426,6 +443,12 @@ curl -X POST http://localhost:3537/v1/users/user1/import \
   -H "Authorization: Bearer $GATEWAY_API_KEY" \
   -H "Content-Type: application/json" \
   -d @export.json
+
+# Providers: status and login (what the TUI /login uses)
+curl http://localhost:3537/v1/providers -H "Authorization: Bearer $GATEWAY_API_KEY"
+curl -X POST http://localhost:3537/v1/providers/login \
+  -H "Authorization: Bearer $GATEWAY_API_KEY" -H "Content-Type: application/json" \
+  -d '{"provider":"ollama","api_base":"http://127.0.0.1:11434","model":"qwen3:8b"}'
 ```
 
 ### Dashboard API (port 1337)

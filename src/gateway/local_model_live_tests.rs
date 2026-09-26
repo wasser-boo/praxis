@@ -199,7 +199,7 @@ async fn local_model_live_tool_calling() -> anyhow::Result<()> {
         db: db.clone(),
         config: crate::config::Config::from_env(),
         secrets: Default::default(),
-        llm: Arc::new(LLMRouter::with_providers(
+        llm: crate::gateway::LlmHandle::new(LLMRouter::with_providers(
             vec![Box::new(provider)],
             "llamacpp".into(),
             vec![],

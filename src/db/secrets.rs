@@ -2,6 +2,44 @@ use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 
 static SECRETS: RwLock<Option<Secrets>> = RwLock::new(None);
+/// Master key retained by the running gateway so `/login` and token refreshes
+/// can persist credentials without prompting. Process memory only; never
+/// exported to env, argv or child processes. Opt out with
+/// `PRAXIS_RETAIN_MASTER_KEY=0` (logins then live until restart).
+static MASTER_KEY: RwLock<Option<String>> = RwLock::new(None);
+
+/// Tests that mutate the process-global store serialize on this lock.
+#[cfg(test)]
+pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+pub fn retain_master_password(password: &str) {
+    if std::env::var("PRAXIS_RETAIN_MASTER_KEY").is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("false")) {
+        return;
+    }
+    if let Ok(mut guard) = MASTER_KEY.write() {
+        *guard = Some(password.to_string());
+    }
+}
+
+pub fn master_key_retained() -> bool {
+    MASTER_KEY.read().is_ok_and(|g| g.is_some())
+}
+
+/// Save to the encrypted store when the gateway holds the master key.
+/// Returns Ok(false) when it cannot persist (in-memory update only).
+pub fn persist_if_unlocked(secrets: &Secrets) -> anyhow::Result<bool> {
+    let key = MASTER_KEY.read().ok().and_then(|g| g.clone());
+    match key {
+        Some(key) => {
+            save_secrets(secrets, &key)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Secrets {

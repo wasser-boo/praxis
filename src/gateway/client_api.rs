@@ -11,6 +11,19 @@ pub fn routes() -> Router<GatewayState> {
         .route("/v1/context/:user", axum::routing::get(context).delete(delete))
         .route("/v1/context/:user/fork", axum::routing::post(fork))
         .route("/v1/context/exec", axum::routing::post(exec))
+        .route("/v1/providers", axum::routing::get(providers))
+        .route("/v1/providers/login", axum::routing::post(login))
+}
+async fn providers(State(s): State<GatewayState>) -> Json<Value> {
+    let statuses = super::providers::statuses(&s);
+    Json(json!({"providers": statuses, "default": s.config.use_provider, "text": super::providers::render_status(&statuses, &s.config)}))
+}
+async fn login(State(s): State<GatewayState>, Json(request): Json<super::providers::LoginRequest>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    match super::providers::login(&s, request).await {
+        Ok(outcome) => Ok(Json(serde_json::to_value(outcome).unwrap_or_default())),
+        // Errors are operator-facing text; credentials are never echoed.
+        Err(error) => Err((StatusCode::BAD_REQUEST, Json(json!({"error": error.to_string()})))),
+    }
 }
 async fn messages(State(s): State<GatewayState>, Path(user): Path<String>) -> Result<Json<Value>, StatusCode> {
     let messages = s.db.get_chat_messages_with_token_budget(&user, usize::MAX).map_err(|_|StatusCode::INTERNAL_SERVER_ERROR)?.0;

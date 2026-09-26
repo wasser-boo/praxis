@@ -140,7 +140,7 @@ fn fixture(
         db,
         config: crate::config::Config::from_env(),
         secrets: Default::default(),
-        llm: Arc::new(router),
+        llm: crate::gateway::LlmHandle::new(router),
         plugins: Arc::new(crate::plugins::PluginRegistry::new()),
         event_tx: tokio::sync::broadcast::channel(16).0,
         start_time: std::time::Instant::now(),
@@ -203,7 +203,7 @@ async fn tool_output_model_controls_all_three_loops_and_default_is_full_without_
                 crate::gateway::agent_loop::run_agent_loop(&state, &user, "offline output test", config, None).await.unwrap();
             } else if flow == "standalone" {
                 let tools = crate::db::tools::to_tool_definitions(&state.db).unwrap();
-                state.llm.chat_with_tools(&state.db, &user, vec![], tools, Some(4), None, None, None).await.unwrap();
+                state.llm.get().chat_with_tools(&state.db, &user, vec![], tools, Some(4), None, None, None).await.unwrap();
             } else {
                 handle_message(&state, &user, "offline output test", Some("web")).await.unwrap();
             }

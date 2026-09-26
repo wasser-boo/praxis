@@ -140,6 +140,33 @@ if custom_data.user_prompt =~ "(?i)^reset role$" -> settings.system_template = "
 
 `@steps` supplies the ordered states for `agent_next`. State assignments currently store string-compatible values; use normal typed context tools for JSON booleans/objects. `[auto]` accepts ordered `condition -> use STATE` rules (first match wins). `[transitions]` uses `FROM -> TO : when CONDITION`; `[overrides]` uses `if CONDITION -> dotted.key = value`. The old inline `transition -> ... on next` / `auto_rule:` snippets are not the supported parser grammar.
 
+### Tool groups and activated tools
+
+There are no built-in tool groups. A `[tool_groups]` section defines them per workflow; members may be built-in tool names, plugin tool names (e.g. `brave_web_search`), or other group names. Defining a group does **not** activate it; each state lists what it activates in `settings.activated_tools`, mixing groups and single tools freely:
+
+```
+[tool_groups]
+core_files = [read_file, write_file, edit_file]
+coding = [core_files, execute_terminal, search_tools]
+role_switch = [set_context, get_context]
+
+[state research]
+settings.activated_tools = ["coding", "brave_web_search", "role_switch"]
+settings.tool_discovery_mode = "Full"
+```
+
+Workflow groups are merged into `settings.tool_group_definitions` on every routing pass (same-named context entries are replaced so `.sm` edits propagate; groups the user added under other names are kept). Users can also define groups in the context, e.g. `set_context settings.tool_group_definitions.my_kit = ["execute_terminal", "coding"]`. When a state activates tools, only those tools (built-in *and* plugin) are sent to the model, each with its full schema; nothing else is appended. Keep `set_context` activated in every state, otherwise the model cannot switch roles again.
+
+### Model-driven state switching
+
+The model switches state by writing a context variable — the shipped `standard.sm` uses `set_context("sm_data.role", "<role>")` — and `[auto]` rules map that value to a state on the next routing pass (every LLM request, including tool-call follow-ups). The state then sets `settings.system_template` and `settings.activated_tools`, so instructions and tool allowance change together. `[transitions]` are only evaluated by `agent_next`; use `[auto]` for model-driven switching. A `settings.system_template` that no state of the active workflow produces is treated as a manual choice and disables routing until it is cleared.
+
+State variables persist in the context until another state overwrites them, so every state should declare the variables it depends on (`system_template`, `activated_tools`, `tool_discovery_mode`).
+
+### Template includes
+
+POML resolves `<include src>` and `<let src>` relative to the **file containing the tag**, including nested includes. `templates/shared/state_base.poml` therefore includes `blueprint.poml`, not `../../shared/blueprint.poml`. Raw `&&` is not allowed in text content; put such expressions in a `<let>`.
+
 Conditions support dotted paths, comparisons, `=~` / `!~` regexes and quote-aware `&&` / `||`. Tool history lives at `custom_data.used_tools` and `custom_data.tool_history`, not an automatically populated root `used_tools`. Regex backslashes are literal in `.sm` files: use `\b` or `\d`, not JSON's doubled-backslash encoding. Do not use turn counts as proof a task finished. The shipped `coding.sm` and `self_learning.sm` use explicit phases instead.
 
 ## Repair an incomplete onboarding installation

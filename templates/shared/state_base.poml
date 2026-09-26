@@ -1,4 +1,5 @@
 <poml>
-  <include src="../../shared/blueprint.poml" />
-  <include src="../../shared/runtime_minimal.poml" />
+  <include src="blueprint.poml" />
+  <include src="roles.poml" />
+  <include src="runtime_minimal.poml" />
 </poml>

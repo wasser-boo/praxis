@@ -1,6 +1,6 @@
 use crate::gateway::llm::provider::{ChatMessage, ChatRequest};
 use crate::gateway::GatewayState;
-use crate::tools::registry::build_tool_definitions;
+use crate::tools::registry::build_tool_definitions_for_user;
 use crate::voice::tts;
 
 pub async fn handle_message(
@@ -118,7 +118,7 @@ role: "system".to_string(),
         }
     }
 
-    let tool_defs = build_tool_definitions(&ctx.settings, Some(&state.plugins.tool_definitions()), Some(&state.db));
+    let tool_defs = build_tool_definitions_for_user(&ctx.settings, Some(&state.plugins.tool_definitions()), Some(&state.db), user_id);
 
     // Clone tool names and definitions for validation before moving tool_defs into request
     let mut tool_names: Vec<String> = tool_defs.iter().map(|t| t.function.name.clone()).collect();
@@ -132,7 +132,7 @@ role: "system".to_string(),
             Some(tool_defs)
         },
         temperature: Some(0.7),
-        max_tokens: Some(state.llm.task_output_tokens()),
+        max_tokens: Some(state.llm.get().task_output_tokens()),
         model: ctx.settings.model.clone(),
         vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
         vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
@@ -146,7 +146,7 @@ role: "system".to_string(),
     };
 
     let mut response = state
-        .llm
+        .llm.get()
         .streaming_chat(request, provider, user_id)
         .await?;
 
@@ -286,7 +286,7 @@ role: "system".to_string(),
             .get_messages_with_token_budget(user_id, ctx.settings.history_token_limit.unwrap_or(crate::db::messages::DEFAULT_HISTORY_TOKENS))?;
 
         let image_msg_indices = crate::gateway::prompt::history_image_indices(
-            &history, &current_tool_ids, state.llm.history_image_messages(),
+            &history, &current_tool_ids, state.llm.get().history_image_messages(),
         );
         if history.iter().enumerate().any(|(i, m)|
             m.content_parts.as_ref().is_some_and(|p| !p.is_empty()) && !image_msg_indices.contains(&i)
@@ -337,7 +337,7 @@ role: "system".to_string(),
 
         // Keep tools available after use_skill/read_file/etc. Refresh definitions
         // as well as context, so newly disabled tools cannot run next round.
-        let tool_defs = build_tool_definitions(&ctx.settings, Some(&state.plugins.tool_definitions()), Some(&state.db));
+        let tool_defs = build_tool_definitions_for_user(&ctx.settings, Some(&state.plugins.tool_definitions()), Some(&state.db), user_id);
         tool_names = tool_defs.iter().map(|t| t.function.name.clone()).collect();
         tools_for_validation = tool_defs.clone();
         finalizing = tool_calls_used >= tool_limit;
@@ -356,7 +356,7 @@ role: "system".to_string(),
             messages: followup_messages,
             tools: if finalizing || tool_defs.is_empty() { None } else { Some(tool_defs) },
             temperature: Some(0.7),
-            max_tokens: Some(state.llm.task_output_tokens()),
+            max_tokens: Some(state.llm.get().task_output_tokens()),
             model: ctx.settings.model.clone(),
             vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
             vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
@@ -364,7 +364,7 @@ role: "system".to_string(),
         };
 
         response = state
-            .llm
+            .llm.get()
             .streaming_chat(followup_request, ctx.settings.provider.as_deref(), user_id)
             .await?;
     }

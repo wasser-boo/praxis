@@ -111,7 +111,7 @@ pub(crate) fn route_context_once(
     );
     if let Some(active) = routed.active_state.as_deref().filter(|s| !s.is_empty()) {
         anyhow::ensure!(
-            workflow.states.contains_key(active),
+            active != "_default" && workflow.states.contains_key(active),
             "Workflow selected an undefined state: {active}"
         );
     }
@@ -430,6 +430,30 @@ mod tests {
             assert_eq!(ctx.active_state.as_deref(), Some("routing"));
             assert_eq!(ctx.custom_data["user_prompt"], input);
         }
+    }
+
+    #[test]
+    fn backend_repo_model_role_switch_changes_state_template_and_tools() {
+        let mut ctx = Context { user_id: "alice".into(), ..Default::default() };
+        route_shipped(&mut ctx, "hi");
+        assert_eq!(ctx.active_state.as_deref(), Some("routing"));
+        let before = crate::tools::registry::build_tool_definitions(&ctx.settings, None, None);
+        assert!(!before.iter().any(|t| t.function.name == "execute_terminal"));
+        assert!(before.iter().any(|t| t.function.name == "set_context"), "every state must keep set_context to switch roles");
+
+        // What set_context("sm_data.role", "code") persists; the next routing pass must react.
+        ctx.sm_data["role"] = serde_json::json!("code");
+        route_shipped(&mut ctx, "please fix the build");
+        assert_eq!(ctx.active_state.as_deref(), Some("code"));
+        assert_eq!(ctx.settings.system_template.as_deref(), Some("states/code/code"));
+        let after = crate::tools::registry::build_tool_definitions(&ctx.settings, None, None);
+        assert!(after.iter().any(|t| t.function.name == "execute_terminal"));
+        assert!(!ctx.settings.tool_group_definitions.is_empty(), "workflow [tool_groups] land in the context");
+
+        ctx.sm_data["role"] = serde_json::json!("standard");
+        route_shipped(&mut ctx, "thanks");
+        assert_eq!(ctx.active_state.as_deref(), Some("standard"));
+        assert!(!crate::tools::registry::build_tool_definitions(&ctx.settings, None, None).iter().any(|t| t.function.name == "execute_terminal"));
     }
 
     #[test]
