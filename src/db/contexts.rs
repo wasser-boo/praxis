@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 #[path = "sm_migration_tests.rs"]
 mod sm_migration_tests;
+#[cfg(test)]
+#[path = "context_policy_tests.rs"]
+mod context_policy_tests;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
@@ -238,10 +241,9 @@ pub struct ContextSettings {
     pub compaction_summary: String,
     #[serde(default)]
     pub history_token_limit: Option<usize>,
-    /// Max characters persisted per tool result; raw beyond this is trimmed.
-    #[serde(default)]
-    // Legacy saved setting; model-facing tool responses now default to full text.
-    // Per-call _output controls replace this destructive global clipping limit.
+    /// Read-only legacy compatibility; no longer written to saved contexts.
+    /// Per-call _output/read_tool_result replace destructive global clipping.
+    #[serde(default, skip_serializing)]
     pub tool_result_limit: Option<usize>,
     /// Tools the current state activates. Each entry is a tool name (built-in or
     /// plugin) or a group name from `tool_group_definitions`, e.g.
@@ -303,8 +305,6 @@ pub struct ContextSettings {
     /// channel_id and no originating channel is known.
     #[serde(default)]
     pub upload_channel_id: Option<String>,
-    #[serde(default = "default_feedback_template")]
-    pub feedback_template: String,
     #[serde(default)]
     pub message_on_toolcalling: bool,
     #[serde(default = "default_true")]
@@ -360,9 +360,6 @@ fn default_elevenlabs_similarity_boost() -> f32 {
 }
 fn default_elevenlabs_speed() -> Option<f32> {
     Some(0.8)
-}
-fn default_feedback_template() -> String {
-    "tasks/feedback".to_string()
 }
 fn default_thinking_mode() -> String {
     "auto".to_string()
@@ -482,7 +479,6 @@ impl Default for ContextSettings {
             feedback_mode: Vec::new(),
             feedback_channel_id: None,
             upload_channel_id: None,
-            feedback_template: default_feedback_template(),
             message_on_toolcalling: false,
             vm_screenshot_enabled: true,
             vm_screenshot_limit: default_screenshot_limit(),
@@ -623,6 +619,8 @@ impl Database {
         let previous_skill = ctx.settings.active_skill.clone();
         let previous_show_thinking = ctx.settings.show_thinking;
         let previous_tag_prefix = ctx.settings.tag_prefix.clone();
+        let previous_download = ctx.settings.download;
+        let previous_feedback_enabled = ctx.settings.feedback_enabled;
         let previous_decision_profile = ctx.settings.decision_profile.clone();
         let previous_workflow = crate::gateway::prompt::workflow_name(&ctx).to_string();
         let mut data: serde_json::Value = serde_json::to_value(&ctx)?;
@@ -666,6 +664,12 @@ impl Database {
                     "Undefined workflow state: {target}; current state unchanged");
             }
         }
+        anyhow::ensure!(!from_agent || ctx.settings.download == previous_download,
+            "Attachment download permission is user-only");
+        anyhow::ensure!(!from_agent || ctx.settings.feedback_enabled == previous_feedback_enabled,
+            "External feedback permission is user-only");
+        anyhow::ensure!((0..=1000).contains(&ctx.settings.feedback_max_per_5min), "feedback_max_per_5min must be in 0..=1000");
+        anyhow::ensure!((1..=86400).contains(&ctx.settings.feedback_window_secs), "feedback_window_secs must be in 1..=86400");
         crate::tags::validate_tag_prefix(&ctx.settings.tag_prefix)?;
         anyhow::ensure!(!from_agent || ctx.settings.tag_prefix == previous_tag_prefix,
             "Tag prefix is user/template-author configuration, not model writable");

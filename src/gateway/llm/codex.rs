@@ -9,7 +9,7 @@
 use super::provider::*;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 
 pub const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
@@ -47,14 +47,34 @@ impl CodexAuth {
             access_token,
             refresh_token,
         };
-        if auth.account_id.is_none() {
-            auth.account_id = account_id_from_jwt(&auth.access_token);
-        }
+        auth.normalize()?;
         Ok(auth)
     }
 
+    /// Both CLI auth.json and Praxis's normalized encrypted-store shape.
+    pub fn from_json(text: &str) -> anyhow::Result<Self> {
+        anyhow::ensure!(text.len() <= 64 * 1024, "Codex auth JSON is too large");
+        let value: serde_json::Value = serde_json::from_str(text)?;
+        if value.get("tokens").is_some() { return Self::from_cli_file(text); }
+        let mut auth: Self = serde_json::from_value(value)?;
+        auth.normalize()?;
+        Ok(auth)
+    }
+
+    fn normalize(&mut self) -> anyhow::Result<()> {
+        let valid = |s: &str| !s.is_empty() && s.len() <= 32 * 1024
+            && s.bytes().all(|c| c.is_ascii_graphic()) && !s.starts_with("***");
+        anyhow::ensure!(valid(&self.access_token), "Codex access token is missing or malformed");
+        anyhow::ensure!(self.refresh_token.is_empty() || valid(&self.refresh_token), "Codex refresh token is malformed");
+        self.account_id = self.account_id.take().filter(|s| !s.is_empty())
+            .or_else(|| account_id_from_jwt(&self.access_token))
+            .or_else(|| self.id_token.as_deref().and_then(account_id_from_jwt));
+        anyhow::ensure!(self.account_id.as_deref().is_none_or(valid), "Codex account id is malformed");
+        Ok(())
+    }
+
     pub fn from_secrets(secrets: &crate::db::secrets::Secrets) -> Option<Self> {
-        secrets.custom.get(SECRET_KEY).and_then(|s| serde_json::from_str(s).ok()).filter(|a: &Self| !a.access_token.is_empty())
+        secrets.custom.get(SECRET_KEY).and_then(|s| Self::from_json(s).ok())
     }
 
     pub fn store(&self, secrets: &mut crate::db::secrets::Secrets) {
@@ -94,14 +114,39 @@ pub fn account_id_from_jwt(token: &str) -> Option<String> {
 fn jwt_expired(token: &str) -> bool {
     jwt_claims(token)
         .and_then(|c| c["exp"].as_i64())
-        .is_some_and(|exp| exp - 60 <= chrono::Utc::now().timestamp())
+        .is_some_and(|exp| exp.saturating_sub(60) <= chrono::Utc::now().timestamp())
 }
 
 /// Called after a refresh so the new tokens outlive this router instance.
-pub type OnRefresh = Box<dyn Fn(&CodexAuth) + Send + Sync>;
+pub type OnRefresh = Box<dyn Fn(&CodexAuth, &CodexAuth) + Send + Sync>;
+
+struct AuthSession {
+    // Retain the constructor identity while routers overlap during hot reload.
+    // A stale snapshot must join the session that already rotated its tokens.
+    initial: CodexAuth,
+    auth: Mutex<CodexAuth>,
+    refresh_lock: tokio::sync::Mutex<()>,
+}
+
+fn auth_session(auth: CodexAuth, base_url: &str, token_url: &str) -> Arc<AuthSession> {
+    type Sessions = Vec<(String, String, Weak<AuthSession>)>;
+    static SESSIONS: Mutex<Sessions> = Mutex::new(Vec::new());
+    let mut sessions = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    sessions.retain(|(_, _, session)| session.strong_count() > 0);
+    for (base, token, session) in sessions.iter() {
+        if base != base_url || token != token_url { continue; }
+        if let Some(session) = session.upgrade() {
+            let matches = session.initial == auth || *session.auth.lock().unwrap_or_else(|e| e.into_inner()) == auth;
+            if matches { return session; }
+        }
+    }
+    let session = Arc::new(AuthSession { initial: auth.clone(), auth: Mutex::new(auth), refresh_lock: tokio::sync::Mutex::new(()) });
+    sessions.push((base_url.into(), token_url.into(), Arc::downgrade(&session)));
+    session
+}
 
 pub struct CodexProvider {
-    auth: Mutex<CodexAuth>,
+    session: Arc<AuthSession>,
     model: String,
     base_url: String,
     token_url: String,
@@ -115,16 +160,28 @@ impl CodexProvider {
     }
 
     pub fn with_urls(auth: CodexAuth, model: String, base_url: String, token_url: String, on_refresh: Option<OnRefresh>) -> Self {
-        Self { auth: Mutex::new(auth), model, base_url, token_url, client: super::http::client(), on_refresh }
+        let session = auth_session(auth, &base_url, &token_url);
+        Self { session, model, base_url, token_url, client: super::http::client(), on_refresh }
     }
 
     fn auth(&self) -> CodexAuth {
-        self.auth.lock().map(|a| a.clone()).unwrap_or_else(|e| e.into_inner().clone())
+        self.session.auth.lock().map(|a| a.clone()).unwrap_or_else(|e| e.into_inner().clone())
     }
 
-    async fn refresh(&self) -> anyhow::Result<CodexAuth> {
+    async fn refresh(&self, rejected: &CodexAuth) -> anyhow::Result<CodexAuth> {
+        // Refresh tokens rotate. Concurrent expired requests/401s must reuse the
+        // winner's credentials rather than consume the same token twice.
+        let _guard = self.session.refresh_lock.lock().await;
         let current = self.auth();
-        anyhow::ensure!(!current.refresh_token.is_empty(), "Codex login expired and no refresh token is stored; run /login codex again");
+        if current != *rejected {
+            return Ok(current);
+        }
+        if current.refresh_token.is_empty() {
+            return Err(super::error::ProviderError {
+                cause: Some("Codex login expired; run /login codex --device-auth"),
+                ..super::error::ProviderError::new(super::error::ErrorKind::Authentication)
+            }.into());
+        }
         let response = self.client.post(&self.token_url)
             .json(&serde_json::json!({
                 "client_id": CODEX_CLIENT_ID,
@@ -133,24 +190,27 @@ impl CodexProvider {
                 "scope": "openid profile email",
             }))
             .send().await.map_err(super::error::ProviderError::from_reqwest)?;
-        let data = super::http::json(response).await?;
+        let data = super::http::json(response).await.map_err(|mut error| {
+            if matches!(error.status, Some(400 | 401 | 403)) {
+                error.kind = super::error::ErrorKind::Authentication;
+                error.cause = Some("Codex refresh rejected; run /login codex --device-auth");
+            }
+            error
+        })?;
         let access_token = data["access_token"].as_str().filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("Codex token refresh returned no access token; run /login codex again"))?;
         let mut next = CodexAuth {
             access_token: access_token.to_string(),
             refresh_token: data["refresh_token"].as_str().filter(|s| !s.is_empty()).unwrap_or(&current.refresh_token).to_string(),
-            id_token: data["id_token"].as_str().map(str::to_string).or(current.id_token),
-            account_id: current.account_id,
+            id_token: data["id_token"].as_str().map(str::to_string).or_else(|| current.id_token.clone()),
+            account_id: current.account_id.clone(),
             last_refresh: Some(chrono::Utc::now().to_rfc3339()),
         };
-        if next.account_id.is_none() {
-            next.account_id = account_id_from_jwt(&next.access_token);
-        }
-        if let Ok(mut guard) = self.auth.lock() {
-            *guard = next.clone();
-        }
+        next.account_id = account_id_from_jwt(&next.access_token).or(next.account_id);
+        next.normalize().map_err(|_| super::error::ProviderError::new(super::error::ErrorKind::InvalidResponse))?;
+        *self.session.auth.lock().unwrap_or_else(|e| e.into_inner()) = next.clone();
         if let Some(hook) = &self.on_refresh {
-            hook(&next);
+            hook(&current, &next);
         }
         Ok(next)
     }
@@ -161,12 +221,12 @@ impl CodexProvider {
         let mut input = Vec::new();
         for m in &request.messages {
             match m.role.as_str() {
-                "system" if input.is_empty() => {
+                "system" | "developer" if input.is_empty() => {
                     if let Some(text) = m.content.as_deref().filter(|t| !t.is_empty()) {
                         instructions.push(text.to_string());
                     }
                 }
-                "system" => input.push(serde_json::json!({"type": "message", "role": "developer",
+                "system" | "developer" => input.push(serde_json::json!({"type": "message", "role": "developer",
                     "content": [{"type": "input_text", "text": m.content.as_deref().unwrap_or("")}]})),
                 "tool" => {
                     input.push(serde_json::json!({"type": "function_call_output",
@@ -225,7 +285,13 @@ impl CodexProvider {
             "stream": true,
             "include": [],
         });
-        if let Some(level) = request.thinking.and_then(|t| t.level()) {
+        if let Some(thinking) = request.thinking {
+            // Original Codex models require reasoning and low/medium/high.
+            let level = match thinking {
+                ThinkingMode::Off => "low",
+                ThinkingMode::Xhigh if matches!(model, "gpt-5" | "gpt-5-codex" | "gpt-5.1-codex" | "gpt-5.1-codex-mini") => "high",
+                _ => thinking.level().unwrap_or("low"),
+            };
             body["reasoning"] = serde_json::json!({"effort": level, "summary": "auto"});
         }
         body
@@ -234,11 +300,11 @@ impl CodexProvider {
     async fn send(&self, body: &serde_json::Value, on_delta: &(dyn Fn(StreamDelta) + Send + Sync)) -> anyhow::Result<ChatResponse> {
         let mut auth = self.auth();
         if jwt_expired(&auth.access_token) {
-            auth = self.refresh().await?;
+            auth = self.refresh(&auth).await?;
         }
         let mut response = self.request(&auth, body).await?;
         if response.status().as_u16() == 401 {
-            auth = self.refresh().await?;
+            auth = self.refresh(&auth).await?;
             response = self.request(&auth, body).await?;
         }
         let response = super::http::checked(response).await?;
@@ -250,6 +316,7 @@ impl CodexProvider {
             .bearer_auth(&auth.access_token)
             .header("OpenAI-Beta", "responses=experimental")
             .header("originator", "praxis")
+            .header("user-agent", concat!("praxis/", env!("CARGO_PKG_VERSION")))
             .header("session_id", uuid::Uuid::new_v4().to_string())
             .header("accept", "text/event-stream")
             .json(body);
@@ -260,78 +327,9 @@ impl CodexProvider {
     }
 }
 
-/// Consume the Responses SSE stream. Text deltas are forwarded as they arrive;
-/// the final `response.completed` event is authoritative for tool calls.
-async fn parse_sse(mut response: reqwest::Response, on_delta: &(dyn Fn(StreamDelta) + Send + Sync)) -> anyhow::Result<ChatResponse> {
-    let mut buffer = String::new();
-    let mut text = String::new();
-    let mut reasoning = String::new();
-    let mut completed: Option<serde_json::Value> = None;
-    let mut items: Vec<serde_json::Value> = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(super::error::ProviderError::from_reqwest)? {
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(pos) = buffer.find("\n\n") {
-            let event = buffer[..pos].to_string();
-            buffer.drain(..pos + 2);
-            let data: String = event.lines().filter_map(|l| l.strip_prefix("data:")).map(str::trim).collect::<Vec<_>>().join("\n");
-            if data.is_empty() || data == "[DONE]" { continue; }
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else { continue };
-            match value["type"].as_str().unwrap_or("") {
-                "response.output_text.delta" => {
-                    if let Some(delta) = value["delta"].as_str() {
-                        text.push_str(delta);
-                        on_delta(StreamDelta::Text { text: delta.to_string() });
-                    }
-                }
-                "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-                    if let Some(delta) = value["delta"].as_str() {
-                        reasoning.push_str(delta);
-                        on_delta(StreamDelta::Reasoning { text: delta.to_string() });
-                    }
-                }
-                "response.output_item.done" => items.push(value["item"].clone()),
-                "response.completed" => completed = Some(value["response"].clone()),
-                "response.failed" | "error" => {
-                    let message = value.pointer("/response/error/message").or_else(|| value.pointer("/error/message")).or_else(|| value.get("message"))
-                        .and_then(|m| m.as_str()).unwrap_or("Codex request failed");
-                    anyhow::bail!("Codex: {}", message.chars().take(300).collect::<String>());
-                }
-                _ => {}
-            }
-        }
-    }
-    let output = completed.as_ref().and_then(|r| r["output"].as_array().cloned()).unwrap_or(items);
-    let mut content = String::new();
-    let mut tool_calls = Vec::new();
-    for item in &output {
-        match item["type"].as_str().unwrap_or("") {
-            "message" => for part in item["content"].as_array().into_iter().flatten() {
-                if let Some(t) = part["text"].as_str() { content.push_str(t); }
-            },
-            "function_call" => tool_calls.push(ToolCall {
-                id: item["call_id"].as_str().or(item["id"].as_str()).unwrap_or_default().to_string(),
-                function: FunctionCall {
-                    name: item["name"].as_str().unwrap_or_default().to_string(),
-                    arguments: item["arguments"].as_str().unwrap_or("{}").to_string(),
-                },
-            }),
-            _ => {}
-        }
-    }
-    if content.is_empty() { content = text; }
-    let usage = completed.as_ref().and_then(|r| r.get("usage")).map(|u| Usage {
-        prompt_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32,
-        completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
-        total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-    });
-    Ok(ChatResponse {
-        finish_reason: Some(if tool_calls.is_empty() { "stop" } else { "tool_calls" }.into()),
-        content: if content.is_empty() { None } else { Some(content) },
-        reasoning_content: if reasoning.is_empty() { None } else { Some(reasoning) },
-        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
-        usage,
-    })
-}
+#[path = "codex_stream.rs"]
+mod stream;
+use stream::parse_sse;
 
 #[async_trait]
 impl LLMProvider for CodexProvider {
@@ -339,13 +337,24 @@ impl LLMProvider for CodexProvider {
         self.send(&self.build_body(&request), &|_| {}).await
     }
 
+    async fn chat_stream(&self, request: ChatRequest, on_token: &(dyn Fn(String) + Send + Sync)) -> anyhow::Result<ChatResponse> {
+        self.send(&self.build_body(&request), &|delta| {
+            if let StreamDelta::Text { text } = delta { on_token(text); }
+        }).await
+    }
+
     async fn chat_stream_events(&self, request: ChatRequest, on_delta: &(dyn Fn(StreamDelta) + Send + Sync)) -> anyhow::Result<ChatResponse> {
         self.send(&self.build_body(&request), on_delta).await
     }
 
+    fn supports_output_limit(&self) -> bool { false }
     fn name(&self) -> &str { "codex" }
     fn as_any(&self) -> &dyn std::any::Any { self }
 }
+
+#[cfg(test)]
+#[path = "codex_tests.rs"]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests {
@@ -393,7 +402,7 @@ mod tests {
         let provider = CodexProvider::with_urls(
             CodexAuth { access_token: expired, refresh_token: "r1".into(), ..Default::default() },
             "gpt-5-codex".into(), format!("{}/responses", server.uri()), format!("{}/token", server.uri()),
-            Some(Box::new(move |a: &CodexAuth| { *sink.lock().unwrap() = Some(a.clone()); })),
+            Some(Box::new(move |_: &CodexAuth, a: &CodexAuth| { *sink.lock().unwrap() = Some(a.clone()); })),
         );
         let request = ChatRequest {
             messages: vec![

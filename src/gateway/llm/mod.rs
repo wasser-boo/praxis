@@ -2,7 +2,7 @@ pub mod anthropic;
 pub mod codex;
 pub mod embeddings;
 pub mod error;
-mod http;
+pub(super) mod http;
 pub mod resilience;
 mod routing;
 pub mod llamacpp;
@@ -46,12 +46,17 @@ impl LLMRouter {
         if let Some(auth) = codex::CodexAuth::from_secrets(secrets) {
             // Refreshed tokens go back into the live store (and disk when the
             // gateway holds the master key) so restarts do not log the user out.
-            let on_refresh: codex::OnRefresh = Box::new(|auth: &codex::CodexAuth| {
-                let mut secrets = crate::db::secrets::get_secrets();
-                auth.store(&mut secrets);
-                crate::db::secrets::init_secrets(secrets.clone());
-                if let Err(error) = crate::db::secrets::persist_if_unlocked(&secrets) {
-                    tracing::warn!(%error, "Codex tokens refreshed in memory only");
+            let imported = auth.clone();
+            let on_refresh: codex::OnRefresh = Box::new(move |previous: &codex::CodexAuth, auth: &codex::CodexAuth| {
+                if crate::db::secrets::update_runtime_secrets(|secrets| {
+                    // A retired router must not undo logout or replace a new
+                    // account. Its original snapshot may precede a shared refresh.
+                    let current = codex::CodexAuth::from_secrets(secrets);
+                    if current.as_ref() != Some(previous) && current.as_ref() != Some(&imported) { return false; }
+                    auth.store(secrets);
+                    true
+                }).is_err() {
+                    tracing::warn!("Codex tokens refreshed in memory but could not be persisted");
                 }
             });
             providers.push(Box::new(codex::CodexProvider::new(auth, config.codex_model.clone(), Some(on_refresh))));

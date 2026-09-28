@@ -75,6 +75,8 @@ pub struct TemplateSaveResult {
 
 #[derive(Serialize)]
 pub struct SecretsInfo {
+    /// Write-only auth.json import; never expose token suffixes from JSON.
+    pub codex_auth: String,
     pub discord_bot_token: String,
     pub openai_api_key: String,
     pub anthropic_api_key: String,
@@ -91,6 +93,8 @@ pub struct SecretsInfo {
 
 #[derive(Deserialize)]
 pub struct SecretsUpdate {
+    /// CLI auth.json or normalized CodexAuth JSON. Empty removes, *** preserves.
+    pub codex_auth: Option<String>,
     pub discord_bot_token: Option<String>,
     pub openai_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
@@ -1067,9 +1071,11 @@ async fn get_secrets() -> Result<Json<SecretsInfo>, StatusCode> {
     let custom_masked: std::collections::HashMap<String, String> = secrets
         .custom
         .iter()
+        .filter(|(k, _)| k.as_str() != crate::gateway::llm::codex::SECRET_KEY)
         .map(|(k, v)| (k.clone(), crate::db::secrets::mask_secret(&Some(v.clone()))))
         .collect();
     Ok(Json(SecretsInfo {
+        codex_auth: if crate::gateway::llm::codex::CodexAuth::from_secrets(&secrets).is_some() { "***".into() } else { String::new() },
         discord_bot_token: crate::db::secrets::mask_secret(&secrets.discord_bot_token),
         openai_api_key: crate::db::secrets::mask_secret(&secrets.openai_api_key),
         anthropic_api_key: crate::db::secrets::mask_secret(&secrets.anthropic_api_key),
@@ -1088,6 +1094,9 @@ async fn get_secrets() -> Result<Json<SecretsInfo>, StatusCode> {
 
 async fn update_secrets(Json(update): Json<SecretsUpdate>) -> Result<String, StatusCode> {
     let mut secrets = crate::db::secrets::get_secrets();
+    if let Some(auth) = update.codex_auth.as_deref() {
+        apply_codex_secret(&mut secrets, auth).map_err(|_| StatusCode::BAD_REQUEST)?;
+    }
     // Felder, die wegen Leer-Werten übersprungen wurden (Selbst-Zugangs-
     // daten dürfen nie mit "" in den Store — sonst Login/Gateway-401).
     let mut skipped: Vec<&str> = Vec::new();
@@ -1182,6 +1191,46 @@ fn reload_llm_router(secrets: &crate::db::secrets::Secrets) {
     if let Some(state) = crate::gateway::state_ref() {
         let config = crate::gateway::providers::effective_config(&state.config, secrets);
         state.llm.swap(crate::gateway::llm::LLMRouter::new(&config, secrets));
+    }
+}
+
+fn apply_codex_secret(secrets: &mut crate::db::secrets::Secrets, value: &str) -> anyhow::Result<()> {
+    use crate::gateway::llm::codex::{CodexAuth, SECRET_KEY};
+    if value.starts_with("***") { return Ok(()); }
+    if value.trim().is_empty() {
+        secrets.custom.remove(SECRET_KEY);
+    } else {
+        CodexAuth::from_json(value)?.store(secrets);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod codex_secret_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dashboard_codex_auth_is_validated_normalized_and_masked() {
+        use crate::gateway::llm::codex::{CodexAuth, SECRET_KEY};
+        let _lock = crate::db::secrets::test_lock();
+        let original = crate::db::secrets::get_secrets();
+        let mut secrets = crate::db::secrets::Secrets::default();
+        apply_codex_secret(&mut secrets, r#"{"tokens":{"access_token":"private-access","refresh_token":"private-refresh"}}"#).unwrap();
+        assert!(CodexAuth::from_secrets(&secrets).is_some());
+        let saved = secrets.custom[SECRET_KEY].clone();
+        for invalid in ["invalid", "{}", r#"{"tokens":{"access_token":"bad token"}}"#] {
+            assert!(apply_codex_secret(&mut secrets, invalid).is_err());
+            assert_eq!(secrets.custom[SECRET_KEY], saved);
+        }
+        apply_codex_secret(&mut secrets, "***").unwrap();
+        assert_eq!(secrets.custom[SECRET_KEY], saved);
+        crate::db::secrets::init_secrets(secrets.clone());
+        let info = serde_json::to_value(get_secrets().await.unwrap().0).unwrap();
+        assert_eq!(info["codex_auth"], "***");
+        assert!(!info.to_string().contains("private"));
+        apply_codex_secret(&mut secrets, "").unwrap();
+        assert!(CodexAuth::from_secrets(&secrets).is_none());
+        crate::db::secrets::init_secrets(original);
     }
 }
 

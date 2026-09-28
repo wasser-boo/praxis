@@ -3697,6 +3697,7 @@ dependencies = [
  "image",
  "jsonwebtoken",
  "lazy_static",
+ "libc",
  "minimp3",
  "once_cell",
  "png",
@@ -3731,6 +3732,7 @@ dependencies = [
  "vosk",
  "whisper-rs",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]

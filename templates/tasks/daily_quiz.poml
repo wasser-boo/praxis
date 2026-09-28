@@ -1,10 +1,7 @@
 <poml>
   <include src="../personas/language_teacher.poml" />
   <task>
-    <p>Offer a short spaced-repetition quiz from the due items above. Ask one question at a time and wait for a real learner response. Use at most five due items; never pretend all five were answered in one agent turn.</p>
-    <p>If the learner wants Discord buttons, discover ask_questions with search_tools first. Use four plausible answer options (one correct and three distractors) without revealing the correct choice. Otherwise use ordinary conversational questions. No external-tool availability may be assumed.</p>
-    <p>After each actual answer, explain WHY a wrong option was wrong, then follow the instructor's memory_get/memory_set workflow for SRS and XP. Preserve non-due cards and other languages. Do not create fake earlier lessons or force new items merely to reach five questions.</p>
-    <p>When the requested quiz is finished, give the score using the actual number answered, confirmed XP and an appropriate next step. Always provide a visible final message; never end only with agent_complete.</p>
+    <p>Quiz at most five valid due items, one question at a time; wait for actual answers. Never reveal the answer before recall or invent earlier lessons. If buttons are requested, discover ask_questions first and supply one correct option plus three plausible distractors.</p>
+    <p>After each answer explain WHY, then use the consented SRS/XP memory workflow above. Preserve non-due cards and other languages. End with an honest score based only on answers received, confirmed saved XP, and a visible next step.</p>
   </task>
-  <output-format>One short question or correction at a time. End with an honest score and confirmed saved progress only after actual answers.</output-format>
 </poml>

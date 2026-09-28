@@ -593,6 +593,12 @@ async fn run_services(
         praxis::db::secrets::retain_master_password(password);
     }
 
+    // Do not leave a second, unprotected password allocation alive in this
+    // long-running function after optional retention has been decided.
+    if let Some(mut password) = master_password {
+        zeroize::Zeroize::zeroize(&mut password);
+    }
+
     // Build config, overriding sensitive fields from secrets if available
     let mut config = praxis::config::Config::from_env();
     config.apply_secrets(&secrets);

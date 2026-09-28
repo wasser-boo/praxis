@@ -6,7 +6,8 @@
 use super::GatewayState;
 use super::llm::codex::{self, CodexAuth};
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+#[path = "codex_login.rs"]
+mod codex_device;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthKind {
@@ -55,6 +56,9 @@ pub struct LoginRequest {
     /// Codex: paste the content of a `~/.codex/auth.json` from another machine.
     #[serde(default)]
     pub auth_json: Option<String>,
+    /// Start a fresh CLI device login, bypassing stored/CLI credentials.
+    #[serde(default)]
+    pub device_auth: bool,
     /// Remove the stored credential instead of adding one.
     #[serde(default)]
     pub logout: bool,
@@ -80,15 +84,6 @@ pub struct LoginOutcome {
     pub persisted: bool,
     pub setup: Vec<String>,
     pub providers: Vec<ProviderStatus>,
-}
-
-/// Pending Codex device-auth started on this machine (one at a time).
-static CODEX_LOGIN: Mutex<Option<CodexLoginJob>> = Mutex::new(None);
-
-struct CodexLoginJob {
-    instructions: String,
-    started: std::time::Instant,
-    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn secret_slot<'a>(secrets: &'a mut crate::db::secrets::Secrets, provider: &str) -> Option<&'a mut Option<String>> {
@@ -188,14 +183,13 @@ pub fn statuses(state: &GatewayState) -> Vec<ProviderStatus> {
 /// Lines the TUI prints after a successful login.
 pub fn setup_hints(state: &GatewayState, provider: &str, model: &str) -> Vec<String> {
     let mut lines = vec![
-        format!("Use it in this session:   /context set settings.provider={provider}"),
-        format!("Pick a model (optional):  /context set settings.model={model}"),
+        format!("Use it in this session:   /context set settings.provider={provider} settings.model={model}"),
     ];
     if let Some(p) = spec(provider) {
         lines.push(format!("Models: {}", p.models_hint));
     }
     if provider == "codex" {
-        lines.push("Reasoning effort:         /thinking medium   (low|medium|high|xhigh)".into());
+        lines.push("Reasoning effort:         /thinking medium   (low|medium|high|xhigh; older Codex models cap xhigh at high and off at low)".into());
     }
     lines.push("Vision (optional):        /context set settings.vision_provider=<name> settings.vision_model=<model>".into());
     if state.config.use_provider != provider {
@@ -213,9 +207,25 @@ fn rebuild_router(state: &GatewayState, secrets: &crate::db::secrets::Secrets) -
     warning
 }
 
-fn commit(state: &GatewayState, secrets: crate::db::secrets::Secrets) -> anyhow::Result<(bool, Option<String>)> {
-    crate::db::secrets::init_secrets(secrets.clone());
-    let persisted = crate::db::secrets::persist_if_unlocked(&secrets)?;
+fn commit(state: &GatewayState, provider: &str, changes: crate::db::secrets::Secrets) -> anyhow::Result<(bool, Option<String>)> {
+    // Probes/device auth can take time. Merge only this provider's fields into
+    // the latest store, preserving other logins and rotated Codex tokens.
+    let (secrets, persisted) = crate::db::secrets::update_secrets(|current| {
+        let mut changes = changes;
+        if let Some(value) = secret_slot(&mut changes, provider) {
+            *secret_slot(current, provider).expect("known provider slot") = value.clone();
+        }
+        let mut keys = vec![format!("{provider}_model"), format!("{provider}_api_base")];
+        if provider == "codex" { keys.push(codex::SECRET_KEY.into()); }
+        for key in keys {
+            if let Some(value) = changes.custom.get(&key) {
+                current.custom.insert(key, value.clone());
+            } else {
+                current.custom.remove(&key);
+            }
+        }
+        Ok(())
+    })?;
     Ok((persisted, rebuild_router(state, &secrets)))
 }
 
@@ -228,11 +238,14 @@ pub async fn login(state: &GatewayState, request: LoginRequest) -> anyhow::Resul
 
     if request.logout {
         match spec.kind {
-            AuthKind::CodexOAuth => { secrets.custom.remove(codex::SECRET_KEY); }
+            AuthKind::CodexOAuth => {
+                codex_device::cancel();
+                secrets.custom.remove(codex::SECRET_KEY);
+            }
             AuthKind::Environment => anyhow::bail!("{} is configured through the environment", spec.label),
             _ => { if let Some(slot) = secret_slot(&mut secrets, &name) { *slot = None; } }
         }
-        let (persisted, warning) = commit(state, secrets)?;
+        let (persisted, warning) = commit(state, &name, secrets)?;
         return Ok(LoginOutcome { provider: name.clone(), status: "logged_out".into(), persisted,
             message: format!("Logged out of {}.{}", spec.label, warning.map(|w| format!(" {w}")).unwrap_or_default()),
             setup: vec![], providers: statuses(state) });
@@ -263,11 +276,15 @@ pub async fn login(state: &GatewayState, request: LoginRequest) -> anyhow::Resul
             }
             let config = effective_config(&state.config, &secrets);
             let base = api_base(&config, &name);
-            let reachable = probe_endpoint(&name, &base, secrets.ollama_api_key.as_deref()).await;
+            let key = match name.as_str() {
+                "llamacpp" => secrets.llamacpp_api_key.as_deref(),
+                _ => secrets.ollama_api_key.as_deref(),
+            };
+            let reachable = probe_endpoint(&name, &base, key).await;
             anyhow::ensure!(reachable, "{} is not reachable at {base}. Start the server or pass its URL: /login {name} {base}", spec.label);
             "logged_in"
         }
-        AuthKind::CodexOAuth => match codex_login(&mut secrets, request.auth_json.as_deref()).await? {
+        AuthKind::CodexOAuth => match codex_login(state, &mut secrets, request.auth_json.as_deref(), request.device_auth).await? {
             CodexStep::Ready => "logged_in",
             CodexStep::Pending(instructions) => {
                 return Ok(LoginOutcome { provider: name.clone(), status: "pending".into(), persisted: false,
@@ -278,7 +295,7 @@ pub async fn login(state: &GatewayState, request: LoginRequest) -> anyhow::Resul
         AuthKind::Environment => anyhow::bail!("{} is configured with GPU_ROUTER_URL / GPU_ROUTER_TOKEN in .env", spec.label),
     };
 
-    let (persisted, warning) = commit(state, secrets.clone())?;
+    let (persisted, warning) = commit(state, &name, secrets.clone())?;
     let config = effective_config(&state.config, &secrets);
     let model = default_model(&config, &name);
     let detail = match spec.kind {
@@ -286,30 +303,53 @@ pub async fn login(state: &GatewayState, request: LoginRequest) -> anyhow::Resul
         _ => api_base(&config, &name),
     };
     let mut message = format!("Logged in to {} ({detail}), model {model}.", spec.label);
-    message.push_str(if persisted { " Saved to the encrypted secret store." } else { " Kept in memory until restart (gateway has no master key; add it to the dashboard Secrets or start with MASTER_KEY_FILE)." });
+    message.push_str(if persisted { " Saved to the encrypted secret store." } else { " Kept in memory until restart. To persist, save via dashboard Secrets with the master password, or explicitly opt in at gateway startup with PRAXIS_RETAIN_MASTER_KEY=1 and MASTER_KEY_FILE." });
     if let Some(w) = warning { message.push_str(&format!(" {w}")); }
     Ok(LoginOutcome { provider: name.clone(), status: status.into(), message, persisted,
         setup: setup_hints(state, &name, &model), providers: statuses(state) })
 }
 
 async fn probe_endpoint(provider: &str, base: &str, key: Option<&str>) -> bool {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build();
-    let Ok(client) = client else { return false };
-    let probe = match provider { "ollama" => format!("{base}/api/tags"), _ => format!("{base}/models") };
-    let mut request = client.get(&probe);
-    if let Some(key) = key.filter(|k| !k.is_empty()) { request = request.bearer_auth(key); }
-    match request.send().await {
-        Ok(r) => r.status().is_success() || r.status().as_u16() == 404, // some llama.cpp builds lack /models
-        Err(_) => false,
+    let client = super::llm::http::client();
+    let base = base.trim_end_matches('/');
+    let get = |url: String| {
+        let mut req = client.get(url).timeout(std::time::Duration::from_secs(5));
+        if let Some(key) = key.filter(|k| !k.is_empty()) { req = req.bearer_auth(key); }
+        req
+    };
+    let probe = if provider == "ollama" { format!("{base}/api/tags") } else { format!("{base}/models") };
+    let Ok(response) = get(probe).send().await else { return false };
+    if response.status().is_success() {
+        let Ok(data) = response.json::<serde_json::Value>().await else { return false };
+        return if provider == "ollama" { data["models"].is_array() } else { data["data"].is_array() };
     }
+    if provider != "llamacpp" || response.status().as_u16() != 404 { return false; }
+    // Older llama.cpp builds lack /v1/models. Verify their actual health API,
+    // rather than accepting a generic web server's 404 as a successful login.
+    let health = format!("{}/health", base.strip_suffix("/v1").unwrap_or(base));
+    let Ok(response) = get(health).send().await else { return false };
+    response.status().is_success() && response.json::<serde_json::Value>().await
+        .is_ok_and(|data| data["status"] == "ok")
 }
 
 enum CodexStep { Ready, Pending(String) }
 
-async fn codex_login(secrets: &mut crate::db::secrets::Secrets, auth_json: Option<&str>) -> anyhow::Result<CodexStep> {
+async fn codex_login(state: &GatewayState, secrets: &mut crate::db::secrets::Secrets, auth_json: Option<&str>, device_auth: bool) -> anyhow::Result<CodexStep> {
+    anyhow::ensure!(!device_auth || auth_json.is_none(), "Choose --device-auth OR --auth-json, not both");
     // 1. Pasted auth.json from another machine.
     if let Some(text) = auth_json.filter(|t| !t.trim().is_empty()) {
-        CodexAuth::from_cli_file(text)?.store(secrets);
+        CodexAuth::from_json(text)?.store(secrets);
+        codex_device::cancel();
+        return Ok(CodexStep::Ready);
+    }
+    if let Some(instructions) = codex_device::status()? {
+        return Ok(CodexStep::Pending(instructions));
+    }
+    if device_auth {
+        return Ok(CodexStep::Pending(codex_device::start(state.clone(), secrets.custom.get("codex_model").cloned()).await?));
+    }
+    // Do not replace rotated Praxis tokens with a stale CLI auth.json.
+    if CodexAuth::from_secrets(secrets).is_some() {
         return Ok(CodexStep::Ready);
     }
     // 2. The Codex CLI is already logged in on this machine.
@@ -317,102 +357,13 @@ async fn codex_login(secrets: &mut crate::db::secrets::Secrets, auth_json: Optio
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(auth) = CodexAuth::from_cli_file(&text) {
                 auth.store(secrets);
-                finish_pending();
+                codex_device::cancel();
                 return Ok(CodexStep::Ready);
             }
         }
     }
-    // 3. A device-auth flow is already running here: repeat its instructions.
-    if let Ok(guard) = CODEX_LOGIN.lock() {
-        if let Some(job) = guard.as_ref() {
-            if !job.finished.load(std::sync::atomic::Ordering::Relaxed) && job.started.elapsed() < std::time::Duration::from_secs(900) {
-                return Ok(CodexStep::Pending(job.instructions.clone()));
-            }
-        }
-    }
-    // 4. Start `codex login --device-auth` on this machine.
-    let instructions = start_codex_device_auth().await?;
+    let instructions = codex_device::start(state.clone(), secrets.custom.get("codex_model").cloned()).await?;
     Ok(CodexStep::Pending(instructions))
-}
-
-fn finish_pending() {
-    if let Ok(mut guard) = CODEX_LOGIN.lock() { *guard = None; }
-}
-
-async fn start_codex_device_auth() -> anyhow::Result<String> {
-    use tokio::io::AsyncBufReadExt;
-    let mut child = tokio::process::Command::new("codex")
-        .args(["login", "--device-auth"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(false)
-        .spawn()
-        .map_err(|e| anyhow::anyhow!(
-            "Codex CLI not available on the gateway machine ({e}). Install it (npm i -g @openai/codex), run `codex login` there, \
-             or paste your ~/.codex/auth.json: /login codex --auth-json '<content>'"))?;
-    let stdout = child.stdout.take().map(tokio::io::BufReader::new);
-    let stderr = child.stderr.take().map(tokio::io::BufReader::new);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    // Forward both streams line by line.
-    if let Some(mut out) = stdout {
-        let tx = tx.clone();
-        tokio::spawn(async move { let mut line = String::new(); while let Ok(n) = out.read_line(&mut line).await { if n == 0 { break; } let _ = tx.send(line.trim_end().to_string()); line.clear(); } });
-    }
-    if let Some(mut err) = stderr {
-        let tx = tx.clone();
-        tokio::spawn(async move { let mut line = String::new(); while let Ok(n) = err.read_line(&mut line).await { if n == 0 { break; } let _ = tx.send(line.trim_end().to_string()); line.clear(); } });
-    }
-    drop(tx);
-    // Collect the URL + one-time code the CLI prints (bounded wait).
-    let mut lines = Vec::new();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
-    loop {
-        match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Ok(Some(line)) => {
-                if !line.trim().is_empty() { lines.push(line); }
-                let text = lines.join("\n");
-                if text.contains("http") && lines.iter().any(|l| l.to_ascii_lowercase().contains("code")) { break; }
-                if lines.len() >= 12 { break; }
-            }
-            _ => break,
-        }
-    }
-    let host = hostname();
-    let instructions = if lines.is_empty() {
-        format!("Started `codex login --device-auth` on {host}, but it printed nothing yet. Run /login codex again in a few seconds.")
-    } else {
-        format!("Codex device login started on {host}. Follow the CLI instructions in a browser on ANY device:\n{}", lines.join("\n"))
-    };
-    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    if let Ok(mut guard) = CODEX_LOGIN.lock() {
-        *guard = Some(CodexLoginJob { instructions: instructions.clone(), started: std::time::Instant::now(), finished: finished.clone() });
-    }
-    // Background completion: when the CLI exits successfully, import auth.json,
-    // update the live store and rebuild the router.
-    tokio::spawn(async move {
-        let result = tokio::time::timeout(std::time::Duration::from_secs(900), child.wait()).await;
-        finished.store(true, std::sync::atomic::Ordering::Relaxed);
-        let ok = matches!(result, Ok(Ok(status)) if status.success());
-        if !ok { tracing::warn!("codex login --device-auth did not complete"); return; }
-        let Some(path) = CodexAuth::cli_auth_path() else { return };
-        let Ok(text) = std::fs::read_to_string(path) else { return };
-        let Ok(auth) = CodexAuth::from_cli_file(&text) else { return };
-        let mut secrets = crate::db::secrets::get_secrets();
-        auth.store(&mut secrets);
-        if let Some(state) = super::state_ref() {
-            match commit(state, secrets) {
-                Ok((persisted, _)) => tracing::info!(persisted, "Codex login completed"),
-                Err(error) => tracing::warn!(%error, "Codex login completed but could not be committed"),
-            }
-        }
-        finish_pending();
-    });
-    Ok(instructions)
-}
-
-fn hostname() -> String {
-    std::fs::read_to_string("/etc/hostname").ok().map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).unwrap_or_else(|| "the gateway machine".into())
 }
 
 /// Human-readable status block for `/login` without arguments.
@@ -427,6 +378,10 @@ pub fn render_status(statuses: &[ProviderStatus], config: &crate::config::Config
     out.push_str("Log in:  /login codex | /login <openai|anthropic|openrouter|minimax|mimo> <api_key> [model] [api_base]\n         /login <ollama|llamacpp> [api_base] [model]   ·   /logout <name>");
     out
 }
+
+#[cfg(test)]
+#[path = "provider_login_tests.rs"]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests {
@@ -444,7 +399,7 @@ mod tests {
         assert_eq!(cfg.openai_model, base.openai_model);
     }
 
-    fn state() -> GatewayState {
+    pub(super) fn state() -> GatewayState {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::Database::new(dir.path()).unwrap();
         std::mem::forget(dir);

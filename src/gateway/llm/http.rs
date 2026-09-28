@@ -36,8 +36,26 @@ pub fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
         .map(|date| date.duration_since(now).unwrap_or_default())
 }
 
-fn metadata(headers: &HeaderMap, error: &mut ProviderError) {
-    error.retry_after = retry_after(headers, SystemTime::now());
+pub(super) fn metadata(headers: &HeaderMap, error: &mut ProviderError) {
+    let now = SystemTime::now();
+    error.retry_after = retry_after(headers, now).or(error.retry_after);
+    if error.kind == ErrorKind::RateLimited {
+        // Codex subscription limits use primary/secondary windows. Respect the
+        // longest exhausted window, without delaying on a non-exhausted one.
+        for window in ["primary", "secondary"] {
+            let used = headers.get(format!("x-codex-{window}-used-percent"))
+                .and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<f64>().ok());
+            if !used.is_some_and(|n| n >= 100.0) { continue; }
+            let seconds = headers.get(format!("x-codex-{window}-reset-after-seconds"))
+                .and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| headers.get(format!("x-codex-{window}-reset-at"))
+                    .and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok())
+                    .map(|at| at.saturating_sub(now.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs())));
+            if let Some(seconds) = seconds {
+                error.retry_after = Some(error.retry_after.unwrap_or_default().max(Duration::from_secs(seconds)));
+            }
+        }
+    }
     error.request_id = ["x-request-id", "request-id", "cf-ray"]
         .iter()
         .find_map(|name| {
@@ -78,7 +96,7 @@ pub fn payload_error(status: u16, data: &Value) -> ProviderError {
         ErrorKind::QuotaExhausted
     } else if matches!(status, 401 | 403) {
         ErrorKind::Authentication
-    } else if status == 429 || matches!(code, "rate_limit_exceeded" | "rate_limit_error") {
+    } else if status == 429 || matches!(code, "rate_limit_exceeded" | "rate_limit_error" | "usage_limit_reached") {
         ErrorKind::RateLimited
     } else if status == 408 {
         ErrorKind::Timeout
@@ -89,8 +107,15 @@ pub fn payload_error(status: u16, data: &Value) -> ProviderError {
     } else {
         ErrorKind::InvalidResponse
     };
+    let retry_after = (kind == ErrorKind::RateLimited).then(|| {
+        data.pointer("/error/resets_at").and_then(Value::as_u64).map(|at| {
+            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+            Duration::from_secs(at.saturating_sub(now))
+        })
+    }).flatten();
     ProviderError {
         status: Some(status),
+        retry_after,
         ..ProviderError::new(kind)
     }
 }

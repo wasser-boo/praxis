@@ -11,6 +11,8 @@ Profiles organize memory, not file/shell permissions or a security sandbox.
   legacy preference importer. Old facts, variables, SRS and XP remain there.
 - Other personas default to their template name, e.g. `language_instructor`,
   `code_assistant`, `researcher`. `language_learning` is a tutor alias.
+  Path-shaped state templates also keep that name: `states/standard/standard`
+  is a separate profile, not an alias for legacy `standard` memory.
 - The tutor's daily-quiz aliases use the same `language_instructor` category.
 - Missing categories expose empty memory with `profile_exists=false`, **never
   another persona's facts**. The LLM should create and then load the category.
@@ -121,6 +123,8 @@ cargo test --locked --offline --lib tools::memory
 node scripts/test_memory_ui.js
 # With a locally installed Microsoft POML CLI:
 POML_CLI=/path/to/cli.js python3 scripts/test_prompt_discovery.py
+POML_CLI=/path/to/cli.js PRAXIS_REQUIRE_POML=1 cargo test --lib -j 1 \
+  tool_chain_discovery_loads_memory_only_for_current_task_on_both_paths -- --ignored
 ```
 
 Tests use temporary databases/synthetic data. They do not migrate a live database,

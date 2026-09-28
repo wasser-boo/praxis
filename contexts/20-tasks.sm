@@ -76,4 +76,4 @@ sm_data.state_goal = "Compare evidence, qualify conclusions and distinguish sour
 role_switch = [set_context, get_context]
 core_files = [read_file, write_file, edit_file]
 coding = [core_files, execute_terminal, search_tools]
-agent_basic = [agent_complete, agent_next, agent_feedback]
+agent_basic = [agent_complete, agent_next, agent_feedback, search_tools, search_skills, use_skill, read_tool_result]

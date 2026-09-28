@@ -63,9 +63,8 @@ pub async fn run(
             ctx.settings.active_templates.pop();
         }
         AgentControlSignal::Feedback(msg) => {
-            ctx.settings.feedback_enabled = true;
-            db.save_context(&ctx)
-                .map_err(|e| format!("Failed to save context: {}", e))?;
+            // Sending feedback must not silently enable external delivery.
+            // The gateway honors the user's feedback_enabled/rate-limit policy.
             tracing::info!(user_id = %user_id, msg = %msg, "Agent feedback");
             return Ok(format!("Feedback sent: {}", msg));
         }

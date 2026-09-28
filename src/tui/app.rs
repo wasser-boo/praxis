@@ -1242,7 +1242,7 @@ fn shell_words(input: &str) -> Vec<String> {
 /// Turn `/login …` / `/logout …` arguments into a gateway request.
 /// `Ok(None)` means "show status".
 fn parse_login_args(verb: &str, args: &[String]) -> Result<Option<serde_json::Value>, String> {
-    let usage = "Usage: /login | /login codex [--auth-json '<json>'] | /login <openai|anthropic|openrouter|minimax|mimo> <api_key> [model] [api_base] | /login <ollama|llamacpp> [api_base] [model] | /logout <provider>";
+    let usage = "Usage: /login | /login codex [--device-auth | --auth-json '<json>'] [model] | /login <openai|anthropic|openrouter|minimax|mimo> <api_key> [model] [api_base] | /login <ollama|llamacpp> [api_base] [model] | /logout <provider>";
     let Some(provider) = args.first() else {
         return if verb == "/logout" { Err(usage.into()) } else { Ok(None) };
     };
@@ -1254,12 +1254,23 @@ fn parse_login_args(verb: &str, args: &[String]) -> Result<Option<serde_json::Va
     let rest = &args[1..];
     match provider.as_str() {
         "codex" => {
-            if let Some(i) = rest.iter().position(|a| a == "--auth-json") {
-                let json = rest.get(i + 1).ok_or(usage)?;
-                request["auth_json"] = serde_json::json!(json);
+            let mut args = rest.iter();
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--auth-json" if request.get("auth_json").is_none() => {
+                        request["auth_json"] = serde_json::json!(args.next().ok_or(usage)?);
+                    }
+                    "--device-auth" if request.get("device_auth").is_none() => {
+                        request["device_auth"] = serde_json::json!(true);
+                    }
+                    _ if !arg.starts_with("--") && request.get("model").is_none() => {
+                        request["model"] = serde_json::json!(arg);
+                    }
+                    _ => return Err(usage.into()),
+                }
             }
-            if let Some(model) = rest.iter().find(|a| !a.starts_with("--") && !a.starts_with('{')) {
-                request["model"] = serde_json::json!(model);
+            if request.get("auth_json").is_some() && request.get("device_auth").is_some() {
+                return Err(usage.into());
             }
         }
         "ollama" | "llamacpp" => {
@@ -1300,6 +1311,14 @@ mod login_parse_tests {
         let r = parse_login_args("/login", &shell_words("codex --auth-json '{\"tokens\":{}}' gpt-5")).unwrap().unwrap();
         assert_eq!(r["auth_json"], "{\"tokens\":{}}");
         assert_eq!(r["model"], "gpt-5");
+        let r = parse_login_args("/login", &shell_words("codex --auth-json '  {\"tokens\":{}}'")).unwrap().unwrap();
+        assert!(r.get("model").is_none(), "auth JSON is consumed, never guessed to be a model");
+        let r = parse_login_args("/login", &shell_words("codex --device-auth gpt-5-codex")).unwrap().unwrap();
+        assert_eq!(r["device_auth"], true);
+        assert_eq!(r["model"], "gpt-5-codex");
+        for args in ["codex --unknown", "codex --auth-json", "codex --device-auth --auth-json '{}'", "codex model1 model2"] {
+            assert!(parse_login_args("/login", &shell_words(args)).is_err());
+        }
         let r = parse_login_args("/logout", &shell_words("Codex")).unwrap().unwrap();
         assert_eq!(r["logout"], true);
         assert_eq!(r["provider"], "codex");

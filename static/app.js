@@ -2369,7 +2369,7 @@ async function loadSecrets() {
         const res = await apiGet('/api/secrets');
         const data = await res.json();
         const container = document.getElementById('secrets-content');
-        const knownKeys = ['discord_bot_token', 'openai_api_key', 'anthropic_api_key', 'llamacpp_api_key', 'minimax_api_key',
+        const knownKeys = ['codex_auth', 'discord_bot_token', 'openai_api_key', 'anthropic_api_key', 'ollama_api_key', 'llamacpp_api_key', 'minimax_api_key',
             'mimo_api_key', 'elevenlabs_api_key', 'gateway_api_key', 'dashboard_admin_password'];
         const customKeys = Object.keys(data).filter(k => !knownKeys.includes(k));
 
@@ -2386,6 +2386,7 @@ async function loadSecrets() {
         container.innerHTML = `
             <div class="data-list">${builtInHtml}</div>${customHtml}
             <div style="margin-top:1.5rem"><h3>Update Secret</h3>
+            <p>Codex: select <code>codex_auth</code> and paste the complete <code>~/.codex/auth.json</code>. Tokens are validated, masked and activated without a restart. To remove the login, use <code>/logout codex</code>.</p>
             <div class="form-group"><label>Field</label><select id="secret-field" style="width:100%;padding:0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary)">
                 ${knownKeys.map(k => `<option value="${k}">${escapeHtml(k)}</option>`).join('')}
                 ${customKeys.map(k => `<option value="${k}">${escapeHtml(k)} (custom)</option>`).join('')}
@@ -2412,7 +2413,7 @@ async function saveSecret() {
     try {
         const res = await apiFetch('/api/secrets', { method: 'PUT', body: JSON.stringify(body) });
         msgEl.textContent = await res.text();
-        msgEl.style.color = msgEl.textContent.startsWith('Falsches') ? 'var(--error)' : 'var(--success)'; msgEl.classList.remove('hidden');
+        msgEl.style.color = !res.ok || msgEl.textContent.startsWith('Falsches') ? 'var(--error)' : 'var(--success)'; msgEl.classList.remove('hidden');
         document.getElementById('secret-value').value = '';
         document.getElementById('secret-master').value = '';
         setTimeout(loadSecrets, 1500);
@@ -2430,7 +2431,7 @@ async function addCustomSecret() {
     try {
         const res = await apiFetch('/api/secrets', { method: 'PUT', body: JSON.stringify(body) });
         msgEl.textContent = await res.text();
-        msgEl.style.color = msgEl.textContent.startsWith('Falsches') ? 'var(--error)' : 'var(--success)'; msgEl.classList.remove('hidden');
+        msgEl.style.color = !res.ok || msgEl.textContent.startsWith('Falsches') ? 'var(--error)' : 'var(--success)'; msgEl.classList.remove('hidden');
         document.getElementById('custom-secret-key').value = '';
         document.getElementById('custom-secret-value').value = '';
         document.getElementById('custom-secret-master').value = '';

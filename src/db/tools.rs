@@ -177,7 +177,8 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn get_default_tools() -> Vec<Tool> {
+/// Canonical built-in contracts shared by discovery and state-based routing.
+pub(crate) fn get_default_tools() -> Vec<Tool> {
     vec![
         crate::tools::tool_output::definition(),
         Tool {

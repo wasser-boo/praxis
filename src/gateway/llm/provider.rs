@@ -175,6 +175,10 @@ pub trait LLMProvider: Send + Sync {
     ) -> anyhow::Result<ChatResponse> {
         self.chat_stream(request, &|text| on_delta(StreamDelta::Text { text })).await
     }
+    /// Whether increasing ChatRequest.max_tokens changes the wire request.
+    /// Subscription endpoints with a fixed output budget must not be replayed
+    /// unchanged by the router's output-limit recovery.
+    fn supports_output_limit(&self) -> bool { true }
     fn name(&self) -> &str;
     fn as_any(&self) -> &dyn std::any::Any;
     async fn health_check(&self) -> bool {

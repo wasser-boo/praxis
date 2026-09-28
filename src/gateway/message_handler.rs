@@ -411,12 +411,6 @@ async fn handle_message_agent_loop(
     ctx: &crate::db::contexts::Context,
     max_turns: i32,
 ) -> anyhow::Result<String> {
-    let feedback_modes = &ctx.settings.feedback_mode;
-    let feedback_channel = ctx
-        .settings
-        .feedback_channel_id
-        .clone()
-        .or_else(|| channel_id.map(|s| s.to_string()));
     let user_id_owned = user_id.to_string();
     let secrets = state.secrets.clone();
 
@@ -484,7 +478,7 @@ async fn handle_message_agent_loop(
         max_tool_calls: ctx.settings.max_tool_calls.unwrap_or(5),
         tags_enabled: ctx.settings.tags_enabled,
         sm_file: ctx.settings.sm_file.clone().or(ctx.sm_file.clone()),
-        feedback_enabled: !feedback_modes.is_empty(),
+        feedback_enabled: ctx.settings.feedback_enabled,
         message_on_toolcalling: ctx.settings.message_on_toolcalling,
         tool_history_limit: ctx.settings.tool_history_limit,
     };
@@ -493,9 +487,9 @@ async fn handle_message_agent_loop(
 
     // Spawn feedback routing task (always for web stream)
     let is_web = channel_id.map_or(true, |ch| ch == "web" || ch.is_empty());
-    let feedback_modes = feedback_modes.clone();
     let uid = user_id_owned.clone();
-    let ch = feedback_channel.clone();
+    let session_id = ctx.session_id.clone();
+    let feedback_key = format!("{uid}:::{session_id}");
     let tts_secrets = secrets;
     let tts_db = state.db.clone();
     let tts_channel_id = channel_id.map(str::to_owned);
@@ -507,11 +501,14 @@ async fn handle_message_agent_loop(
             }
             // A context command/tool can disable speech during the agent loop.
             let Ok(current_ctx) = tts_db.load_context(&uid) else { continue };
+            if current_ctx.session_id != session_id { continue; }
             let tts_settings = &current_ctx.settings;
+            if !super::feedback::LIMITER.allow(&feedback_key, tts_settings, std::time::Instant::now()) { continue; }
+            let ch = tts_settings.feedback_channel_id.as_ref().or(tts_channel_id.as_ref());
             let tts_for_feedback = tts_settings.use_tts
                 || tts_channel_id.as_deref().is_some_and(|ch| ch.starts_with("voice:"));
             let mut handled = false;
-            for mode in &feedback_modes {
+            for mode in &tts_settings.feedback_mode {
                 match mode.as_str() {
                     "tts" => {
                         // Explicit feedback TTS may override Discord use_tts,

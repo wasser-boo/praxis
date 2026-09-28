@@ -197,7 +197,7 @@ async fn tool_output_model_controls_all_three_loops_and_default_is_full_without_
                 Step::ReadLastOutput,
                 Step::Reply(reply(Some("Read requested output without rerunning."), vec![])),
             ]);
-            state.db.merge_context(&user, serde_json::json!({"settings.tool_result_limit":1,"settings.history_with_toolcalls":false})).unwrap();
+            state.db.merge_context(&user, serde_json::json!({"sm_data.role":"code","settings.tool_result_limit":1,"settings.history_with_toolcalls":false})).unwrap();
             if flow == "agent" {
                 let config = crate::gateway::agent_loop::AgentLoopConfig { max_turns:4, ..Default::default() };
                 crate::gateway::agent_loop::run_agent_loop(&state, &user, "offline output test", config, None).await.unwrap();
@@ -339,6 +339,9 @@ async fn tool_chain_retry_never_reexecutes_previous_rounds() {
             Step::Reply(reply(Some("Done."), vec![])),
         ],
     );
+    // Shell execution is deliberately a coding-state capability, not a
+    // permission granted implicitly by the synthetic provider's tool call.
+    state.db.merge_context(&user, serde_json::json!({"sm_data.role":"code"})).unwrap();
     assert_eq!(
         handle_message(&state, &user, "offline test", Some("web"))
             .await
@@ -676,28 +679,81 @@ async fn audio_web_tts_off_blocks_discord_flag_and_explicit_feedback_on_both_pat
 #[tokio::test]
 #[ignore = "Requires Node and POML_CLI; synthetic provider and temporary memory only"]
 async fn tool_chain_discovery_loads_memory_only_for_current_task_on_both_paths() {
-    for max_turns in [1, 8] {
+    use crate::db::memory_profiles;
+
+    for max_turns in [1, 10] {
         let dir = tempfile::tempdir().unwrap();
+        let profile = "discovery-progress";
         let (state, user, requests) = fixture(dir.path(), vec![
             Step::Reply(reply(None, vec![call("not-discovered", "memory_set", serde_json::json!({"key":"xp","value":999}))])),
             Step::Reply(reply(None, vec![call("discover", "search_tools", serde_json::json!({"query":"memory"}))])),
-            Step::Reply(reply(None, vec![call("save", "memory_set", serde_json::json!({"key":"xp","value":42,"expected_value":null}))])),
+            Step::Reply(reply(None, vec![call("missing", "memory_get", serde_json::json!({"key":"xp"}))])),
+            Step::Reply(reply(None, vec![call("create", "memory_profile_create", serde_json::json!({"name":profile}))])),
+            Step::Reply(reply(None, vec![call("load", "memory_profile_load", serde_json::json!({"name":profile}))])),
+            Step::Reply(reply(None, vec![call("before", "memory_get", serde_json::json!({"key":"xp"}))])),
+            Step::Reply(reply(None, vec![call("save", "memory_set", serde_json::json!({"key":"xp","value":42,"expected_value":null,"expected_profile":profile}))])),
             Step::Reply(reply(None, vec![call("read", "memory_get", serde_json::json!({"key":"xp"}))])),
             Step::Reply(reply(Some("Progress saved."), vec![])),
             Step::Reply(reply(Some("Fresh task."), vec![])),
         ]);
-        state.db.merge_context(&user, serde_json::json!({"settings.max_llm_turns":max_turns})).unwrap();
+        // Include the complete profile lifecycle in both paths' fixed budgets.
+        state.db.merge_context(&user, serde_json::json!({"settings.max_llm_turns":max_turns,"settings.max_tool_calls":8})).unwrap();
         assert_eq!(handle_message(&state, &user, "save synthetic learning progress", Some("web")).await.unwrap(), "Progress saved.");
-        assert_eq!(crate::db::memory::load_memory(&state.db, &user).unwrap().custom_variables["xp"], 42);
+        assert_paired_history(&state, &user, 8);
+        let receipts = state.db.get_messages(&user, 100).unwrap();
+        let receipt = |id: &str| -> serde_json::Value {
+            let message = receipts.iter().find(|m| m.tool_call_id.as_deref() == Some(id)).unwrap();
+            serde_json::from_str(&message.content)
+                .unwrap_or_else(|error| panic!("{id} receipt failed: {error}: {}", message.content))
+        };
+        let discovered = receipt("discover");
+        for name in ["memory_get", "memory_set", "memory_profile_create", "memory_profile_load", "memory_profile_list"] {
+            assert!(discovered["tools"].as_array().unwrap().iter().any(|t| t["name"] == name));
+        }
+        let missing = receipt("missing");
+        assert_eq!(missing["profile"], "states/standard/standard");
+        assert_eq!(missing["profile_exists"], false);
+        assert_eq!(missing["exists"], false, "the rejected write must not persist");
+        assert_eq!(receipt("create")["created"], true);
+        assert_eq!(receipt("load")["loaded"], true);
+        let before = receipt("before");
+        assert_eq!(before["profile"], profile);
+        assert_eq!(before["profile_exists"], true);
+        assert_eq!(before["exists"], false);
+        assert_eq!(before["value"], serde_json::Value::Null);
+        let saved = receipt("save");
+        assert_eq!(saved["saved"], true, "{saved}");
+        assert_eq!(saved["profile"], before["profile"]);
+        let after = receipt("read");
+        assert_eq!(after["profile"], profile);
+        assert_eq!(after["exists"], true);
+        assert_eq!(after["value"], 42);
+
+        // Reopen the database: a scripted final answer alone proves nothing.
+        // Routed persona memory must never fall back to the legacy standard bucket.
+        let reopened = crate::db::Database::new(dir.path()).unwrap();
+        let view = memory_profiles::snapshot(&reopened, &reopened.load_context(&user).unwrap()).unwrap();
+        assert_eq!(view.profile, profile);
+        assert!(view.loaded && view.exists);
+        assert_eq!(view.memory.custom_variables["xp"], 42);
+        assert!(crate::db::memory::load_memory(&reopened, &user).unwrap().custom_variables.is_empty());
+        assert!(memory_profiles::read_named(&reopened, "other-user", profile).unwrap().is_none());
+        assert!(crate::gateway::task_control::selected_tools(&user).is_empty());
         assert_eq!(handle_message(&state, &user, "a new task", Some("web")).await.unwrap(), "Fresh task.");
         let requests = requests.lock().unwrap();
-        for index in [0, 1, 5] {
+        assert_eq!(requests.len(), 10);
+        for index in [0, 1, 9] {
             let tools = requests[index].tools.as_ref().unwrap();
             assert!(tools.len() <= 13); // existing core plus read_tool_result
-            assert!(!tools.iter().any(|t| t.function.name == "memory_set"));
+            assert!(!tools.iter().any(|t| t.function.name.starts_with("memory_")));
         }
-        assert!(requests[2].tools.as_ref().unwrap().iter().any(|t| t.function.name == "memory_set"));
-        assert!(requests[1].messages.iter().any(|m| m.tool_call_id.as_deref() == Some("not-discovered") && m.content.as_deref().unwrap_or("").starts_with("Error:")));
+        let catalog = crate::tools::discovery::catalog(&state.db, &state.plugins).unwrap();
+        for expected in catalog.iter().filter(|t| t.function.name.starts_with("memory_")) {
+            let offered = requests[2].tools.as_ref().unwrap().iter()
+                .find(|t| t.function.name == expected.function.name).unwrap();
+            assert_eq!(offered.function.parameters, expected.function.parameters);
+        }
+        assert!(requests[1].messages.iter().any(|m| m.tool_call_id.as_deref() == Some("not-discovered") && m.content.as_deref().unwrap_or("").starts_with("Error: Unknown tool")));
     }
 }
 

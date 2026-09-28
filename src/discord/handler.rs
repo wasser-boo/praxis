@@ -207,6 +207,12 @@ impl EventHandler for DiscordHandler {
             }
         };
 
+        // Reject disallowed channels before downloading or injecting anything.
+        if !self.check_channel_allowed(&msg).await {
+            tracing::warn!("Message from guild/channel not in allowed list, ignoring");
+            return;
+        }
+
         // Mirror the Discord message into the dashboard chat so the user sees
         // Discord traffic next to dashboard-originated messages. Persisted in
         // the messages table so it survives reloads (SSE alone is transient).
@@ -246,9 +252,13 @@ impl EventHandler for DiscordHandler {
             }
         }
 
-        // Handle file attachments - download to appropriate folder
+        // Attachment writes are opt-in; failure to load policy is fail-closed.
         let mut attachment_context = String::new();
-        if !msg.attachments.is_empty() {
+        let download = self.db.load_context(&pairing.user_id).is_ok_and(|ctx| ctx.settings.download);
+        if !msg.attachments.is_empty() && !download {
+            attachment_context.push_str("\n[Attachments not downloaded: enable settings.download to allow saving Discord attachments.]");
+        }
+        if !msg.attachments.is_empty() && download {
             let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
             let vm_enabled = std::env::var("VM_ENABLED").map(|v| v == "true").unwrap_or(false);
 
@@ -324,11 +334,6 @@ impl EventHandler for DiscordHandler {
             } else {
                 let _ = msg.react(&ctx.http, '✅').await;
             }
-            return;
-        }
-
-        if !self.check_channel_allowed(&msg).await {
-            tracing::warn!("Message from guild/channel not in allowed list, ignoring");
             return;
         }
 

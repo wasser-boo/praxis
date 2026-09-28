@@ -4,7 +4,7 @@ Self-hosted AI agent platform with Discord bot, dashboard, tool-calling, and QEM
 
 ## Features
 
-- **Multi-Provider LLM**: OpenAI, Anthropic, Ollama, MiniMax, MiMo
+- **Multi-Provider LLM**: OpenAI, Codex (ChatGPT subscription), Anthropic, Ollama, llama.cpp, OpenRouter, MiniMax, MiMo
 - **Discord Bot**: Chat via Discord with voice, channels, threads
 - **Web Dashboard**: Monitor users, messages, secrets, VM, cron jobs
 - **Tool Calling**: Shell, file ops, context, agent control, Discord
@@ -56,13 +56,31 @@ Start the chat TUI (`praxis chat`, or `praxis chat --gateway-url https://host:35
 ```
 /login                                   # status of every provider + how to log in
 /login codex                             # ChatGPT subscription via the Codex CLI (device auth on the gateway host)
-/login codex --auth-json '<~/.codex/auth.json>'   # or import tokens from another machine
+/login codex --auth-json '<contents of auth.json>'  # JSON content, not a file path
 /login openai sk-… [model] [api_base]    # same for anthropic, openrouter, minimax, mimo
 /login ollama http://gpu-box:11434 qwen3:8b       # local servers: endpoint + model (also llamacpp)
 /logout openai
 ```
 
-After a successful login the TUI prints the exact `/context set settings.provider=… settings.model=…` lines for the current session; `USE_PROVIDER` in `.env` sets the default. Credentials are stored in the encrypted secret store when the gateway holds the master key (`MASTER_KEY_FILE`/`MASTER_KEY`/prompt at start; disable retention with `PRAXIS_RETAIN_MASTER_KEY=0`), otherwise they live until restart. `CODEX_MODEL` sets the Codex default model (`gpt-5-codex`).
+After login, select **both** provider and model so an old local-model selection does not leak into Codex:
+
+```text
+/login codex
+/context set settings.provider=codex settings.model=gpt-5-codex
+/thinking medium
+```
+
+The CLI runs on the **gateway host**. Repeat `/login codex` to see delayed device codes; completion imports the login automatically. `/logout codex` cancels a pending login. An existing Praxis login is reused rather than overwritten with stale CLI tokens. To renew an expired/revoked login or change accounts, run `/login codex --device-auth` (bypasses old credentials), or import fresh tokens with `--auth-json`. `CODEX_HOME` is respected. `CODEX_MODEL` sets the default (`gpt-5-codex`); `USE_PROVIDER=codex` sets the gateway default **after** credentials have been saved. Codex maps thinking `off` to its minimum `low`; the original models also cap `xhigh` at `high`.
+
+Logins live in memory unless the gateway explicitly opts into master-key retention with **`PRAXIS_RETAIN_MASTER_KEY=1`** and a key supplied via `MASTER_KEY_FILE`/`MASTER_KEY`/startup prompt. Retention is **off by default**; enabling it keeps a zeroizing password allocation for the process lifetime so refresh tokens can persist. Alternatively, dashboard **Secrets → codex_auth** accepts the complete CLI `auth.json` (with master password to save it). GET only returns a mask; invalid JSON is rejected, an unchanged mask is ignored, and an empty API value removes the login. Provider changes take effect without restart. Do not paste credentials into ordinary chat.
+
+Offline Codex contract tests run with `cargo test --lib codex`. Verification results and real-POML test commands are in [bugs.md](bugs.md#verification). **No live subscription request or real browser/device login was performed in this audit.** An explicit live smoke test is available (uses your subscription, never run automatically):
+
+```bash
+PRAXIS_CODEX_AUTH_FILE=/path/to/auth.json cargo test --lib codex_live_smoke -- --ignored
+```
+
+The smoke test uses only the supplied access token, with refresh disabled; it neither rotates nor saves credentials. Supply a fresh login if the token has expired.
 
 Praxis resolves `templates/`, `contexts/`, `plugins/`, `skills/` from its installation root: `ROOT_DIR` if set, else the working directory when it contains `templates/`, else the executable's directory.
 
@@ -70,7 +88,7 @@ Praxis resolves `templates/`, `contexts/`, `plugins/`, `skills/` from its instal
 
 ```env
 # LLM Provider
-USE_PROVIDER=openai          # openai | anthropic | ollama | llamacpp | minimax | mimo | openrouter
+USE_PROVIDER=openai          # openai | codex | anthropic | ollama | llamacpp | minimax | mimo | openrouter
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o
 # OPENAI_API_BASE=https://api.openai.com/v1

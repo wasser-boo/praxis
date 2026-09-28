@@ -20,6 +20,7 @@ mod state_machine_tests;
 mod template_render_tests;
 pub mod llm;
 pub mod message_handler;
+mod feedback;
 pub mod poml;
 pub mod prompt;
 pub mod prompt_change;

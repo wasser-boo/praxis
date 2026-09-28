@@ -1,9 +1,11 @@
 # Bug audit — tools, tool groups, state machine, templates
 
 Result of the review that accompanied the `activated_tools` / `[tool_groups]` /
-SM-routing work. Status: **fixed** = changed in this pass (covered by tests
+SM-routing work. Status: **fixed** = implemented (covered by tests
 unless noted); **open** = confirmed but not changed; **watch** = design
-caveat, not a defect on its own.
+caveat, not a defect on its own. Entries include the earlier routing fixes and
+this Codex/audit follow-up. See [Verification](#verification) for the final
+checks; offline coverage does not establish live Codex subscription compatibility.
 
 ## Fixed
 
@@ -40,8 +42,8 @@ caveat, not a defect on its own.
 8. **Every `templates/states/*/…poml` failed to render.** POML resolves nested
    includes relative to the *including file*; `shared/state_base.poml` used
    `../../shared/…`, which pointed outside `templates/`. Only visible with a
-   real POML CLI, so no test caught it. (Verified with poml 0.0.8 and the
-   `../poml` source; no automated test — needs `POML_CLI`.)
+   real POML CLI, so earlier tests missed it. Now covered by the real-render
+   regression in #23, verified with POML 0.0.8.
 9. **`states/teach/teach.poml` had a raw `&&` in text content** — XML parse
    error, template never rendered. Moved into a `<let>`.
 10. **Per-state blueprints ignored.** State templates set `blueprint`, but
@@ -68,8 +70,9 @@ caveat, not a defect on its own.
 16. **System prompt too large for small contexts.** `states/standard/standard`
     rendered ≈970 tokens, the root `standard.poml` ≈2300 (full blueprint JSON,
     duplicated user prompt, duplicated tool list, 7 KB memory boilerplate).
-    Now ≈460 tokens (root fallback ≈460–620 depending on persona). Other state
-    templates: 620–760; `teach` ≈1700, `20-tasks` ≈2000 (not reduced).
+    Standard/root prompts now have a 2800-character regression cap. The larger
+    teach/task prompts were also reduced in #24. These are synthetic-context
+    character budgets, not model-token or complete-request guarantees.
 
 17. **`tool_discovery_mode = "None"` now sends only activated tools**
     (`filter_tools_for_request`); previously every allowed built-in was sent
@@ -112,45 +115,146 @@ caveat, not a defect on its own.
   `codex login --device-auth` spawned on the gateway host, or pasted with
   `--auth-json`) against the Codex Responses API, with streaming, tool calls
   and automatic token refresh. Tokens are stored under `custom.codex_auth`.
-- The gateway now retains the master key in process memory
-  (`secrets::retain_master_password`) so logins and refreshed tokens persist;
-  `PRAXIS_RETAIN_MASTER_KEY=0` opts out.
+- Master-key retention is now **opt-in** (`PRAXIS_RETAIN_MASTER_KEY=1`);
+  retained passwords use zeroizing storage. Without it, logins are in-memory
+  only; the dashboard can persist credentials with an explicit master password.
 
-## Open
+## Audit follow-up fixes
 
-22. **`sm_data.persona_roles` lives in `_default`**, applied only when
-    missing — a context that already has a different value keeps it.
-24. **`teach`, `20-tasks`, `tasks/transcript_check`, `daily_quiz` templates are
-    still 1.6–2.3 k tokens** — too large for a 4096 context with tools and
-    history.
-25. **`tool_result_limit`, `download`, `feedback_*` settings are stored but
-    unused** (noted in `docs/CONTEXT_VARIABLES.md`); consider removing.
-27. **Codex provider is untested against the live service.** Request/response
-    shapes follow the Codex CLI (Responses API, `chatgpt-account-id`,
-    `OpenAI-Beta: responses=experimental`); wiremock covers refresh + SSE
-    parsing only. Rate-limit headers and `response.incomplete` are not
-    handled specially.
-28. **`codex login --device-auth` output parsing is heuristic** (URL + a line
-    containing "code", bounded to 20 s / 12 lines). If the CLI changes its
-    wording the TUI still shows the raw lines, and the background import still
-    completes when the CLI exits 0.
-29. **Endpoint probe for `llamacpp` accepts 404 on `/models`** (older servers
-    lack it) — a wrong URL that answers 404 passes the check.
-30. **Master-key retention widens exposure** from "startup only" to "process
-    lifetime". Acceptable for the threat model documented in `main.rs` (agent
-    shell cannot read process memory), but it is a policy change; see
-    `PRAXIS_RETAIN_MASTER_KEY`.
-31. **Dashboard `/secrets` API cannot set `codex_auth` meaningfully** (custom
-    values are masked/free-form); use `/login codex` instead.
+22. **Fixed: stale role catalogs.** `contexts/standard.sm` applies its catalog
+    through a workflow override on every routing pass, not a missing-only
+    `_default`. Regression test starts with a stale saved catalog.
+24. **Fixed: oversized task prompts.** Shared compact tutor instructions now
+    serve `teach`, `language_learning` and both quiz entry points, including
+    actual due-card selection (the old teach state always claimed no due items).
+    `20-tasks` and transcript checking no longer include the large duplicated
+    runtime. Real POML 0.0.8 renders: teach 3867 chars, 20-tasks 1978,
+    daily quiz 2770, transcript check 1101 (synthetic default context).
+    Render tests enforce per-template budgets and exercise fixed/entry/continuous
+    routing. Character estimates are not exact model token counts.
+25. **Fixed: inactive settings.** Discord attachment downloads now require
+    `download=true`, after channel authorization; load failures deny downloads.
+    `feedback_enabled` gates external agent feedback, with a shared per-session
+    sliding window using the validated `feedback_max_per_5min` and
+    `feedback_window_secs`. Feedback tools cannot silently enable delivery;
+    web progress/final replies remain available. `tool_result_limit` is now
+    load-only legacy compatibility, not serialized; `_output`/`read_tool_result`
+    remain its replacement. Unused `feedback_template` was removed; old values
+    still deserialize harmlessly. See `docs/CONTEXT_VARIABLES.md`.
+27. **Fixed offline; live verification outstanding.** Codex uses the bounded
+    byte-oriented SSE decoder (CRLF and fragmented UTF-8), requires terminal
+    success, validates complete tool calls, handles refusals and tool deltas,
+    and reports typed failures without echoing server messages. Incomplete
+    responses never execute tools; fixed subscription output limits are not
+    retried with an ignored `max_tokens`. Exhausted primary/secondary rate
+    windows and Retry-After/reset metadata reach the router. Parallel 401s share
+    token refresh, and retired-router refresh callbacks cannot undo logout.
+    Tests cover the request shape, images/tool history/reasoning, refresh,
+    rate limits, malformed/truncated/failed streams and router recovery.
+    **No live subscription call has been claimed.** Explicit read-only smoke
+    test: `PRAXIS_CODEX_AUTH_FILE=/path/to/auth.json cargo test --lib
+    codex_live_smoke -- --ignored` (fresh access token, no rotation/persistence).
+28. **Fixed: heuristic CLI parsing.** The device-login job continuously drains
+    both pipes into bounded storage. Polls display late output without guessing
+    English wording, line count or code position. Failures reach the user;
+    timeout/logout kill and reap the child. Cancellation prevents a late import
+    from resurrecting credentials. Synthetic CLI tests cover delayed codes,
+    noisy output, failure, timeout and cancellation. Stored refreshed tokens
+    take precedence over stale CLI tokens; pending model choices are retained.
+    `/login codex --device-auth` explicitly renews a rejected login. CLI argument
+    parsing consumes JSON as a flag value (including leading whitespace), never
+    mistakes it for a model, and rejects conflicting/unknown options.
+29. **Fixed: false-positive endpoint probes.** Successful probes require the
+    expected JSON model-list shape. Only llama.cpp may fall back from a 404 on
+    `/v1/models` to a verified root `/health` response. Its own API key is used,
+    not Ollama's. Generic 404/HTML/invalid JSON/auth failures are rejected.
+30. **Fixed: implicit master-key lifetime expansion.** Retention defaults off;
+    only `PRAXIS_RETAIN_MASTER_KEY=1` or `true` opts in. Retained/replaced key
+    allocations are zeroized, persistence does not clone the password, and
+    startup clears its original password after optional retention. Tests cover
+    the secure default and opt-in parsing. Retention still intentionally grants
+    the gateway lifetime access to the encrypted store; see README.
+31. **Fixed: dashboard Codex import.** `codex_auth` is an explicit write-only
+    field accepting validated CLI or normalized JSON. GET returns only `***`,
+    masked round-trips preserve the login, empty values remove it, and malformed
+    credentials cannot overwrite it. The dashboard lists the field with import
+    instructions; its existing master-password save and hot reload apply.
 
-## Watch
+### Additional regressions exposed by the real-POML tool-loop tests
 
-- `activated_tools` with unknown names is silent (kept as tool names that match
-  nothing). Intentional so plugin names work before the plugin is installed;
-  a warning at routing time would help authors.
-- Legacy `tool_groups`/`full_tool_schemas` are still merged; remove after
-  users' contexts have migrated.
-- Root `templates/standard.poml` and `states/standard/standard.poml` now
-  overlap; the root file is only the fallback for stale/unknown templates.
-- Render test budget (2800 chars for the standard prompt) is a tripwire, not a
-  guarantee of fitting 4096 tokens with large tool schemas.
+- **Fixed: discovery unavailable in narrow states.** Both shipped workflows
+  now keep `search_tools`, `search_skills`, `use_skill` and `read_tool_result` in
+  their common agent group. Previously even `teach` could not discover its
+  required memory tools. Tools still require activation/discovery; shell tests
+  explicitly select the coding state rather than bypassing the allow-list.
+- **Fixed: routed/discovered schemas diverged.** State routing now uses the
+  canonical enabled built-in contracts, including tools without category
+  metadata. Memory no longer requires a nonexistent `profile` argument, images
+  use `path` rather than `image_path`, and `_output` receives a complete schema
+  instead of a dangling reference. Disabled built-ins cannot be re-enabled or
+  shadowed by plugins. Contract-parity and real tool-loop regressions cover this.
+- **Corrected and strengthened: memory-discovery integration fixture.** The
+  actual save receipt rejected the old fixture's missing `expected_profile`;
+  routing had selected the missing `states/standard/standard` profile, not
+  legacy `standard` memory. The test now discovers schemas, creates/loads a
+  named profile, reads before writing with both expected fields, and checks
+  successful tool receipts and persistence through a reopened DB on both chat
+  and agent paths. It also checks user/legacy-profile isolation and that tool
+  discovery expires at task end. Runtime profile safeguards were not relaxed.
+- **Fixed: discovery without a state allow-list left empty schemas.** Selected
+  tools now receive full contracts without hiding other allowed tools. `None`
+  mode offers only activated/discovered tools. Empty/cyclic group resolutions
+  stay closed in all modes, with and without a database. An empty native DB
+  catalog no longer falls back to static tool contracts; disabled native tools
+  still cannot be shadowed by plugins. Registry regression tests cover these
+  boundaries.
+- **Fixed: compacted history disappeared.** Runtime system prompts now append
+  the stored conversation summary even with minimal/custom templates, avoiding
+  duplicate injection when an author already rendered it. The existing offline
+  integration test covers successful and failed compaction.
+
+## Compatibility decisions (not unresolved defects)
+
+- Unknown/unavailable `activated_tools` now emit a bounded diagnostic; late
+  plugin names remain accepted. A regression test distinguishes installed tools
+  from unknown groups/plugins.
+- Legacy `tool_groups`/`full_tool_schemas` stay merged so saved contexts do not
+  lose tools before migration.
+- Root `templates/standard.poml` remains a role-aware compatibility fallback;
+  state-specific `states/standard/standard.poml` remains the explicit SM target.
+- Prompt caps are regression tripwires, not a guarantee that arbitrary user
+  memory, tool schemas and history fit a 4096-token model context.
+
+## Verification
+
+Verified offline against the final source with default Cargo features and real
+Microsoft POML **0.0.8** (installed in a temporary virtualenv, not the repository):
+
+- `cargo test -j 1`: **661 library tests passed, 29 ignored; 13 binary tests
+  passed**. All 25 shipped root templates rendered; routing, prompt budgets
+  and due-card filtering were checked with the real CLI, not skipped.
+- Explicitly enabled `gateway::message_handler::message_tool_loop_tests`:
+  **16 passed, 0 failed**, including memory discovery on both handler paths.
+  Providers, CLI fixtures, files and databases are synthetic/local; no live
+  or paid-service tests were enabled indiscriminately.
+- `cargo build -j 1`: **passed** (normal default-feature development build).
+  Existing unrelated compiler warnings remain.
+- `node --check static/app.js`, `node scripts/test_ui_static.js`,
+  `node tests/test_chat_commands.js`, and `node scripts/test_memory_ui.js`:
+  **passed**.
+- `git diff --check`: **passed**; tracked changes and new source files reviewed.
+
+Reproduce the Rust verification with Node and a locally installed POML CLI:
+
+```bash
+export POML_CLI=/path/to/poml/js/cli.js
+export PRAXIS_REQUIRE_POML=1
+cargo test -j 1
+cargo test --lib -j 1 gateway::message_handler::message_tool_loop_tests -- --ignored
+cargo build -j 1
+```
+
+**Live Codex verification remains outstanding.** No real credentials were read,
+no real tokens were rotated, no live subscription request/device login was made,
+and no deployment was started. The opt-in smoke command in #27 is separate from
+these passing offline checks. The working-tree changes remain uncommitted.

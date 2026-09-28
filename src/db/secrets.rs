@@ -4,9 +4,9 @@ use std::sync::RwLock;
 static SECRETS: RwLock<Option<Secrets>> = RwLock::new(None);
 /// Master key retained by the running gateway so `/login` and token refreshes
 /// can persist credentials without prompting. Process memory only; never
-/// exported to env, argv or child processes. Opt out with
-/// `PRAXIS_RETAIN_MASTER_KEY=0` (logins then live until restart).
-static MASTER_KEY: RwLock<Option<String>> = RwLock::new(None);
+/// exported to env, argv or child processes. Explicit opt-in only:
+/// `PRAXIS_RETAIN_MASTER_KEY=1`. Without it, logins live until restart.
+static MASTER_KEY: RwLock<Option<zeroize::Zeroizing<String>>> = RwLock::new(None);
 
 /// Tests that mutate the process-global store serialize on this lock.
 #[cfg(test)]
@@ -15,12 +15,15 @@ pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+fn retention_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 pub fn retain_master_password(password: &str) {
-    if std::env::var("PRAXIS_RETAIN_MASTER_KEY").is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("false")) {
-        return;
-    }
+    let enabled = retention_enabled(std::env::var("PRAXIS_RETAIN_MASTER_KEY").ok().as_deref());
     if let Ok(mut guard) = MASTER_KEY.write() {
-        *guard = Some(password.to_string());
+        // Clearing/replacing also zeroizes the old allocation.
+        *guard = enabled.then(|| zeroize::Zeroizing::new(password.to_string()));
     }
 }
 
@@ -31,10 +34,10 @@ pub fn master_key_retained() -> bool {
 /// Save to the encrypted store when the gateway holds the master key.
 /// Returns Ok(false) when it cannot persist (in-memory update only).
 pub fn persist_if_unlocked(secrets: &Secrets) -> anyhow::Result<bool> {
-    let key = MASTER_KEY.read().ok().and_then(|g| g.clone());
-    match key {
+    let guard = MASTER_KEY.read().map_err(|_| anyhow::anyhow!("Master key lock unavailable"))?;
+    match guard.as_ref() {
         Some(key) => {
-            save_secrets(secrets, &key)?;
+            save_secrets(secrets, key)?;
             Ok(true)
         }
         None => Ok(false),
@@ -95,6 +98,27 @@ pub fn init_secrets(secrets: Secrets) {
     }
 }
 
+/// Atomic live-store mutation and persistence. Callers never publish a failed
+/// disk write, nor overwrite unrelated credentials from an old snapshot.
+pub fn update_secrets(update: impl FnOnce(&mut Secrets) -> anyhow::Result<()>) -> anyhow::Result<(Secrets, bool)> {
+    let mut guard = SECRETS.write().map_err(|_| anyhow::anyhow!("Secret store lock unavailable"))?;
+    let mut next = guard.clone().unwrap_or_default();
+    update(&mut next)?;
+    let persisted = persist_if_unlocked(&next)?;
+    *guard = Some(next.clone());
+    Ok((next, persisted))
+}
+
+/// OAuth rotation cannot be rolled back if disk persistence fails: keep the
+/// new credentials in the live store, serialize writes, and let the caller warn.
+/// Returning false from the closure means a stale callback made no change.
+pub fn update_runtime_secrets(update: impl FnOnce(&mut Secrets) -> bool) -> anyhow::Result<bool> {
+    let mut guard = SECRETS.write().map_err(|_| anyhow::anyhow!("Secret store lock unavailable"))?;
+    let current = guard.get_or_insert_with(Secrets::default);
+    if !update(current) { return Ok(false); }
+    persist_if_unlocked(current)
+}
+
 pub fn get_secrets() -> Secrets {
     SECRETS
         .read()
@@ -129,7 +153,7 @@ pub fn has_secrets() -> bool {
 
 pub fn mask_secret(secret: &Option<String>) -> String {
     match secret {
-        Some(s) if s.len() > 4 => format!("***{}", &s[s.len() - 4..]),
+        Some(s) if s.chars().count() > 4 => format!("***{}", s.chars().skip(s.chars().count() - 4).collect::<String>()),
         Some(_) => "***".to_string(),
         None => "".to_string(),
     }
@@ -162,6 +186,27 @@ mod security_tests {
     use super::*;
 
     #[test]
+    fn master_key_retention_requires_explicit_opt_in() {
+        for value in [None, Some(""), Some("0"), Some("false"), Some("typo")] {
+            assert!(!retention_enabled(value));
+        }
+        for value in [Some("1"), Some("true"), Some("TRUE")] {
+            assert!(retention_enabled(value));
+        }
+    }
+
+    #[test]
+    fn secret_updates_are_atomic_on_validation_failure() {
+        let _lock = test_lock();
+        let old = get_secrets();
+        let (saved, _) = update_secrets(|s| { s.custom.insert("atomic-test".into(), "before".into()); Ok(()) }).unwrap();
+        assert_eq!(saved.custom["atomic-test"], "before");
+        assert!(update_secrets(|s| { s.custom.clear(); anyhow::bail!("invalid update") }).is_err());
+        assert_eq!(get_secrets().custom["atomic-test"], "before");
+        init_secrets(old);
+    }
+
+    #[test]
     fn test_secrets_default() {
         let secrets = Secrets::default();
         assert!(secrets.openai_api_key.is_none());
@@ -186,6 +231,7 @@ mod security_tests {
     fn test_mask_secret() {
         assert_eq!(mask_secret(&None), "");
         assert_eq!(mask_secret(&Some("abc".to_string())), "***");
+        assert_eq!(mask_secret(&Some("日本語の秘密".to_string())), "***語の秘密");
         assert_eq!(
             mask_secret(&Some("abcdefghijklmnop".to_string())),
             "***mnop"

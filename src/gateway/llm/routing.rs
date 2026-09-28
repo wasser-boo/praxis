@@ -299,6 +299,7 @@ impl LLMRouter {
                         // This remains below tool execution and inside the same
                         // global attempt/time/rate limits; no hidden adapter retry.
                         let expanded_output = if error.kind == ErrorKind::OutputLimit
+                            && p.supports_output_limit()
                             && attempts < allowance
                         {
                             self.policy.next_output_limit(req.max_tokens)

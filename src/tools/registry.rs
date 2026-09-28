@@ -34,8 +34,15 @@ pub struct ToolMeta {
 /// Static registry initialized once at startup
 static TOOL_REGISTRY: Lazy<Vec<ToolMeta>> = Lazy::new(build_registry);
 
+fn canonical_tool(name: &str) -> Option<&'static crate::db::tools::Tool> {
+    static DEFAULTS: Lazy<HashMap<String, crate::db::tools::Tool>> = Lazy::new(|| {
+        crate::db::tools::get_default_tools().into_iter().map(|tool| (tool.name.clone(), tool)).collect()
+    });
+    DEFAULTS.get(name)
+}
+
 fn build_registry() -> Vec<ToolMeta> {
-    vec![
+    let mut tools = vec![
         // Action tools
         ToolMeta {
             name: "execute_terminal",
@@ -337,7 +344,17 @@ fn build_registry() -> Vec<ToolMeta> {
             params_schema: ask_questions_schema(),
             default_enabled: true,
         },
-    ]
+    ];
+    // Category metadata is local, but parameter contracts have one source.
+    // Otherwise discovery advertises `path`/active-profile memory while this
+    // registry silently requires `image_path`/a nonexistent `profile` argument.
+    for tool in &mut tools {
+        if let Some(canonical) = canonical_tool(tool.name) {
+            tool.params_schema = canonical.parameters.clone();
+            tool.default_enabled = canonical.is_enabled;
+        }
+    }
+    tools
 }
 
 /// Access the static registry
@@ -384,6 +401,21 @@ pub fn activated_tool_names(ctx_settings: &crate::db::contexts::ContextSettings)
     entries.extend(ctx_settings.tool_groups.clone().unwrap_or_default());
     entries.extend(ctx_settings.full_tool_schemas.clone());
     expand_tool_groups(&entries, &ctx_settings.tool_group_definitions)
+}
+
+/// Undefined groups resolve as tool names for late-installed plugins. Keep
+/// that compatibility, but expose a diagnostic instead of silently losing tools.
+fn unavailable_activated_tools(settings: &crate::db::contexts::ContextSettings, plugins: Option<&[crate::gateway::llm::provider::ToolDefinition]>) -> Vec<String> {
+    activated_tool_names(settings).into_iter().filter(|name| {
+        canonical_tool(name).is_none() && get_tool_meta(name).is_none()
+            && !plugins.unwrap_or_default().iter().any(|tool| tool.function.name == *name)
+    }).collect()
+}
+
+fn has_tool_allowlist(settings: &crate::db::contexts::ContextSettings) -> bool {
+    !settings.activated_tools.is_empty() || !settings.full_tool_schemas.is_empty()
+        || settings.tool_groups.as_ref().is_some_and(|groups| !groups.is_empty())
+        || !settings.full_tool_categories.is_empty()
 }
 
 /// Get tool metadata by name
@@ -456,14 +488,18 @@ pub fn filter_tools_for_request(
                 json!({"type": "object", "properties": {}})
             };
 
-            Some(ToolDefinition {
+            let mut tool = ToolDefinition {
                 tool_type: "function".into(),
                 function: FunctionDefinition {
                     name: meta.name.into(),
                     description: meta.description.into(),
                     parameters: params,
                 },
-            })
+            };
+            if has_full_schema || discovery_mode == ToolDiscoveryMode::Full {
+                super::tool_output::augment_definition(&mut tool);
+            }
+            Some(tool)
         })
         .collect()
 }
@@ -489,17 +525,9 @@ pub fn build_tool_definitions_for_user(
     db: Option<&crate::db::Database>,
     user_id: &str,
 ) -> Vec<crate::gateway::llm::provider::ToolDefinition> {
-    let selected = crate::gateway::task_control::selected_tools(user_id);
-    if selected.is_empty() {
-        return build_tool_definitions(ctx_settings, plugin_tools, db);
-    }
-    let mut settings = ctx_settings.clone();
-    // Discovery only extends an explicit allow-list; with no allow-list every
-    // tool is already offered and adding names would silently create one.
-    if !activated_tool_names(&settings).is_empty() || !settings.full_tool_categories.is_empty() {
-        settings.activated_tools.extend(selected);
-    }
-    build_tool_definitions(&settings, plugin_tools, db)
+    let mut selected: Vec<_> = crate::gateway::task_control::selected_tools(user_id).into_iter().collect();
+    selected.sort();
+    build_tool_definitions_with_selection(ctx_settings, plugin_tools, db, &selected)
 }
 
 /// Build filtered tool definitions from context settings, merging with plugin tools
@@ -508,8 +536,27 @@ pub fn build_tool_definitions(
     plugin_tools: Option<&[crate::gateway::llm::provider::ToolDefinition]>, // dynamic plugin tools
     db: Option<&crate::db::Database>, // for checking plugin tool enabled state
 ) -> Vec<crate::gateway::llm::provider::ToolDefinition> {
-    // Everything the state activates: single tools and expanded groups.
-    let full_schemas = activated_tool_names(ctx_settings);
+    build_tool_definitions_with_selection(ctx_settings, plugin_tools, db, &[])
+}
+
+fn build_tool_definitions_with_selection(
+    ctx_settings: &crate::db::contexts::ContextSettings,
+    plugin_tools: Option<&[crate::gateway::llm::provider::ToolDefinition]>,
+    db: Option<&crate::db::Database>,
+    selected: &[String],
+) -> Vec<crate::gateway::llm::provider::ToolDefinition> {
+    let unavailable = unavailable_activated_tools(ctx_settings, plugin_tools);
+    if !unavailable.is_empty() {
+        let names: Vec<_> = unavailable.iter().take(32).map(|s| s.chars().take(80).collect::<String>()).collect();
+        tracing::warn!(tools = ?names, "Activated tools are unknown or unavailable; check tool-group definitions and installed/enabled plugins");
+    }
+    // Discovery adds full schemas and extends an existing state allow-list,
+    // but must not create a new allow-list when the state has none. Selected
+    // entries are actual tool names, not groups to expand a second time.
+    let mut full_schemas = activated_tool_names(ctx_settings);
+    for name in selected {
+        if !full_schemas.contains(name) { full_schemas.push(name.clone()); }
+    }
     let full_names = if full_schemas.is_empty() {
         None
     } else {
@@ -527,11 +574,14 @@ pub fn build_tool_definitions(
     };
     // Determine allowed tools from state config
     // If state explicitly configures tools, use as allow-list; otherwise allow all
-    let has_explicit_config = !full_schemas.is_empty() || !ctx_settings.full_tool_categories.is_empty();
+    let has_explicit_config = has_tool_allowlist(ctx_settings);
+    if has_explicit_config && full_schemas.is_empty() && full_cats.is_none() {
+        tracing::warn!("Tool activation resolved to no tools; check empty/cyclic groups (allow-list remains closed)");
+    }
     
-    // A tool is allowed when it is named (directly or via a group) OR its category
-    // is listed. Empty lists impose no constraint of their kind.
-    let allowed_names = if has_explicit_config && !full_schemas.is_empty() {
+    // A tool is allowed when named (directly, via a group or discovery) OR its
+    // category is listed. An explicitly configured empty resolution stays closed.
+    let allowed_names = if has_explicit_config {
         Some(full_schemas.as_slice())
     } else {
         None
@@ -551,11 +601,45 @@ pub fn build_tool_definitions(
         filter_tools_for_request(allowed_names, allowed_cats.as_deref(), full_names, full_cats.as_deref(), discovery_mode)
     };
     
+    // Use the same enabled contracts as discovery, including built-ins that
+    // have no category metadata (background/delegation tools, etc.). Never let
+    // the static table re-enable a tool disabled in the dashboard.
+    let native = match db.map(crate::db::tools::list).transpose() {
+        Ok(native) => native.unwrap_or_default(),
+        Err(_) => {
+            tracing::warn!("Cannot load enabled tool contracts; no tools offered");
+            return Vec::new();
+        }
+    };
+    if db.is_some() {
+        tools.retain(|tool| native.iter().any(|n| n.name == tool.function.name && n.is_enabled));
+        for tool in native.iter().filter(|tool| tool.is_enabled) {
+            let category = get_tool_meta(&tool.name).map(|meta| meta.category).unwrap_or(ToolCategory::Action);
+            let activated = full_schemas.contains(&tool.name) || full_cats.as_ref().is_some_and(|cats| cats.contains(&category));
+            if (has_explicit_config || discovery_mode == ToolDiscoveryMode::None) && !activated { continue; }
+            let full = activated || discovery_mode == ToolDiscoveryMode::Full;
+            let mut definition = crate::gateway::llm::provider::ToolDefinition {
+                tool_type: "function".into(),
+                function: crate::gateway::llm::provider::FunctionDefinition {
+                    name: tool.name.clone(), description: tool.description.clone().unwrap_or_default(),
+                    parameters: if full { tool.parameters.clone() } else { json!({"type":"object","properties":{}}) },
+                },
+            };
+            if full { super::tool_output::augment_definition(&mut definition); }
+            if let Some(existing) = tools.iter_mut().find(|t| t.function.name == tool.name) {
+                *existing = definition;
+            } else {
+                tools.push(definition);
+            }
+        }
+    }
+
     // Merge plugin tools - also filter them by state settings
     if let Some(plugins) = plugin_tools {
         for plugin_tool in plugins {
             // Check if tool already exists (static registry override)
-            if tools.iter().any(|t| t.function.name == plugin_tool.function.name) {
+            if canonical_tool(&plugin_tool.function.name).is_some()
+                || tools.iter().any(|t| t.function.name == plugin_tool.function.name) {
                 continue;
             }
             // Check if plugin tool is enabled in DB (per-tool enable/disable)
@@ -581,14 +665,18 @@ pub fn build_tool_definitions(
             } else {
                 json!({"type": "object", "properties": {}})
             };
-            tools.push(crate::gateway::llm::provider::ToolDefinition {
+            let mut definition = crate::gateway::llm::provider::ToolDefinition {
                 tool_type: "function".into(),
                 function: crate::gateway::llm::provider::FunctionDefinition {
                     name: plugin_tool.function.name.clone(),
                     description: plugin_tool.function.description.clone(),
                     parameters: params,
                 },
-            });
+            };
+            if listed || discovery_mode == ToolDiscoveryMode::Full {
+                super::tool_output::augment_definition(&mut definition);
+            }
+            tools.push(definition);
         }
     }
     tools
@@ -601,7 +689,7 @@ pub enum ToolDiscoveryMode {
     Full,
     /// Only name + description in schema (minimal payload)
     DescriptionOnly,
-    /// No tools in request at all
+    /// Only explicitly activated/discovered tools, with full schemas
     None,
 }
 
@@ -1155,6 +1243,16 @@ mod registry_tests {
     }
 
     #[test]
+    fn activation_diagnostics_distinguish_known_tools_and_unknown_groups() {
+        let mut settings = crate::db::contexts::ContextSettings::default();
+        settings.activated_tools = vec!["read_file".into(), "missing_group".into(), "late_plugin".into()];
+        assert_eq!(unavailable_activated_tools(&settings, None), vec!["missing_group", "late_plugin"]);
+        let plugins = vec![crate::gateway::llm::provider::ToolDefinition { tool_type: "function".into(), function: crate::gateway::llm::provider::FunctionDefinition {
+            name: "late_plugin".into(), description: String::new(), parameters: serde_json::json!({}) } }];
+        assert_eq!(unavailable_activated_tools(&settings, Some(&plugins)), vec!["missing_group"]);
+    }
+
+    #[test]
     fn activated_tools_mix_groups_and_single_tools_and_gate_plugins() {
         let mut settings = settings_with_groups();
         settings.activated_tools = vec!["core_files".into(), "execute_terminal".into()];
@@ -1202,6 +1300,76 @@ mod registry_tests {
     }
 
     #[test]
+    fn discovery_without_allowlist_loads_schemas_without_hiding_other_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Database::new(dir.path()).unwrap();
+        crate::db::tools::init_default_tools(&db).unwrap();
+        let plugins = [plugin("brave_web_search")];
+        let user = format!("discovery-unrestricted-{}", uuid::Uuid::new_v4());
+        for mode in ["Full", "DescriptionOnly", "None"] {
+            let mut settings = ContextSettings::default();
+            settings.tool_discovery_mode = mode.into();
+            let baseline = build_tool_definitions(&settings, Some(&plugins), Some(&db));
+            let task = crate::gateway::task_control::begin(&user).unwrap();
+            crate::gateway::task_control::select_tools(&user,
+                ["memory_get", "run_background", "brave_web_search"].map(str::to_string).to_vec(), false).unwrap();
+            let got = build_tool_definitions_for_user(&settings, Some(&plugins), Some(&db), &user);
+            for name in ["memory_get", "run_background", "brave_web_search"] {
+                let tool = got.iter().find(|t| t.function.name == name)
+                    .unwrap_or_else(|| panic!("{mode}: discovered {name} must be offered"));
+                let params = &tool.function.parameters;
+                assert_eq!(params["properties"]["_output"]["type"], "object", "{mode}:{name}");
+                if name == "memory_get" { assert_eq!(params["required"], json!(["key"])); }
+                if name == "run_background" { assert_eq!(params["required"], json!(["command"])); }
+            }
+            if mode == "None" {
+                assert!(baseline.is_empty());
+                assert_eq!(got.len(), 3);
+            } else {
+                assert_eq!(names(&got), names(&baseline), "discovery must not create an allow-list");
+            }
+            drop(task);
+            let fresh = build_tool_definitions_for_user(&settings, Some(&plugins), Some(&db), &user);
+            assert_eq!(serde_json::to_value(fresh).unwrap(), serde_json::to_value(baseline).unwrap());
+        }
+    }
+
+    #[test]
+    fn empty_native_catalog_does_not_fall_back_to_static_contracts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Database::new(dir.path()).unwrap();
+        let mut settings = ContextSettings::default();
+        settings.tool_discovery_mode = "Full".into();
+        let plugins = [plugin("memory_set"), plugin("brave_web_search")];
+        assert_eq!(names(&build_tool_definitions(&settings, Some(&plugins), Some(&db))), vec!["brave_web_search"]);
+    }
+
+    #[test]
+    fn routed_contracts_match_discovery_and_respect_disabled_builtins() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Database::new(dir.path()).unwrap();
+        crate::db::tools::init_default_tools(&db).unwrap();
+        let mut settings = ContextSettings::default();
+        settings.activated_tools = ["memory_get", "memory_set", "understand_image", "run_background"].map(str::to_string).to_vec();
+        let tools = build_tool_definitions(&settings, None, Some(&db));
+        assert_eq!(tools.len(), 4, "built-ins without category metadata must be callable too");
+        for tool in &tools {
+            let mut expected = crate::tools::discovery::catalog(&db, &crate::plugins::PluginRegistry::new()).unwrap()
+                .into_iter().find(|t| t.function.name == tool.function.name).unwrap();
+            super::super::tool_output::augment_definition(&mut expected);
+            assert_eq!(tool.function.parameters, expected.function.parameters, "{}", tool.function.name);
+        }
+        let memory = tools.iter().find(|t| t.function.name == "memory_set").unwrap();
+        assert_eq!(memory.function.parameters["required"], json!(["key", "value"]));
+        let image = tools.iter().find(|t| t.function.name == "understand_image").unwrap();
+        assert_eq!(image.function.parameters["required"], json!(["path", "prompt"]));
+        assert_eq!(image.function.parameters["properties"]["_output"]["type"], "object");
+        crate::db::tools::disable(&db, "memory_set").unwrap();
+        let shadow = [plugin("memory_set")];
+        assert!(!names(&build_tool_definitions(&settings, Some(&shadow), Some(&db))).contains(&"memory_set"));
+    }
+
+    #[test]
     fn registry_has_no_duplicate_tool_names() {
         let mut seen = HashSet::new();
         for meta in all_tool_meta() {
@@ -1216,6 +1384,25 @@ mod registry_tests {
         assert!(build_tool_definitions(&settings, None, None).is_empty());
         settings.activated_tools = vec!["core_files".into()];
         assert_eq!(build_tool_definitions(&settings, None, None).len(), 3);
+    }
+
+    #[test]
+    fn empty_or_cyclic_groups_do_not_turn_into_an_unrestricted_allow_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Database::new(dir.path()).unwrap();
+        crate::db::tools::init_default_tools(&db).unwrap();
+        for mode in ["Full", "DescriptionOnly", "None"] {
+            let mut settings = ContextSettings::default();
+            settings.tool_discovery_mode = mode.into();
+            settings.tool_group_definitions.insert("empty".into(), vec![]);
+            settings.tool_group_definitions.insert("cycle".into(), vec!["cycle".into()]);
+            for name in ["empty", "cycle"] {
+                settings.activated_tools = vec![name.into()];
+                for db in [None, Some(&db)] {
+                    assert!(build_tool_definitions(&settings, Some(&[plugin("brave_web_search")]), db).is_empty(), "{mode}:{name}");
+                }
+            }
+        }
     }
 
     #[test]

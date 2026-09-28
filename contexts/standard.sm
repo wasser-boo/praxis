@@ -8,8 +8,10 @@
 @version "3.0"
 @steps [routing, standard, teach, code, code_architect, senior_dev, expert_programmer, debugger, review, research]
 
-# Defaults applied when the context has no value yet.
-sm_data.persona_roles = "standard, code, code_architect, senior_dev, expert_programmer, debugger, review, teach, research"
+# The role catalog belongs to this workflow, not to a saved user context.
+# Apply on every routing pass, including contexts imported from other workflows.
+[overrides]
+if active_state != "" -> sm_data.persona_roles = "standard, code, code_architect, senior_dev, expert_programmer, debugger, review, teach, research"
 
 # Tool groups are defined per workflow; there are no built-in groups.
 # Members may be tool names (built-in or plugin) or other group names.
@@ -17,7 +19,8 @@ sm_data.persona_roles = "standard, code, code_architect, senior_dev, expert_prog
 core_files = [read_file, write_file, edit_file]
 core_terminal = [execute_terminal, core_files]
 coding = [core_terminal, search_tools]
-agent_basic = [agent_complete, agent_next, agent_feedback]
+# Discovery must stay callable even in narrow states (e.g. teach needs memory).
+agent_basic = [agent_complete, agent_next, agent_feedback, search_tools, search_skills, use_skill, read_tool_result]
 context = [get_context, set_context, read_tool_result]
 memory = [memory_get, memory_set, learn_fact, learn_preference, learn_topic]
 discovery = [search_tools, search_skills]
