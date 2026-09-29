@@ -288,6 +288,24 @@ impl App {
         self.append_messages(msgs);
     }
 
+    /// Commands come only from complete, authoritative history arguments, not
+    /// the 200-character tool_call preview. The parent message key deduplicates
+    /// the whole batch, so reused provider call IDs remain distinct.
+    fn append_terminal_commands(&mut self, message: &Message) {
+        if message.role != "assistant" { return; }
+        for call in message.tool_calls.iter().flatten() {
+            if !matches!(call.function.name.as_str(), "execute_terminal" | "run_background" | "vm_shell") {
+                continue;
+            }
+            let arguments = serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok();
+            let command = arguments.as_ref().and_then(|args| args.get("command")).and_then(|v| v.as_str());
+            self.transcript.push(Bubble::Tool {
+                name: format!("{} — command", call.function.name),
+                content: command.unwrap_or("(command unavailable: invalid or incomplete arguments)").into(),
+            });
+        }
+    }
+
     fn append_messages(&mut self, msgs: Vec<Message>) {
         for m in msgs {
             let key = bubble_key(&m);
@@ -301,11 +319,13 @@ impl App {
             {
                 self.live = Default::default();
             }
-            // Skip purely intermediate assistant messages (just tool_calls).
+            // A tool-only assistant still owns visible command rows; omit only
+            // its empty prose bubble.
             if m.role == "assistant"
                 && m.tool_calls.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
                 && m.content.is_empty()
             {
+                self.append_terminal_commands(&m);
                 self.seen_keys.insert(key);
                 continue;
             }
@@ -320,6 +340,7 @@ impl App {
             }) {
                 let index = self.pending_echoes.remove(pending);
                 if m.role == "assistant" { self.stream_history.push(index); }
+                self.append_terminal_commands(&m);
                 self.seen_keys.insert(key);
                 continue;
             }
@@ -354,6 +375,7 @@ impl App {
             };
             if m.role == "assistant" { self.stream_history.push(self.transcript.len()); }
             self.transcript.push(bubble);
+            self.append_terminal_commands(&m);
             self.seen_keys.insert(key);
         }
     }
@@ -802,7 +824,11 @@ fn bubble_key(m: &Message) -> String {
     if let Some(id) = m.id { return format!("id:{id}"); }
     // Compatibility with older history endpoints lacking IDs: never truncate
     // content, or two long replies with the same opening collapse into one.
-    format!("legacy:{}:{:?}:{}", m.role, m.tool_call_id, m.content)
+    // Tool-only assistant rows have empty content. Include their structured
+    // calls, or every such legacy row would collapse into the first command.
+    format!("legacy:{}", serde_json::json!([
+        m.role, m.tool_call_id, m.content, m.tool_calls
+    ]))
 }
 
 /// Find file completion candidates for `@<prefix>`.
@@ -1351,6 +1377,121 @@ mod tests {
         let mut message = Message::assistant(content.into());
         message.id = Some(id);
         message
+    }
+
+    fn terminal_message(id: i64, tool: &str, command: &str, text: &str) -> Message {
+        let mut message = saved_assistant(id, text);
+        message.tool_calls = Some(vec![crate::db::messages::ToolCallData {
+            id: "reused-call-id".into(),
+            function: crate::db::messages::FunctionCallData {
+                name: tool.into(),
+                arguments: serde_json::json!({"command": command, "cwd": "/synthetic"}).to_string(),
+            },
+        }]);
+        message
+    }
+
+    #[test]
+    fn terminal_commands_survive_history_live_handoff_and_reload() {
+        let command = "printf 'Grüße 世界'\n  printf '%s' 'C:\\new\\test'";
+        for tool in ["execute_terminal", "run_background", "vm_shell"] {
+            for history_first in [false, true] {
+                for text in ["", "I'll run this command."] {
+                    let mut app = dummy_app();
+                    let message = terminal_message(10, tool, command, text);
+                    app.stream_event("stream_start", "{}");
+                    if history_first { app.append_messages(vec![message.clone()]); }
+                    app.stream_event("assistant", text);
+                    app.stream_event("stream_end", "{}");
+                    app.stream_event("history", &serde_json::to_string(&vec![message.clone()]).unwrap());
+                    app.append_messages(vec![message.clone()]);
+                    let expected = usize::from(!text.is_empty()) + 1;
+                    assert_eq!(app.transcript.len(), expected, "missing command for {tool}, history_first={history_first}, text={text:?}");
+                    assert!(matches!(app.transcript.last(), Some(Bubble::Tool {name, content})
+                        if name == &format!("{tool} — command") && content == command));
+                    if !text.is_empty() {
+                        assert!(matches!(&app.transcript[0], Bubble::Assistant {content} if content == text));
+                    }
+                    // Provider call IDs are not globally unique.
+                    let mut repeated = message.clone(); repeated.id = Some(11);
+                    app.append_messages(vec![repeated]);
+                    assert_eq!(app.transcript.len(), 2 * expected);
+                    app.reset_view();
+                    app.append_messages(vec![message]);
+                    assert_eq!(app.transcript.len(), expected);
+                    assert!(matches!(app.transcript.last(), Some(Bubble::Tool {content, ..}) if content == command));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_history_preserves_call_order_results_and_unrelated_payload_privacy() {
+        let first = terminal_message(1, "execute_terminal", "first\n  command", "Plan");
+        let second = terminal_message(2, "vm_shell", "second 世界", "");
+        let mut message = first.clone();
+        message.tool_calls.as_mut().unwrap().extend(second.tool_calls.unwrap());
+        // Nonterminal arguments must not leak into the transcript.
+        let hidden = terminal_message(3, "write_file", "PRIVATE_UNRELATED_PAYLOAD", "");
+        message.tool_calls.as_mut().unwrap().extend(hidden.tool_calls.unwrap());
+        let mut result = Message::tool("result text".into(), "reused-call-id".into());
+        result.id = Some(4);
+        let mut app = dummy_app();
+        app.append_messages(vec![message.clone(), result.clone()]);
+        app.append_messages(vec![message, result]);
+        assert_eq!(app.transcript.len(), 4);
+        assert!(matches!(&app.transcript[0], Bubble::Assistant {content} if content == "Plan"));
+        assert!(matches!(&app.transcript[1], Bubble::Tool {content, ..} if content == "first\n  command"));
+        assert!(matches!(&app.transcript[2], Bubble::Tool {content, ..} if content == "second 世界"));
+        assert!(matches!(&app.transcript[3], Bubble::Tool {content, ..} if content == "result text"));
+    }
+
+    #[tokio::test]
+    async fn terminal_commands_arrive_via_authenticated_remote_history() {
+        use wiremock::{matchers::{method, path, header}, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let message = terminal_message(21, "execute_terminal", "printf 'remote 世界'", "");
+        Mock::given(method("GET")).and(path("/v1/messages/synthetic"))
+            .and(header("Authorization", "Bearer synthetic-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"messages":[message]})))
+            .expect(1).mount(&server).await;
+        let remote = super::super::remote::Remote::new(server.uri(), "synthetic-key".into()).unwrap();
+        let mut app = dummy_app();
+        app.remote = Some(remote.clone());
+        // The live event is only a truncated preview; use the same authoritative
+        // HTTP history path as the remote poll task, never execute the preview.
+        app.stream_event("tool_call", r#"{"tool":"execute_terminal","call_id":"reused-call-id","args_preview":{"args":"{\"command\":\"partial"}}"#);
+        let history = remote.messages("synthetic").await.unwrap();
+        app.stream_event("history", &serde_json::to_string(&history).unwrap());
+        app.stream_event("history", &serde_json::to_string(&history).unwrap());
+        assert_eq!(app.transcript.len(), 1);
+        assert!(matches!(&app.transcript[0], Bubble::Tool {content, ..} if content == "printf 'remote 世界'"));
+    }
+
+    #[test]
+    fn terminal_commands_require_complete_string_arguments_and_keep_legacy_identity() {
+        let mut app = dummy_app();
+        let args = [r#"{"command":"truncated"#,
+            r#"{"command":42}"#, r#"{"cwd":"/private"}"#, r#"null"#, r#"["not a command"]"#];
+        for (index, args) in args.iter().enumerate() {
+            let mut message = terminal_message(index as i64 + 1, "execute_terminal", "", "");
+            message.tool_calls.as_mut().unwrap()[0].function.arguments = (*args).into();
+            app.append_messages(vec![message]);
+        }
+        assert_eq!(app.transcript.len(), args.len());
+        for bubble in &app.transcript {
+            assert!(matches!(bubble, Bubble::Tool {content, ..}
+                if content == "(command unavailable: invalid or incomplete arguments)"));
+        }
+        let long = format!("printf '%s' '{}';\n  printf 'END 世界'", "x".repeat(1000));
+        for command in ["", long.as_str()] {
+            let mut message = terminal_message(100, "run_background", command, "");
+            message.id = None; // older history endpoints may not send DB IDs
+            app.append_messages(vec![message.clone(), message]);
+        }
+        assert_eq!(app.transcript.len(), args.len() + 2);
+        assert!(matches!(&app.transcript[args.len()], Bubble::Tool {content, ..} if content.is_empty()));
+        assert!(matches!(app.transcript.last(), Some(Bubble::Tool {content, ..}) if content == &long));
     }
 
     #[test]
