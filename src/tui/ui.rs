@@ -1053,6 +1053,38 @@ mod tests {
     }
 
     #[test]
+    fn terminal_command_history_is_visible_after_live_preview_and_reload() {
+        let (mut app, _dir) = dummy_app();
+        app.show_sidebar = false;
+        let command = "printf 'FIRST 世界'\n  printf 'LAST'; # <script> & C:\\new";
+        let args = serde_json::json!({"command": command, "unrelated": "DO_NOT_DISPLAY"}).to_string();
+        let history = serde_json::json!([{"id":31,"role":"assistant","content":"",
+            "tool_calls":[{"id":"call-1","function":{"name":"execute_terminal","arguments":args}}]}]).to_string();
+        app.stream_event("stream_start", "{}");
+        app.stream_event("tool_call_delta", &serde_json::json!({"index":0,"name":"execute_terminal","arguments":"{\"command\":\"partial"}).to_string());
+        app.stream_event("stream_end", "{}");
+        app.stream_event("tool_call", &serde_json::json!({"tool":"execute_terminal","call_id":"call-1",
+            "args_preview":{"args":"{\"command\":\"partial"}}).to_string());
+        for width in [40, 80, 100] {
+            for reload in [false, true] {
+                if reload { app.reset_view(); }
+                app.stream_event("history", &history);
+                app.stream_event("history", &history);
+                let mut terminal = Terminal::new(TestBackend::new(width, 22)).unwrap();
+                terminal.draw(|f| draw(f, &mut app)).unwrap();
+                let rows = screen_rows(&terminal);
+                // TestBackend includes a continuation cell after each wide glyph.
+                assert_eq!(rows.iter().filter(|row| row.contains("FIRST")).count(), 1, "{rows:?}");
+                assert!(rows.iter().any(|row| row.contains('世') && row.contains('界')), "{rows:?}");
+                assert!(rows.iter().any(|row| row.contains("LAST")), "{rows:?}");
+                assert!(!rows.iter().any(|row| row.contains("DO_NOT_DISPLAY") || row.contains("partial")));
+                assert!(buffer_contains_cursor(&terminal));
+                assert_eq!(app.transcript.len(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn draw_regression_narrow_and_wide_terminals() {
         let (mut app, _dir) = dummy_app();
         app.transcript.push(Bubble::Assistant {
