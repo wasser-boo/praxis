@@ -20,7 +20,7 @@ try {
     fs.writeFileSync(path.join(work, 'src/lib.rs'), lib.replaceAll('__ROOT__', rustRoot));
     fs.writeFileSync(path.join(work, 'build.rs'), build.replaceAll('__ROOT__', rustRoot));
     const manifest = fs.readFileSync(path.join(root, 'Cargo.toml'), 'utf8');
-    const wanted = ["anyhow","tokio","serde","serde_json","reqwest","futures-util","ratatui","crossterm","unicode-segmentation","urlencoding","tracing","rand","chrono","tempfile","wiremock"];
+    const wanted = ["anyhow","tokio","serde","serde_json","reqwest","futures-util","ratatui","crossterm","unicode-segmentation","urlencoding","tracing","rand","chrono","tempfile","wiremock","base64"];
     const deps = wanted.map(name => {
         const line = manifest.split('\n').find(line => line.startsWith(name + ' ='));
         if (!line) throw new Error('Missing dependency: ' + name);

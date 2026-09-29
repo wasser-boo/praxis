@@ -218,6 +218,7 @@ fn draw_transcript(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Build all lines, top-to-bottom.
     let mut lines: Vec<Line> = Vec::new();
+    let mut selection_start = None;
     let live = app.live.bubbles();
     let transcript: Vec<_> = app.transcript.iter().chain(live.iter()).collect();
     if transcript.is_empty() {
@@ -230,9 +231,24 @@ fn draw_transcript(f: &mut Frame, app: &mut App, area: Rect) {
         }
     } else {
         for (idx, b) in transcript.iter().enumerate() {
-            let bubble_lines = render_bubble(b, bubble_max, app.username());
+            let selected = app.copy_selection.as_ref().filter(|selection| selection.index == idx);
+            let mut snapshot;
+            let rendered = if let Some(selection) = selected {
+                snapshot = (*b).clone();
+                match &mut snapshot {
+                    Bubble::User {content} | Bubble::Assistant {content} | Bubble::Thinking {content}
+                    | Bubble::Tool {content, ..} | Bubble::System {content} | Bubble::Banner {content, ..} => {
+                        *content = selection.content.clone();
+                    }
+                }
+                selection_start = Some(lines.len());
+                &snapshot
+            } else { b };
+            let bubble_lines = render_bubble(rendered, bubble_max, app.username());
             for l in bubble_lines {
-                lines.push(l);
+                lines.push(if selected.is_some() {
+                    l.patch_style(Style::default().add_modifier(Modifier::REVERSED))
+                } else { l });
             }
             if idx + 1 < transcript.len() {
                 lines.push(Line::from(""));
@@ -243,6 +259,15 @@ fn draw_transcript(f: &mut Frame, app: &mut App, area: Rect) {
     // Count actual prewrapped rows, NOT the outer rectangle (borders/padding).
     // usize prevents transcripts over 65,535 rows from wrapping back to zero.
     app.update_viewport(lines.len(), inner.width, inner.height);
+    if let Some(selection) = &mut app.copy_selection {
+        if selection.reveal {
+            if let Some(start) = selection_start {
+                app.scroll_offset = lines.len().saturating_sub(inner.height as usize).saturating_sub(start);
+                app.at_bottom = app.scroll_offset == 0;
+            }
+            selection.reveal = false;
+        }
+    }
     let from = lines.len().saturating_sub(inner.height as usize).saturating_sub(app.scroll_offset);
     let visible: Vec<Line> = lines.into_iter().skip(from).take(inner.height as usize).collect();
     // A second wrap here invalidates scrolling and can hide the tail of replies.
@@ -574,7 +599,11 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let mut spans: Vec<Span> = vec![
+    let mut spans: Vec<Span> = if let Some(selection) = &app.copy_selection {
+        vec![Span::styled(format!("COPY {}/{} ^C/y copy Esc back  ↑/↓ select PgUp/Dn scroll ^Q quit",
+            selection.index + 1, app.transcript.len()), Style::default().fg(ACCENT_CYAN))]
+    } else { vec![
+        Span::raw(format!("F2 mouse:{}  F3 copy  /help  ", if app.mouse_capture { "ON" } else { "OFF" })),
         keybind("Enter", "send"),
         Span::raw("  "),
         keybind("Sh+Enter", "newline"),
@@ -588,10 +617,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         keybind("^B", "sidebar"),
         Span::raw("  "),
         keybind("^C", "quit"),
-    ];
+    ] };
     if let Some((msg, _)) = &app.status_msg {
-        spans.push(Span::raw("  ·  "));
-        spans.push(Span::styled(
+        spans.insert(0, Span::raw("  ·  "));
+        spans.insert(0, Span::styled(
             msg.clone(),
             Style::default()
                 .fg(ACCENT_AMBER)
@@ -1050,6 +1079,59 @@ mod tests {
             assert!(rows.iter().any(|row| row.contains("LAST")), "{event}: {rows:?}");
             assert!(buffer_contains_cursor(&terminal));
         }
+    }
+
+    #[test]
+    fn selection_is_highlighted_revealed_and_shows_keyboard_help_after_resize() {
+        let (mut app, _dir) = dummy_app();
+        app.show_sidebar = false;
+        app.transcript.push(Bubble::Assistant {content: "ORIGINAL\n  世界 e\u{301} 👩‍💻".into()});
+        for _ in 0..30 { app.transcript.push(Bubble::User {content: "unselected\nmessage".into()}); }
+        for width in [24, 40, 80, 100] {
+            app.copy_selection = Some(crate::tui::app::CopySelection {
+                index: 0, content: "SNAPSHOT\n  世界 e\u{301} 👩‍💻".into(), reveal: true,
+            });
+            let mut terminal = Terminal::new(TestBackend::new(width, 22)).unwrap();
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            let rows = screen_rows(&terminal);
+            assert!(rows.iter().any(|row| row.contains("SNAPSHOT")), "{rows:?}");
+            assert!(!rows.iter().any(|row| row.contains("ORIGINAL")));
+            assert!(rows.last().unwrap().contains("COPY 1/31"), "{rows:?}");
+            assert!(rows.last().unwrap().contains("^C/y"));
+            assert!(terminal.backend().buffer().content().iter().any(|cell|
+                cell.symbol() == "S" && cell.modifier.contains(Modifier::REVERSED)));
+            assert!(buffer_contains_cursor(&terminal));
+            assert!(app.scroll_offset > 0);
+            // Live growth keeps the reader on the selected snapshot.
+            app.live.text.push_str("new streamed text\n");
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            assert!(screen_rows(&terminal).iter().any(|row| row.contains("SNAPSHOT")));
+            app.copy_selection = None;
+            app.mouse_capture = false;
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            assert!(screen_rows(&terminal).last().unwrap().contains("F2 mouse:OFF  F3 copy"));
+            app.status_msg = Some(("Copy requested (OSC 52)".into(), tokio::time::Instant::now()));
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            assert!(screen_rows(&terminal).last().unwrap().contains("Copy requested"));
+            app.status_msg = None;
+        }
+    }
+
+    #[test]
+    fn selection_remains_visible_when_terminal_reflows_while_copying() {
+        let (mut app, _dir) = dummy_app();
+        app.show_sidebar = false;
+        app.transcript.push(Bubble::Assistant {content: "SELECTED".into()});
+        for _ in 0..30 { app.transcript.push(Bubble::User {content: "long unselected message ".repeat(4)}); }
+        app.copy_selection = Some(crate::tui::app::CopySelection {index: 0, content: "SELECTED".into(), reveal: true});
+        let mut terminal = Terminal::new(TestBackend::new(100, 22)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen_rows(&terminal).iter().any(|row| row.contains("SELECTED")));
+        terminal.backend_mut().resize(24, 22);
+        terminal.resize(Rect::new(0, 0, 24, 22)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen_rows(&terminal).iter().any(|row| row.contains("SELECTED")),
+            "reflow must reveal the selected message rather than an unrelated row");
     }
 
     #[test]
