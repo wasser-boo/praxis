@@ -41,6 +41,8 @@ pub const SLASH_COMMANDS: &[SlashCmd] = &[
     SlashCmd { name: "/plugins", desc: "List plugin tools (use: /plugins [enable|disable] <tool_name>)" },
     SlashCmd { name: "/login", desc: "Provider login on the gateway: /login | /login codex | /login <provider> <api_key> [model] [api_base]" },
     SlashCmd { name: "/logout", desc: "Remove a provider credential: /logout <provider>" },
+    SlashCmd { name: "/mouse", desc: "Toggle mouse capture (F2); OFF enables native selection" },
+    SlashCmd { name: "/copy", desc: "Select a saved message to copy (F3); arrows select, Ctrl+C/y copies" },
     SlashCmd { name: "/help", desc: "Show available commands" },
     SlashCmd { name: "/quit", desc: "Exit the TUI" },
 ];
@@ -81,6 +83,16 @@ pub enum BannerKind {
     Error,
 }
 
+/// Whole-message selection: snapshot the text so live/history updates cannot
+/// silently replace what an explicit copy action writes to the clipboard.
+pub struct CopySelection {
+    pub index: usize,
+    pub content: String,
+    pub reveal: bool,
+}
+
+const MAX_CLIPBOARD_BYTES: usize = 100_000;
+
 /// Top-level TUI state.
 pub struct App {
     pub db: Database,
@@ -113,6 +125,10 @@ pub struct App {
     pub popup: Popup,
 
     pub show_sidebar: bool,
+    /// F2 releases mouse reporting so the terminal owns native selection.
+    pub mouse_capture: bool,
+    pub copy_selection: Option<CopySelection>,
+    pending_clipboard: Option<String>,
     /// Vertical scroll offset (0 = pinned to bottom).
     pub scroll_offset: usize,
     /// Track if user was at bottom before new messages (for auto-scroll).
@@ -152,6 +168,9 @@ impl App {
             attachments: Vec::new(),
             popup: Popup::None,
             show_sidebar: true,
+            mouse_capture: true,
+            copy_selection: None,
+            pending_clipboard: None,
             scroll_offset: 0,
             at_bottom: true,
             viewport: (0, 0, 0),
@@ -174,8 +193,65 @@ impl App {
         self.status_msg = Some((msg.into(), Instant::now()));
     }
 
+    fn toggle_mouse_capture(&mut self) {
+        self.mouse_capture = !self.mouse_capture;
+        self.flash(if self.mouse_capture { "Mouse: ON — wheel scrolls" }
+            else { "Mouse: OFF — native selection; PgUp/PgDn scroll; F2 restores" });
+    }
+
+    fn select_copy_message(&mut self, index: usize) {
+        if let Some(bubble) = self.transcript.get(index) {
+            let content = match bubble {
+                Bubble::User {content} | Bubble::Assistant {content} | Bubble::Thinking {content}
+                | Bubble::Tool {content, ..} | Bubble::System {content} | Bubble::Banner {content, ..} => content,
+            };
+            self.copy_selection = Some(CopySelection {index, content: content.clone(), reveal: true});
+            self.popup = Popup::None;
+            self.status_msg = None;
+        }
+    }
+
+    fn toggle_copy_mode(&mut self) {
+        if self.copy_selection.take().is_none() {
+            if self.transcript.is_empty() { self.flash("Nothing saved to copy yet"); }
+            else { self.select_copy_message(self.transcript.len() - 1); }
+        }
+    }
+
+    fn request_copy(&mut self) {
+        let Some(selection) = &self.copy_selection else { return; };
+        if selection.content.len() > MAX_CLIPBOARD_BYTES {
+            self.flash("Copy refused: message exceeds 100,000 bytes; use F2 native selection");
+        } else {
+            // No shell, provider, gateway or clipboard read. Only an explicit
+            // copy key queues this request; receipt by the terminal is unknown.
+            self.pending_clipboard = Some(selection.content.clone());
+        }
+    }
+
+    fn flush_clipboard(&mut self, writer: &mut impl io::Write) {
+        if let Some(text) = self.pending_clipboard.take() {
+            match write_clipboard(writer, &text) {
+                Ok(()) => self.flash("Copy requested (OSC 52); if blocked, use F2 native selection"),
+                Err(_) => self.flash("Clipboard write failed; use F2 native selection"),
+            }
+        }
+    }
+
+    fn sync_mouse_capture(&self, writer: &mut impl io::Write, captured: &mut bool) -> io::Result<()> {
+        if *captured != self.mouse_capture {
+            if self.mouse_capture { execute!(writer, EnableMouseCapture)?; }
+            else { execute!(writer, DisableMouseCapture)?; }
+            *captured = self.mouse_capture;
+        }
+        Ok(())
+    }
+
     pub fn update_viewport(&mut self, rows: usize, width: u16, height: u16) {
-        let (old_rows, old_width, _) = self.viewport;
+        let (old_rows, old_width, old_height) = self.viewport;
+        if (width, height) != (old_width, old_height) {
+            if let Some(selection) = &mut self.copy_selection { selection.reveal = true; }
+        }
         if !self.at_bottom && width == old_width {
             // Hold the reader's position while streamed content grows/shrinks.
             self.scroll_offset = if rows >= old_rows {
@@ -264,6 +340,8 @@ impl App {
     /// Drop transient state when switching session.
     pub fn reset_view(&mut self) {
         self.transcript.clear();
+        self.copy_selection = None;
+        self.pending_clipboard = None;
         self.live = Default::default();
         self.seen_keys.clear();
         self.pending_echoes.clear();
@@ -437,6 +515,8 @@ impl App {
                     self.flash(format!("clear failed: {e}"));
                 } else {
                     self.transcript.clear();
+                    self.copy_selection = None;
+                    self.pending_clipboard = None;
                     self.seen_keys.clear();
                     self.pending_echoes.clear();
                     self.stream_history.clear();
@@ -561,6 +641,8 @@ impl App {
             "/delete" => {
                 self.delete_active_session().await;
             }
+            "/mouse" => self.toggle_mouse_capture(),
+            "/copy" => self.toggle_copy_mode(),
             "/help" => {
                 let body = SLASH_COMMANDS
                     .iter()
@@ -570,7 +652,7 @@ impl App {
                 self.transcript.push(Bubble::Banner {
                     kind: BannerKind::Info,
                     content: format!(
-                        "Commands:\n{body}\n\nAttach files with @path. Use Tab/Enter to autocomplete.\n\
+                        "Keys: F2 mouse ON/OFF (native selection when OFF); F3 message copy mode.\nCopy: Up/Down/Home/End select; Ctrl+C or y requests terminal clipboard (OSC 52).\nEsc/F3 leaves copy mode; Ctrl+Q always quits; Ctrl+C quits outside copy mode.\nPgUp/PgDn scroll with or without mouse capture.\nPaste: use your terminal paste shortcut; multiline/Unicode stays in the draft.\nIf OSC 52 is unsupported/blocked, use F2 then native selection/copy.\n\nCommands:\n{body}\n\nAttach files with @path. Use Tab/Enter to autocomplete.\n\
                          /context examples:\n  \
                             /context set custom_data.device=main settings.max_llm_turns=20\n  \
                             /context set settings.voice_tts_enabled=true\n  \
@@ -1016,6 +1098,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
     app: &mut App,
 ) -> anyhow::Result<()> {
     let mut events = EventStream::new();
+    let mut mouse_captured = true; // enabled during terminal setup
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut status_clear = tokio::time::interval(Duration::from_millis(500));
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1024);
@@ -1045,6 +1128,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
             }
             stream_task = Some(super::streaming::subscribe(app.gateway_url.clone(), app.gateway_api_key.clone(), stream_user.clone(), stream_tx.clone()));
         }
+        app.sync_mouse_capture(&mut io::stdout(), &mut mouse_captured)?;
+        app.flush_clipboard(&mut io::stdout());
         terminal.draw(|f| ui::draw(f, app))?;
         if app.should_quit {
             if let Some(task) = stream_task.take() { task.abort(); }
@@ -1084,12 +1169,15 @@ async fn run_loop<B: ratatui::backend::Backend>(
 
 async fn handle_event(ev: Event, app: &mut App) {
     match ev {
+        Event::Paste(_) if app.copy_selection.is_some() => {
+            app.flash("Esc leaves copy mode before pasting into the draft");
+        }
         Event::Paste(text) => {
             insert_str(app, &text.replace("\r\n", "\n").replace('\r', "\n"));
             app.update_popup();
         }
         Event::Key(k) if k.kind == KeyEventKind::Press => handle_key(app, k.code, k.modifiers).await,
-        Event::Mouse(me) => {
+        Event::Mouse(me) if app.mouse_capture => {
             match me.kind {
                 MouseEventKind::ScrollUp => {
                     app.scroll_up(3);
@@ -1106,6 +1194,32 @@ async fn handle_event(ev: Event, app: &mut App) {
 
 async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     // Global keybinds first.
+    if code == KeyCode::F(2) {
+        app.toggle_mouse_capture();
+        return;
+    }
+    if code == KeyCode::F(3) { app.toggle_copy_mode(); return; }
+    if code == KeyCode::Char('q') && mods == KeyModifiers::CONTROL {
+        app.should_quit = true;
+        app.pending_clipboard = None;
+        return;
+    }
+    if let Some(selection) = &app.copy_selection {
+        let index = selection.index;
+        match code {
+            KeyCode::Esc => { app.copy_selection = None; app.status_msg = None; }
+            KeyCode::Char('c') if mods == KeyModifiers::CONTROL => app.request_copy(),
+            KeyCode::Char('y') if mods.is_empty() => app.request_copy(),
+            KeyCode::Up => app.select_copy_message(index.saturating_sub(1)),
+            KeyCode::Down => app.select_copy_message((index + 1).min(app.transcript.len().saturating_sub(1))),
+            KeyCode::Home => app.select_copy_message(0),
+            KeyCode::End => app.select_copy_message(app.transcript.len().saturating_sub(1)),
+            KeyCode::PageUp => app.scroll_up(5),
+            KeyCode::PageDown => app.scroll_down(5),
+            _ => {} // copy mode never edits/submits the draft or runs commands
+        }
+        return;
+    }
     match (code, mods) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
             app.should_quit = true;
@@ -1196,6 +1310,19 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Esc => app.popup = Popup::None,
         _ => {}
     }
+}
+
+/// OSC 52 writes to the terminal's clipboard, including over SSH. Base64 keeps
+/// untrusted message bytes out of the terminal control channel. Do not query the
+/// clipboard, invoke external commands, bypass tmux, or claim OS acceptance.
+fn write_clipboard(writer: &mut impl io::Write, text: &str) -> io::Result<()> {
+    use base64::Engine;
+    if text.len() > MAX_CLIPBOARD_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "clipboard payload too large"));
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    write!(writer, "\x1b]52;c;{encoded}\x07")?;
+    writer.flush()
 }
 
 fn bump_popup_selection(app: &mut App, delta: i32) {
@@ -1314,6 +1441,186 @@ fn replace_at_token(app: &mut App, prefix: &str, replacement: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn selection_mouse_toggle_reports_native_selection_and_keeps_navigation() {
+        let mut app = dummy_app();
+        app.update_viewport(100, 60, 10);
+        handle_key(&mut app, KeyCode::F(2), KeyModifiers::NONE).await;
+        assert!(app.status_msg.as_ref().is_some_and(|(s, _)| s.contains("Mouse: OFF")),
+            "F2 must release mouse capture for native selection");
+        handle_key(&mut app, KeyCode::PageUp, KeyModifiers::NONE).await;
+        assert_eq!(app.scroll_offset, 5);
+        handle_key(&mut app, KeyCode::F(2), KeyModifiers::NONE).await;
+        assert!(app.status_msg.as_ref().is_some_and(|(s, _)| s.contains("Mouse: ON")));
+    }
+
+    #[tokio::test]
+    async fn selection_mouse_reporting_bytes_and_wheel_follow_the_toggle() {
+        use crossterm::event::MouseEvent;
+        let mut app = dummy_app();
+        app.update_viewport(100, 60, 10);
+        let mut bytes = Vec::new();
+        let mut captured = true;
+        let wheel = Event::Mouse(MouseEvent {kind: MouseEventKind::ScrollUp,
+            column: 2, row: 3, modifiers: KeyModifiers::NONE});
+        handle_event(wheel.clone(), &mut app).await;
+        assert_eq!(app.scroll_offset, 3);
+        handle_key(&mut app, KeyCode::F(2), KeyModifiers::NONE).await;
+        app.sync_mouse_capture(&mut bytes, &mut captured).unwrap();
+        let mut expected = Vec::new();
+        execute!(&mut expected, DisableMouseCapture).unwrap();
+        assert_eq!(bytes, expected);
+        assert!(!captured);
+        handle_event(wheel.clone(), &mut app).await;
+        assert_eq!(app.scroll_offset, 3, "ignore queued wheel events after releasing capture");
+        app.sync_mouse_capture(&mut bytes, &mut captured).unwrap();
+        assert_eq!(bytes, expected, "do not emit mode changes on every redraw");
+        handle_key(&mut app, KeyCode::F(2), KeyModifiers::NONE).await;
+        app.sync_mouse_capture(&mut bytes, &mut captured).unwrap();
+        execute!(&mut expected, EnableMouseCapture).unwrap();
+        assert_eq!(bytes, expected);
+        handle_event(wheel, &mut app).await;
+        assert_eq!(app.scroll_offset, 6);
+    }
+
+    #[tokio::test]
+    async fn selection_copy_does_not_quit_or_submit_the_draft() {
+        for remote in [false, true] {
+            let mut app = dummy_app();
+            if remote { app.remote = Some(super::super::remote::Remote::new("http://127.0.0.1:0".into(), "synthetic".into()).unwrap()); }
+            app.transcript.push(Bubble::Assistant { content: "line one\n  世界 👩‍💻".into() });
+            app.input = "unsent draft".into();
+            app.cursor = app.input.chars().count();
+            handle_key(&mut app, KeyCode::F(3), KeyModifiers::NONE).await;
+            handle_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL).await;
+            assert!(!app.should_quit, "Ctrl+C in copy mode must copy, not exit");
+            assert_eq!(app.input, "unsent draft");
+            assert_eq!(app.transcript.len(), 1);
+            assert!(!app.agent_active);
+        }
+    }
+
+    #[tokio::test]
+    async fn selection_baseline_paste_preserves_unicode_and_does_not_send() {
+        let mut app = dummy_app();
+        handle_event(Event::Paste("/quit\r\n  世界 👩‍💻\r\n\n".into()), &mut app).await;
+        assert_eq!(app.input, "/quit\n  世界 👩‍💻\n\n");
+        assert_eq!(app.cursor, app.input.chars().count());
+        assert!(app.transcript.is_empty());
+        assert!(!app.should_quit);
+    }
+
+    #[tokio::test]
+    async fn selection_clipboard_is_explicit_exact_and_local_in_both_connection_modes() {
+        use base64::Engine;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
+        let server = MockServer::start().await;
+        Mock::given(any()).respond_with(ResponseTemplate::new(500)).expect(0).mount(&server).await;
+        let content = "  世界 e\u{301} 👩‍💻\n\n\tprintf 'literal \\n'\n\x1b]52;c;evil\x07";
+        for remote in [false, true] {
+            let mut app = dummy_app();
+            app.gateway_url = server.uri();
+            if remote { app.remote = Some(super::super::remote::Remote::new(server.uri(), "synthetic".into()).unwrap()); }
+            app.transcript.push(Bubble::Assistant {content: content.into()});
+            app.input = "draft".into(); app.cursor = 2;
+            app.attachments.push("not-uploaded".into());
+            handle_key(&mut app, KeyCode::F(3), KeyModifiers::NONE).await;
+            let mut bytes = Vec::new();
+            app.flush_clipboard(&mut bytes);
+            assert!(bytes.is_empty(), "entering selection must not change the clipboard");
+            handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+            handle_event(Event::Paste("/quit\nnot sent".into()), &mut app).await;
+            assert!(app.pending_clipboard.is_none());
+            assert_eq!(app.input, "draft"); assert_eq!(app.cursor, 2);
+            assert_eq!(app.attachments, ["not-uploaded"]);
+            // An unrelated live update must not change the selected snapshot.
+            app.stream_event("char", "unselected streaming text");
+            assert_eq!(app.live.text, "unselected streaming text");
+            handle_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL).await;
+            assert_eq!(app.pending_clipboard.as_deref(), Some(content));
+            app.flush_clipboard(&mut bytes);
+            let expected = format!("\x1b]52;c;{}\x07", base64::engine::general_purpose::STANDARD.encode(content));
+            assert_eq!(bytes, expected.as_bytes());
+            assert_eq!(bytes.iter().filter(|&&b| b == 0x1b).count(), 1);
+            app.flush_clipboard(&mut bytes);
+            assert_eq!(bytes, expected.as_bytes(), "write only once per explicit request");
+            assert!(!app.should_quit); assert!(!app.agent_active);
+            handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+            handle_event(Event::Paste("\r\n世界".into()), &mut app).await;
+            assert_eq!(app.input, "dr\n世界aft");
+            assert_eq!(app.cursor, 5);
+            handle_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL).await;
+            assert!(app.should_quit, "original Ctrl+C quit stays intact outside selection");
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn selection_navigation_bounds_snapshot_reset_and_intentional_quit() {
+        let mut app = dummy_app();
+        handle_key(&mut app, KeyCode::F(3), KeyModifiers::NONE).await;
+        assert!(app.copy_selection.is_none());
+        app.transcript = vec![Bubble::User {content: "one".into()},
+            Bubble::Tool {name: "tool".into(), content: "two".into()},
+            Bubble::Assistant {content: "three".into()}];
+        app.run_slash("/copy").await;
+        assert_eq!(app.copy_selection.as_ref().unwrap().index, 2);
+        for (key, expected) in [(KeyCode::Down, 2), (KeyCode::Up, 1), (KeyCode::Home, 0),
+            (KeyCode::Up, 0), (KeyCode::End, 2)] {
+            handle_key(&mut app, key, KeyModifiers::NONE).await;
+            assert_eq!(app.copy_selection.as_ref().unwrap().index, expected);
+        }
+        app.transcript[2] = Bubble::Assistant {content: "changed".into()};
+        app.transcript.push(Bubble::Assistant {content: "new".into()});
+        handle_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).await;
+        assert_eq!(app.pending_clipboard.as_deref(), Some("three"));
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL).await;
+        assert!(app.should_quit); assert!(app.pending_clipboard.is_none());
+        app.should_quit = false;
+        app.request_copy();
+        app.reset_view();
+        assert!(app.copy_selection.is_none()); assert!(app.pending_clipboard.is_none());
+    }
+
+    #[test]
+    fn selection_clipboard_limits_and_write_failures_do_not_claim_success() {
+        struct Broken;
+        impl io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> { Err(io::ErrorKind::BrokenPipe.into()) }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+        let mut app = dummy_app();
+        app.transcript.push(Bubble::Assistant {content: "世".repeat(MAX_CLIPBOARD_BYTES / 3 + 1)});
+        app.select_copy_message(0);
+        app.request_copy();
+        assert!(app.pending_clipboard.is_none());
+        assert!(app.status_msg.as_ref().unwrap().0.contains("refused"));
+        let mut bytes = Vec::new();
+        assert!(write_clipboard(&mut bytes, &"a".repeat(MAX_CLIPBOARD_BYTES + 1)).is_err());
+        assert!(bytes.is_empty());
+        assert!(write_clipboard(&mut bytes, &"a".repeat(MAX_CLIPBOARD_BYTES)).is_ok());
+        app.pending_clipboard = Some("test".into());
+        app.flush_clipboard(&mut Broken);
+        assert!(app.pending_clipboard.is_none());
+        assert!(app.status_msg.as_ref().unwrap().0.contains("failed"));
+        app.mouse_capture = false;
+        let mut captured = true;
+        assert!(app.sync_mouse_capture(&mut Broken, &mut captured).is_err());
+        assert!(captured, "failed mode write must not update tracked terminal state");
+    }
+
+    #[tokio::test]
+    async fn selection_help_and_slash_mouse_are_discoverable() {
+        let mut app = dummy_app();
+        app.run_slash("/mouse").await;
+        assert!(!app.mouse_capture);
+        app.run_slash("/help").await;
+        let Bubble::Banner {content, ..} = app.transcript.last().unwrap() else { panic!() };
+        for hint in ["F2", "F3", "OSC 52", "Ctrl+Q", "PgUp", "Paste:", "/copy", "/mouse"] {
+            assert!(content.contains(hint), "missing help: {hint}");
+        }
+    }
 
     #[test]
     fn split_at_attachments_basic() {

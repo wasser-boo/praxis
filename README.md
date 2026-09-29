@@ -49,6 +49,10 @@ With an updated binary, repair an older installation without reconfiguring or re
 
 This restores missing workflows, templates/includes, skills and icons. Existing prompts/settings/data remain unchanged; replaced dashboard files are backed up. Use the working directory of `praxis run`, then refresh the browser. Do not rerun interactive onboarding just for this. See [installation repair](docs/POML_WORKFLOWS.md#repair-an-incomplete-onboarding-installation).
 
+### TUI selection, copy and paste
+
+In `praxis chat`, **F2** toggles mouse capture for native terminal selection; **F3** enters whole-message copy mode. Use **Up/Down** to select, **Ctrl+C** or **y** to request clipboard copy, and **Esc** to return to your unchanged draft. **Ctrl+Q** always quits; Ctrl+C quits outside copy mode. PageUp/PageDown work in either mouse mode. Paste with your terminal's paste shortcut; multiline Unicode remains in the draft until sent. Clipboard requests use OSC 52 where supported, with native selection as the fallback. See [bindings, safety and terminal limitations](docs/TUI_SELECTION_COPY.md), or `/help` inside the TUI.
+
 ### Provider login from the TUI
 
 Start the chat TUI (`praxis chat`, or `praxis chat --gateway-url https://host:3537 --gateway-key …` for a remote gateway) and use `/login`. Login always runs on the **gateway machine** — the process that talks to the model — so a remote TUI logs the remote backend in. The router is rebuilt in place; no restart.
