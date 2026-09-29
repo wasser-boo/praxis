@@ -118,6 +118,11 @@ unchanged baseline assets. Its fixture serves `/api/tools`, whereas `loadTools`
 requests `/api/tools/all`. Tracked separately as upstream/fork #7; not treated as
 an application regression or silently counted as a passing test.
 
+Follow-up fix: change only the fixture's GET route to `/api/tools/all`. Rerunning
+`node scripts/test_ui_browser.js` then passed all six configured viewport/theme
+cases (360×640 dark/light, 390×820 dark/light, 768×900 dark, 1280×800 dark).
+This one-line fixture correction is committed separately from the history fix.
+
 ## Remaining limits
 
 - Cold history insertion still does per-row ordering/layout work; not optimized
