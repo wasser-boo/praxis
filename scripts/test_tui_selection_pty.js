@@ -14,7 +14,11 @@ const {spawn} = require('node:child_process');
 const {DatabaseSync} = require('node:sqlite');
 const binary = path.resolve(process.argv[2] || 'target/debug/praxis');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'praxis-selection-pty-'));
-const text = "  PTY-FIRST 世界 e\u0301 👩‍💻\n\n\tprintf 'literal \\n'\nPTY-LAST";
+const prose = "  PTY-FIRST 世界 e\u0301 👩‍💻\n\n\tprintf 'literal \\n'\nPTY-LAST";
+// Run the identical real PTY regression with a structured receipt as well.
+const toolResult = process.env.PRAXIS_PTY_TOOL_RESULT === '1';
+const text = toolResult ? JSON.stringify({stdout:prose,stderr:'warning\nlast',exit_code:3}) : prose;
+const role = toolResult ? 'tool' : 'assistant';
 const requests = [];
 const server = http.createServer((req, res) => {
     requests.push([req.method, req.url]);
@@ -29,7 +33,7 @@ const server = http.createServer((req, res) => {
     if (req.url === '/v1/sessions') {
         res.end(JSON.stringify({sessions: [{id: 'synthetic', name: 'Synthetic', username: 'tester'}]}));
     } else if (req.url === '/v1/messages/synthetic') {
-        res.end(JSON.stringify({messages: [{id: 1, role: 'assistant', content: text}]}));
+        res.end(JSON.stringify({messages: [{id: 1, role, content: text}]}));
     } else { res.writeHead(404).end('{}'); }
 });
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -110,7 +114,7 @@ async function run(mode, prepare) {
             fs.copyFileSync(path.join(root, 'init/praxis.db'), path.join(data, 'praxis.db'));
             const db = new DatabaseSync(path.join(data, 'praxis.db'));
             db.prepare('INSERT INTO contexts (user_id, data) VALUES (?, ?)').run('tui_default', '{}');
-            db.prepare('INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)').run('tui_default', 'assistant', text);
+            db.prepare('INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)').run('tui_default', role, text);
             db.close();
         });
         await run('remote');
@@ -118,6 +122,7 @@ async function run(mode, prepare) {
         assert(requests.every(([method]) => method === 'GET'), `No chat/command submission allowed: ${JSON.stringify(requests)}`);
         const db = new DatabaseSync(path.join(root, 'local/praxis.db'));
         assert.equal(db.prepare('SELECT COUNT(*) AS n FROM messages').get().n, 1);
+        assert.equal(db.prepare('SELECT content FROM messages').get().content, text, 'formatting/copy must not rewrite stored history');
         db.close();
         console.log('PASS: no draft sent, no gateway mutation, no real clipboard or live service touched');
     } finally {

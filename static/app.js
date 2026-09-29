@@ -1139,6 +1139,7 @@ function startChatStream() {
             const dur = inner.duration_ms != null ? ` (${inner.duration_ms} ms)` : '';
             const result = inner.result || '';
             const div = addChatMessage('tool', `✅ ${escapeHtml(tool)}${escapeHtml(dur)}`, String(result));
+            chatSetToolResult(div, String(result), true);
             if (inner.call_id != null) div.dataset.toolResultCallId = String(inner.call_id);
         } catch (err) { console.error('[SSE tool_result error]', err); }
     });
@@ -1397,6 +1398,63 @@ function chatRenderTerminalCall(callId, tool, command, messageId = null, termina
     return div;
 }
 
+// Presentation only: decode one known result object, never command arguments
+// or nested stdout strings. Unknown/truncated payloads remain verbatim.
+function chatFormatToolResult(raw) {
+    let value;
+    try { value = JSON.parse(raw); } catch (_) { return null; }
+    if (!value || Array.isArray(value) || typeof value !== 'object') return null;
+    const has = key => Object.prototype.hasOwnProperty.call(value, key);
+    if (!has('stdout') && !has('stderr')) return null;
+    if (['stdout', 'stderr'].some(key => has(key) && typeof value[key] !== 'string')) return null;
+    const sections = [];
+    for (const key of ['stdout', 'stderr']) if (has(key)) sections.push(key + ':\n' + value[key]);
+    if (has('exit_code')) sections.push('exit_code: ' + JSON.stringify(value.exit_code));
+    const metadata = Object.fromEntries(Object.entries(value).filter(([key]) => !['stdout','stderr','exit_code'].includes(key)));
+    if (Object.keys(metadata).length) sections.push('metadata:\n' + JSON.stringify(metadata, null, 2));
+    return sections.join('\n\n');
+}
+
+function chatSetToolResult(div, raw, preview = false) {
+    // Preserve DOM/text nodes, selection, raw-view state and scroll on polls.
+    if (div.toolResultRaw === raw && div.toolResultPreview === preview) return;
+    div.toolResultRaw = raw;
+    div.toolResultPreview = preview;
+    div.toolResultDisplay = chatFormatToolResult(raw);
+    let output = div.querySelector('.tool-out');
+    if (!output) {
+        output = document.createElement('pre'); output.className = 'tool-out';
+        div.querySelector('.msg-content').append(output);
+    }
+    if (!div.toolResultControls) {
+        const controls = document.createElement('div'); controls.className = 'tool-result-controls';
+        const toggle = document.createElement('button');
+        toggle.type = 'button'; toggle.className = 'btn btn-secondary tool-result-raw';
+        toggle.onclick = () => { div.toolResultShowRaw = !div.toolResultShowRaw; update(); };
+        const copy = document.createElement('button');
+        copy.type = 'button'; copy.className = 'btn btn-secondary tool-result-copy';
+        copy.onclick = async () => {
+            try { await navigator.clipboard.writeText(div.toolResultRaw); copy.textContent = 'Kopiert'; }
+            catch (_) { copy.textContent = 'Bitte manuell kopieren'; }
+        };
+        const note = document.createElement('span'); note.className = 'tool-result-note';
+        controls.append(toggle, copy, note); output.before(controls);
+        div.toolResultControls = {toggle, copy, note};
+    }
+    function update() {
+        const {toggle, copy, note} = div.toolResultControls;
+        const formatted = div.toolResultDisplay !== null;
+        toggle.hidden = !formatted;
+        toggle.textContent = div.toolResultShowRaw ? 'Formatiert anzeigen' : 'Rohdaten anzeigen';
+        toggle.setAttribute('aria-pressed', String(!!div.toolResultShowRaw));
+        copy.textContent = div.toolResultPreview ? 'Vorschau kopieren' : 'Rohdaten kopieren';
+        note.textContent = div.toolResultPreview ? 'Live-Vorschau; gespeicherter Verlauf folgt.' : '';
+        const text = div.toolResultShowRaw || !formatted ? div.toolResultRaw : div.toolResultDisplay;
+        if (output.textContent !== text) output.textContent = text;
+    }
+    update();
+}
+
 function renderChatMessage(m, autoplayAudio = false, savedMessages = null, terminalCalls = null) {
     if (!m) return null;
     let div = savedMessages ? savedMessages.get(String(m.id)) : chatSavedMessage(m.id);
@@ -1459,13 +1517,12 @@ function renderChatMessage(m, autoplayAudio = false, savedMessages = null, termi
             .find(el => !el.dataset.messageId && el.chatText === m.content);
         if (!div) div = addChatMessage('user', m.content);
     }
-    if (m.role === 'tool' && m.content) {
+    if (m.role === 'tool' && typeof m.content === 'string') {
         const toolName = m.tool_name || 'tool';
         if (!div && m.tool_call_id != null) div = [...document.querySelectorAll('#chat-messages .chat-msg.tool')]
             .find(el => !el.dataset.messageId && el.dataset.toolResultCallId === String(m.tool_call_id));
         if (!div) div = addChatMessage('tool', `<span class="tool-name">${escapeHtml(toolName)}</span>`, m.content);
-        const output = div.querySelector('.tool-out');
-        if (output && output.textContent !== m.content) output.textContent = m.content;
+        chatSetToolResult(div, m.content);
     }
     if (m.role === 'system' && m.content && !div) div = addChatMessage('system', m.content);
     chatBindSavedMessage(div, m.id);

@@ -235,9 +235,12 @@ fn draw_transcript(f: &mut Frame, app: &mut App, area: Rect) {
             let mut snapshot;
             let rendered = if let Some(selection) = selected {
                 snapshot = (*b).clone();
+                if let Bubble::ToolResult {name, ..} = &snapshot {
+                    snapshot = Bubble::Tool {name: format!("{name} — raw"), content: selection.content.clone()};
+                }
                 match &mut snapshot {
                     Bubble::User {content} | Bubble::Assistant {content} | Bubble::Thinking {content}
-                    | Bubble::Tool {content, ..} | Bubble::System {content} | Bubble::Banner {content, ..} => {
+                    | Bubble::Tool {content, ..} | Bubble::ToolResult {content, ..} | Bubble::System {content} | Bubble::Banner {content, ..} => {
                         *content = selection.content.clone();
                     }
                 }
@@ -303,6 +306,10 @@ fn render_bubble(b: &Bubble, max_width: usize, username: &str) -> Vec<Line<'stat
             ACCENT_GREEN,
             BG_BUBBLE_TOOL,
             max_width,
+        ),
+        Bubble::ToolResult { name, display, .. } => bubble_block(
+            &format!("⚙ {name} — F3 raw/copy"), display, BubbleAlign::Left,
+            ACCENT_GREEN, BG_BUBBLE_TOOL, max_width,
         ),
         Bubble::System { content } => banner_line(content, ACCENT_GREEN, "·", max_width),
         Bubble::Banner { kind, content } => {
@@ -1182,4 +1189,40 @@ mod tests {
             assert!(buffer_contains_cursor(&terminal));
         }
     }
+    #[test]
+    fn structured_results_history_renders_decoded_lines_without_mutating_raw() {
+        let (mut app, _dir) = dummy_app();
+        app.show_sidebar = false;
+        let raw = serde_json::json!({"stdout":"FIRST\nSECOND 世界","stderr":"warning\nlast","exit_code":3}).to_string();
+        let history = serde_json::json!([{"id":41,"role":"tool","tool_name":"execute_terminal",
+            "tool_call_id":"result","content":raw}]).to_string();
+        app.stream_event("history", &history);
+        app.stream_event("history", &history);
+        assert_eq!(app.transcript.len(), 1);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let rows = screen_rows(&terminal);
+        let first = rows.iter().position(|r| r.contains("FIRST")).unwrap();
+        let second = rows.iter().position(|r| r.contains("SECOND")).unwrap();
+        assert_ne!(first, second, "decoded stdout newlines must be separate rows: {rows:?}");
+        assert!(!rows.iter().any(|r| r.contains(r#"\n"#)), "raw JSON escapes leaked into presentation");
+        app.copy_selection = Some(crate::tui::app::CopySelection {index:0,content:raw.clone(),reveal:true});
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen_rows(&terminal).iter().any(|r| r.contains(r#"\n"#)), "copy mode must show the exact raw snapshot");
+    }
+
+    #[test]
+    fn structured_results_commands_and_live_arguments_are_not_decoded() {
+        let command = r#"{"stdout":"FIRST\nSECOND"}"#;
+        for name in ["execute_terminal — command", "execute_terminal — generating, not executed"] {
+            let lines = render_bubble(&Bubble::Tool {name:name.into(),content:command.into()},120,"user");
+            assert!(lines.iter().any(|line|line.to_string().contains(command)));
+        }
+        for width in 1..80 {
+            let bubble = Bubble::ToolResult {name:"execute_terminal".into(),content:command.into(),
+                display:"stdout:\nFIRST\n世界 👩‍💻\n  LAST".into()};
+            assert_lines_fit(&render_bubble(&bubble,width,"user"),width);
+        }
+    }
+
 }

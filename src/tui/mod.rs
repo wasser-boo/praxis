@@ -29,5 +29,6 @@ mod streaming;
 mod remote;
 mod sessions;
 mod ui;
+mod tool_result;
 
 pub use app::run as run_chat;
