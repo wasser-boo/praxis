@@ -71,7 +71,7 @@ function makeServer() {
     if (url.pathname === '/api/contexts/default') return json(res, { context: { user_id: 'default', username: 'Browser Tester', sm_file: 'standard.sm', settings: { agent_name: 'Praxis' } } });
     if (url.pathname === '/api/pairings') return json(res, { pairings: [] });
     if (url.pathname === '/api/pairings/pending') return json(res, { pending_pairings: [] });
-    if (url.pathname === '/api/tools' && req.method === 'GET') return json(res, { tools });
+    if (url.pathname === '/api/tools/all' && req.method === 'GET') return json(res, { tools });
     if (url.pathname.startsWith('/api/tools/') && req.method === 'PUT') {
       let body = '';
       req.on('data', c => body += c);

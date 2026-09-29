@@ -186,6 +186,88 @@ function releaseHistory() { const d = delayed; delayed = null; json(d.res, d.dat
             });
             assert.equal(await page.locator('.chat-msg.assistant').count(), 0);
         });
+        await check('history-refresh-linear', [], async page => {
+            // Seed already-rendered rows: measure an unchanged poll, not cold
+            // layout/avatar loading. Exercise the actual HTTP/render pipeline.
+            for (const mixed of [false, true]) for (const n of [100, 500, 1000]) {
+                messages.default = Array.from({ length: n }, (_, i) => ({
+                    id: i + 1, role: mixed && i % 2 ? 'assistant' : 'user',
+                    content: `unchanged ${i}`,
+                }));
+                await page.evaluate(rows => {
+                    const container = document.getElementById('chat-messages');
+                    container.replaceChildren();
+                    for (const m of rows) {
+                        const div = document.createElement('div');
+                        div.className = `chat-msg ${m.role}`;
+                        div.dataset.messageId = String(m.id);
+                        div.chatText = m.content;
+                        div.innerHTML = '<div class="msg-content"></div>';
+                        div.firstChild.textContent = m.content;
+                        container.appendChild(div);
+                    }
+                }, messages.default);
+                const result = await page.evaluate(async () => {
+                    let calls = 0, references = 0;
+                    const restores = [];
+                    for (const proto of [Document.prototype, Element.prototype]) {
+                        const original = proto.querySelectorAll;
+                        proto.querySelectorAll = function (...args) {
+                            const nodes = original.apply(this, args);
+                            calls++; references += nodes.length;
+                            return nodes;
+                        };
+                        restores.push(() => { proto.querySelectorAll = original; });
+                    }
+                    const start = performance.now();
+                    try { await pollChatMessages(false); }
+                    finally { restores.forEach(restore => restore()); }
+                    return { calls, references, ms: +(performance.now() - start).toFixed(2) };
+                });
+                console.log('history-refresh metrics', { mixed, n, ...result });
+                assert(result.references <= 4 * n,
+                    `unchanged ${mixed ? 'mixed' : 'user'} history must avoid quadratic DOM scans: ${JSON.stringify(result)}`);
+                assert.equal(await page.locator('#chat-messages .chat-msg').count(), n);
+                assert.equal(await row(page, n).textContent(), `unchanged ${n - 1}`);
+            }
+            // Tool-heavy conversations also replay saved command cards.
+            messages.default = Array.from({ length: 100 }, (_, i) => assistant(2000 + i, '', [{
+                id: `terminal-${i}`, name: 'execute_terminal',
+                arguments: JSON.stringify({ command: `printf 'fixture-${i}'` }),
+            }]));
+            await page.evaluate(() => loadChatHistory());
+            const terminalResult = await page.evaluate(async () => {
+                let references = 0;
+                const restores = [];
+                for (const proto of [Document.prototype, Element.prototype]) {
+                    const original = proto.querySelectorAll;
+                    proto.querySelectorAll = function (...args) {
+                        const nodes = original.apply(this, args);
+                        references += nodes.length;
+                        return nodes;
+                    };
+                    restores.push(() => { proto.querySelectorAll = original; });
+                }
+                try { await pollChatMessages(false); }
+                finally { restores.forEach(restore => restore()); }
+                return { references };
+            });
+            console.log('terminal-refresh metrics', terminalResult);
+            assert(terminalResult.references <= 400,
+                `unchanged terminal history must avoid quadratic scans: ${JSON.stringify(terminalResult)}`);
+            assert.equal(await page.locator('.chat-terminal-call').count(), 100);
+            // The per-refresh index must learn rows created during that batch,
+            // while repeated text with distinct DB IDs remains distinct.
+            messages.default = [assistant(1001, 'same'), assistant(1001, 'same'), assistant(1002, 'same')];
+            await page.evaluate(() => loadChatHistory());
+            assert.equal(await row(page, 1001).count(), 1);
+            assert.equal(await row(page, 1002).count(), 1);
+            // No retained index may resurrect a detached row after clear/reload.
+            await page.evaluate(() => document.getElementById('chat-messages').replaceChildren());
+            await page.evaluate(() => pollChatMessages(false));
+            assert.equal(await row(page, 1001).count(), 1);
+            assert.equal(await row(page, 1002).count(), 1);
+        });
         assert.deepEqual(failures, [], 'history regressions');
         console.log('test_chat_history: ok; local fixtures only');
     } finally {
