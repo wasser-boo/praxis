@@ -94,15 +94,21 @@ pub fn payload_error(status: u16, data: &Value) -> ProviderError {
                 | "quota_exhausted"
         ) {
         ErrorKind::QuotaExhausted
-    } else if matches!(status, 401 | 403) {
+    } else if matches!(status, 401 | 403)
+        || matches!(code, "invalid_api_key" | "invalid_authentication" | "authentication_error" | "token_expired" | "permission_denied")
+    {
         ErrorKind::Authentication
     } else if status == 429 || matches!(code, "rate_limit_exceeded" | "rate_limit_error" | "usage_limit_reached") {
         ErrorKind::RateLimited
     } else if status == 408 {
         ErrorKind::Timeout
-    } else if matches!(status, 500 | 502 | 503 | 504 | 529) || code == "overloaded_error" {
+    } else if matches!(status, 500 | 502 | 503 | 504 | 529)
+        || matches!(code, "overloaded_error" | "server_error" | "internal_error")
+    {
         ErrorKind::Unavailable
-    } else if status >= 400 {
+    } else if status >= 400
+        || matches!(code, "invalid_request_error" | "model_not_found" | "unsupported_parameter" | "unsupported_value")
+    {
         ErrorKind::InvalidRequest
     } else {
         ErrorKind::InvalidResponse

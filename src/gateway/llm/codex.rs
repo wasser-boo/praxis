@@ -11,6 +11,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, Weak};
 
+#[path = "codex_stream.rs"]
+mod stream;
+
 pub const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 /// Public client id of the Codex CLI; the refresh grant needs no secret.
@@ -177,11 +180,12 @@ impl CodexProvider {
             return Ok(current);
         }
         if current.refresh_token.is_empty() {
-            return Err(super::error::ProviderError {
-                cause: Some("Codex login expired; run /login codex --device-auth"),
-                ..super::error::ProviderError::new(super::error::ErrorKind::Authentication)
-            }.into());
+            return Err(super::error::ProviderError::with_cause(
+                super::error::ErrorKind::Authentication,
+                "Codex login expired and no refresh token is stored; run /login codex --device-auth",
+            ).into());
         }
+        tracing::debug!(provider = "codex", "Refreshing OAuth access token");
         let response = self.client.post(&self.token_url)
             .json(&serde_json::json!({
                 "client_id": CODEX_CLIENT_ID,
@@ -191,14 +195,21 @@ impl CodexProvider {
             }))
             .send().await.map_err(super::error::ProviderError::from_reqwest)?;
         let data = super::http::json(response).await.map_err(|mut error| {
+            // OAuth's invalid_grant is often HTTP 400, not 401. It is a login
+            // failure, not an unsupported model/request parameter.
             if matches!(error.status, Some(400 | 401 | 403)) {
                 error.kind = super::error::ErrorKind::Authentication;
-                error.cause = Some("Codex refresh rejected; run /login codex --device-auth");
+                error.cause = Some("Codex token refresh was rejected; run /login codex --device-auth");
+            } else if error.cause.is_none() {
+                error.cause = Some("Codex token refresh failed");
             }
             error
         })?;
         let access_token = data["access_token"].as_str().filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Codex token refresh returned no access token; run /login codex again"))?;
+            .ok_or_else(|| super::error::ProviderError::with_cause(
+                super::error::ErrorKind::Authentication,
+                "Codex token refresh returned no access token; run /login codex --device-auth",
+            ))?;
         let mut next = CodexAuth {
             access_token: access_token.to_string(),
             refresh_token: data["refresh_token"].as_str().filter(|s| !s.is_empty()).unwrap_or(&current.refresh_token).to_string(),
@@ -308,7 +319,7 @@ impl CodexProvider {
             response = self.request(&auth, body).await?;
         }
         let response = super::http::checked(response).await?;
-        parse_sse(response, on_delta).await
+        stream::receive(response, on_delta).await
     }
 
     async fn request(&self, auth: &CodexAuth, body: &serde_json::Value) -> anyhow::Result<reqwest::Response> {
@@ -327,10 +338,6 @@ impl CodexProvider {
     }
 }
 
-#[path = "codex_stream.rs"]
-mod stream;
-use stream::parse_sse;
-
 #[async_trait]
 impl LLMProvider for CodexProvider {
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
@@ -347,6 +354,8 @@ impl LLMProvider for CodexProvider {
         self.send(&self.build_body(&request), on_delta).await
     }
 
+    // The subscription endpoint rejects max_output_tokens; its own budget
+    // cannot be raised by the router's max_tokens recovery.
     fn supports_output_limit(&self) -> bool { false }
     fn name(&self) -> &str { "codex" }
     fn as_any(&self) -> &dyn std::any::Any { self }
@@ -381,6 +390,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_refresh_is_a_login_error_not_an_invalid_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({"error":"invalid_grant","error_description":"SECRET"})))
+            .expect(1).mount(&server).await;
+        let provider = CodexProvider::with_urls(
+            CodexAuth { access_token: "synthetic".into(), refresh_token: "synthetic-refresh".into(), ..Default::default() },
+            DEFAULT_MODEL.into(), server.uri(), format!("{}/token", server.uri()), None,
+        );
+        let error = provider.refresh(&provider.auth()).await.unwrap_err();
+        let error = error.downcast_ref::<super::super::error::ProviderError>().unwrap();
+        assert_eq!(error.kind, super::super::error::ErrorKind::Authentication);
+        assert!(error.to_string().contains("/login codex"));
+        assert!(!format!("{error:?}").contains("SECRET"));
+    }
+
+    #[tokio::test]
     async fn refreshes_expired_token_and_parses_responses_stream() {
         let server = MockServer::start().await;
         let fresh = jwt(serde_json::json!({"exp": 4102444800i64, "https://api.openai.com/auth": {"chatgpt_account_id": "acct_9"}}));
@@ -394,7 +420,7 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\"}]},{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":7,\"total_tokens\":12}}}\n\n",
         );
         Mock::given(method("POST")).and(path("/responses")).and(header("chatgpt-account-id", "acct_9")).and(header("Authorization", format!("Bearer {fresh}")))
-            .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(sse))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
             .expect(1).mount(&server).await;
         let expired = jwt(serde_json::json!({"exp": 1i64}));
         let refreshed = std::sync::Arc::new(Mutex::new(None));

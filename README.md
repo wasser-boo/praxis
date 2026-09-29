@@ -128,6 +128,38 @@ LLM calls share bounded retries, provider/account concurrency limits, optional R
 
 See [LLM resilience and safe rollout](docs/LLM_RESILIENCE.md) for configuration, streaming safety, tests, and the Ollama working-directory repair.
 
+### TUI layout and troubleshooting
+
+The TUI preserves newlines, blank lines and indentation in messages (including
+pasted text), tool output and status/error banners. Use **Shift+Enter** for a
+newline, **PageUp/PageDown** or the mouse wheel to scroll. Streaming follows the
+bottom only while you are at the bottom; the last reply has space above the
+composer so its final line and border remain visible. Completion popups stay
+above the input box, including on small terminals. Finished reply bubbles remain
+visible while saved history catches up. A disconnected stream keeps its partial
+reply (marked interrupted) until the authoritative reply arrives, rather than
+making the message box disappear or appending potentially missing fragments.
+
+For provider diagnostics, enable debug logging on the **gateway** process:
+
+```bash
+RUST_LOG=warn,praxis::gateway::llm=debug praxis run
+RUST_LOG=warn,praxis::tui=debug praxis chat
+```
+
+Daily logs are written under `LOG_DIR` (default `./logs`):
+`praxis.log.YYYY-MM-DD` on the gateway and `praxis-tui.log.YYYY-MM-DD` for the
+TUI. TUI logs never go to its terminal. Provider diagnostics include attempt
+number, timing, response/event counts, failure category and safe request IDs,
+not raw response bodies, prompts, tokens or tool arguments. Include the specific
+error and request ID when reporting failures; do not share credentials.
+
+Codex errors distinguish malformed SSE/JSON, interrupted streams, incomplete
+responses, reasoning-only output, and invalid tool calls. An unfinished stream
+never executes its tool previews. Codex's subscription endpoint does not accept
+an increased `max_tokens` budget, so output-limit failures ask for a shorter
+response rather than replaying the same request repeatedly.
+
 ### GPU-Router-Integration (pgpu, Bauplan §12.4)
 
 Wenn Praxis seine LLM-/TTS-/STT-Backends über den pgpu-GPU-Router erreicht

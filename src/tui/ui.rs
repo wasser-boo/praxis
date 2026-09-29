@@ -1,14 +1,14 @@
-//! Rendering for the TUI chat. Pure functions: takes `&App`, paints a
-//! ratatui frame. No I/O or state mutation.
+//! Rendering for the TUI chat. Layout also reconciles the scroll viewport.
 
 use crate::tui::app::{App, BannerKind, Bubble, Popup, SLASH_COMMANDS};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph},
     Frame,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 // Palette — picked to harmonise with the web dashboard's purple/cyan accents.
 const ACCENT_PURPLE: Color = Color::Rgb(0x9a, 0x8c, 0xff);
@@ -23,7 +23,7 @@ const BG_BUBBLE_USER: Color = Color::Rgb(0x1a, 0x1f, 0x36);
 const BG_BUBBLE_BOT: Color = Color::Rgb(0x1d, 0x1a, 0x36);
 const BG_BUBBLE_TOOL: Color = Color::Rgb(0x12, 0x24, 0x2c);
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
     if size.width == 0 || size.height == 0 {
         return;
@@ -119,7 +119,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_main(f: &mut Frame, app: &App, area: Rect) {
+fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
     // Reserve the composer before allocating transcript space. An unsatisfiable
     // Min(5) transcript constraint used to squeeze the input down to its borders.
     let header_height = if area.height >= 12 { 3 } else { 0 };
@@ -200,12 +200,21 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(para, area);
 }
 
-fn draw_transcript(f: &mut Frame, app: &App, area: Rect) {
+fn draw_transcript(f: &mut Frame, app: &mut App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let bubble_max = inner_width.saturating_sub(2).max(1);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(0x33, 0x33, 0x55)))
+        .style(Style::default().bg(BG_PANEL))
+        // Keep the last line/bubble border clear of the composer, including
+        // while streaming. Tiny terminals still get all available text rows.
+        .padding(Padding::new(u16::from(area.width >= 6), u16::from(area.width >= 6), 0, u16::from(area.height >= 5)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.is_empty() { return; }
+    let bubble_max = inner.width as usize;
 
     // Build all lines, top-to-bottom.
     let mut lines: Vec<Line> = Vec::new();
@@ -213,14 +222,12 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) {
     let transcript: Vec<_> = app.transcript.iter().chain(live.iter()).collect();
     if transcript.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "No messages yet — type a message and press Enter.",
-            Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
-        )));
-        lines.push(Line::from(Span::styled(
-            "Try `/help` for commands or attach files with @path",
-            Style::default().fg(TEXT_DIM),
-        )));
+        for (text, style) in [
+            ("No messages yet — type a message and press Enter.", Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC)),
+            ("Try `/help` for commands or attach files with @path", Style::default().fg(TEXT_DIM)),
+        ] {
+            lines.extend(wrap_text(text, bubble_max).into_iter().map(|text| Line::from(Span::styled(text, style))));
+        }
     } else {
         for (idx, b) in transcript.iter().enumerate() {
             let bubble_lines = render_bubble(b, bubble_max, app.username());
@@ -233,23 +240,13 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Pin to bottom: take only the last `area.height` lines (minus scroll offset).
-    let total = lines.len() as u16;
-    let visible_height = area.height;
-    let max_offset = total.saturating_sub(visible_height);
-    let offset = app.scroll_offset.min(max_offset);
-    let from = max_offset.saturating_sub(offset) as usize;
-    let to = (from + visible_height as usize).min(lines.len());
-    let visible: Vec<Line> = lines[from..to].to_vec();
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(0x33, 0x33, 0x55)))
-        .style(Style::default().bg(BG_PANEL));
-    let para = Paragraph::new(visible)
-        .wrap(Wrap { trim: false })
-        .block(block);
-    f.render_widget(para, area);
+    // Count actual prewrapped rows, NOT the outer rectangle (borders/padding).
+    // usize prevents transcripts over 65,535 rows from wrapping back to zero.
+    app.update_viewport(lines.len(), inner.width, inner.height);
+    let from = lines.len().saturating_sub(inner.height as usize).saturating_sub(app.scroll_offset);
+    let visible: Vec<Line> = lines.into_iter().skip(from).take(inner.height as usize).collect();
+    // A second wrap here invalidates scrolling and can hide the tail of replies.
+    f.render_widget(Paragraph::new(visible), inner);
 }
 
 /// Render a single bubble into 1+ ratatui lines.
@@ -282,7 +279,7 @@ fn render_bubble(b: &Bubble, max_width: usize, username: &str) -> Vec<Line<'stat
             BG_BUBBLE_TOOL,
             max_width,
         ),
-        Bubble::System { content } => banner_line(content, ACCENT_GREEN, "·"),
+        Bubble::System { content } => banner_line(content, ACCENT_GREEN, "·", max_width),
         Bubble::Banner { kind, content } => {
             let (color, icon) = match kind {
                 BannerKind::AgentStart => (ACCENT_CYAN, "▶"),
@@ -290,7 +287,7 @@ fn render_bubble(b: &Bubble, max_width: usize, username: &str) -> Vec<Line<'stat
                 BannerKind::Info => (TEXT_DIM, "ℹ"),
                 BannerKind::Error => (ACCENT_PINK, "✕"),
             };
-            banner_line(content, color, icon)
+            banner_line(content, color, icon, max_width)
         }
     }
 }
@@ -393,17 +390,10 @@ fn align_line_spans(line: Line<'static>, align: BubbleAlign, max_width: usize) -
     Line::from(spans)
 }
 
-fn banner_line(content: &str, color: Color, icon: &str) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    let header = format!("{icon}  {content}");
-    out.push(Line::from(Span::styled(
-        header,
-        Style::default()
-            .fg(color)
-            .add_modifier(Modifier::BOLD)
-            .add_modifier(Modifier::ITALIC),
-    )));
-    out
+fn banner_line(content: &str, color: Color, icon: &str, width: usize) -> Vec<Line<'static>> {
+    let style = Style::default().fg(color).add_modifier(Modifier::BOLD | Modifier::ITALIC);
+    wrap_text(&format!("{icon}  {content}"), width).into_iter()
+        .map(|text| Line::from(Span::styled(text, style))).collect()
 }
 
 fn compact_bubble(
@@ -427,66 +417,55 @@ fn compact_bubble(
     out
 }
 
-/// Soft-wrap `text` to `width` terminal columns, preserving explicit `\n` line
-/// breaks. Wide CJK/emoji glyphs use Ratatui's width implementation via
-/// `Line::width`; combining marks (width 0) stay attached to their base.
+/// Word-wrap by terminal columns, preserving explicit/blank lines, indentation
+/// and repeated spaces. Only the separator at a soft wrap is discarded.
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
-    for raw_line in text.split('\n') {
-        if raw_line.is_empty() {
-            out.push(String::new());
-            continue;
-        }
+    for raw_line in display_text(text).split('\n') {
         let mut current = String::new();
-        for word in split_words(raw_line) {
-            let ww = display_width(&word);
-            if current.is_empty() {
-                if ww > width {
-                    out.extend(chunks_of(&word, width));
-                } else {
-                    current.push_str(&word);
-                }
-            } else if display_width(&current) + 1 + ww <= width {
-                current.push(' ');
-                current.push_str(&word);
+        let mut columns = 0;
+        for (index, word) in raw_line.split(' ').enumerate() {
+            let ww = display_width(word);
+            let separator = usize::from(index > 0);
+            if columns + separator + ww <= width {
+                if separator > 0 { current.push(' '); }
+                current.push_str(word);
+                columns += separator + ww;
             } else {
-                out.push(std::mem::take(&mut current));
-                if ww > width {
-                    out.extend(chunks_of(&word, width));
-                } else {
-                    current.push_str(&word);
-                }
+                if !current.is_empty() { out.push(std::mem::take(&mut current)); }
+                let mut chunks = chunks_of(word, width);
+                current = chunks.pop().unwrap_or_default();
+                out.extend(chunks);
+                columns = display_width(&current);
             }
         }
-        if !current.is_empty() {
-            out.push(current);
-        }
+        out.push(current);
     }
     out
 }
 
-fn split_words(s: &str) -> Vec<String> {
-    s.split(' ').map(|w| w.to_string()).collect()
+fn display_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n").replace('\t', "    ")
+        .chars().filter(|ch| *ch == '\n' || !ch.is_control()).collect()
 }
 
 fn chunks_of(s: &str, n: usize) -> Vec<String> {
     let width = n.max(1);
     let mut chunks = Vec::new();
     let mut current = String::new();
-    for ch in s.chars() {
-        let ch_s = ch.to_string();
-        let ch_width = display_width(&ch_s);
-        if current.is_empty() && ch_width > width {
-            chunks.push(truncate(&ch_s, width));
-            continue;
-        }
-        if !current.is_empty() && ch_width > 0 && display_width(&current) + ch_width > width {
+    let mut columns = 0;
+    for grapheme in s.graphemes(true) {
+        let gw = display_width(grapheme);
+        if columns + gw > width && !current.is_empty() {
             chunks.push(std::mem::take(&mut current));
+            columns = 0;
         }
-        current.push(ch);
-        if display_width(&current) >= width {
-            chunks.push(std::mem::take(&mut current));
+        if gw > width {
+            chunks.push("…".into());
+        } else {
+            current.push_str(grapheme);
+            columns += gw;
         }
     }
     if !current.is_empty() {
@@ -496,7 +475,7 @@ fn chunks_of(s: &str, n: usize) -> Vec<String> {
 }
 
 fn display_width(s: &str) -> usize {
-    Line::from(s.to_string()).width()
+    Line::from(s).width()
 }
 
 fn input_height(app: &App, frame_width: u16) -> u16 {
@@ -636,8 +615,12 @@ fn draw_slash_popup(
     matches: &[usize],
     selected: usize,
 ) {
-    let height = (matches.len() as u16 + 2).min(10);
+    // Popups must fit ABOVE the composer, even on small/resized terminals.
+    // Clamping only y to zero let Clear paint over the input box itself.
+    let height = (matches.len().min(8) as u16 + 2)
+        .min(input_area.y.saturating_sub(f.area().y));
     let width = 50.min(input_area.width.saturating_sub(2));
+    if height < 3 || width < 4 { return; }
     let popup_area = Rect {
         x: input_area.x + 1,
         y: input_area.y.saturating_sub(height),
@@ -698,8 +681,10 @@ fn draw_file_popup(
     matches: &[String],
     selected: usize,
 ) {
-    let height = (matches.len() as u16 + 2).min(12);
+    let height = (matches.len().min(10) as u16 + 2)
+        .min(input_area.y.saturating_sub(f.area().y));
     let width = 70.min(input_area.width.saturating_sub(2));
+    if height < 3 || width < 4 { return; }
     let popup_area = Rect {
         x: input_area.x + 1,
         y: input_area.y.saturating_sub(height),
@@ -755,24 +740,29 @@ fn input_visual_lines(app: &App, width: usize) -> (Vec<String>, usize) {
     let width = width.max(1);
     let chars: Vec<char> = app.input.chars().collect();
     let cursor_pos = app.cursor.min(chars.len());
-    let before: String = chars[..cursor_pos].iter().collect();
-    let after: String = chars[cursor_pos..].iter().collect();
+    let before = display_text(&chars[..cursor_pos].iter().collect::<String>());
+    let after = display_text(&chars[cursor_pos..].iter().collect::<String>());
     let mut lines = Vec::new();
     let mut current = String::new();
+    let mut columns = 0;
     let mut cursor_row = 0;
-    for (index, ch) in format!("{before}█{after}").chars().enumerate() {
-        if ch == '\n' {
+    for (index, grapheme) in format!("{before}█{after}").grapheme_indices(true) {
+        if grapheme == "\n" {
             lines.push(std::mem::take(&mut current));
+            columns = 0;
             continue;
         }
-        let piece = truncate(&ch.to_string(), width);
-        if !current.is_empty() && display_width(&format!("{current}{piece}")) > width {
+        let piece = truncate(grapheme, width);
+        let pw = display_width(&piece);
+        if !current.is_empty() && columns + pw > width {
             lines.push(std::mem::take(&mut current));
+            columns = 0;
         }
-        if index == cursor_pos {
+        if index == before.len() {
             cursor_row = lines.len();
         }
         current.push_str(&piece);
+        columns += pw;
     }
     lines.push(current);
     (lines, cursor_row)
@@ -790,12 +780,12 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let mut out = String::new();
     let budget = max - 1;
-    for ch in s.chars() {
-        let next = format!("{out}{ch}");
-        if display_width(&next) > budget {
-            break;
-        }
-        out.push(ch);
+    let mut columns = 0;
+    for grapheme in s.graphemes(true) {
+        let gw = display_width(grapheme);
+        if columns + gw > budget { break; }
+        out.push_str(grapheme);
+        columns += gw;
     }
     out.push('…');
     out
@@ -818,6 +808,86 @@ mod tests {
                 line
             );
         }
+    }
+
+    #[test]
+    fn explicit_newlines_indentation_and_graphemes_are_preserved() {
+        assert_eq!(wrap_text("first\r\n\r\n    indented  text\n\tcode\n", 80),
+            vec!["first", "", "    indented  text", "    code", ""]);
+        assert_eq!(chunks_of("ae\u{301}👩‍💻z", 2), vec!["ae\u{301}", "👩‍💻", "z"]);
+        let banners = banner_line("first\n\n    second\nlast", TEXT_DIM, "·", 30);
+        let texts: Vec<_> = banners.iter().map(ToString::to_string).collect();
+        assert_eq!(texts, vec!["·  first", "", "    second", "last"]);
+        assert_lines_fit(&banner_line(&"very long error ".repeat(100), TEXT_DIM, "✕", 20), 20);
+    }
+
+    #[test]
+    fn every_message_kind_renders_explicit_line_breaks_and_blank_lines() {
+        let content = "FIRST\n\n    code\nLAST".to_string();
+        for bubble in [
+            Bubble::User {content: content.clone()},
+            Bubble::Assistant {content: content.clone()},
+            Bubble::Thinking {content: content.clone()},
+            Bubble::Tool {name: "read_file".into(), content: content.clone()},
+            Bubble::System {content: content.clone()},
+            Bubble::Banner {kind: BannerKind::Error, content},
+        ] {
+            let lines = render_bubble(&bubble, 30, "user");
+            assert_lines_fit(&lines, 30);
+            let rows: Vec<_> = lines.iter().map(ToString::to_string).collect();
+            let first = rows.iter().position(|row| row.contains("FIRST")).unwrap();
+            assert!(!rows[first + 1].chars().any(char::is_alphanumeric), "{rows:?}");
+            assert!(rows[first + 2].contains("    code"), "{rows:?}");
+            assert!(rows[first + 3].contains("LAST"), "{rows:?}");
+        }
+    }
+
+    fn screen_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        buffer.content().chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect()).collect()
+    }
+
+    #[test]
+    fn long_live_reply_and_error_tail_stay_above_bottom_padding_after_resize() {
+        let (mut app, _dir) = dummy_app();
+        app.live.text = format!("{}\nLAST-LINE", "long line with 日本語 👩‍💻\n".repeat(100));
+        for (width, height) in [(24, 10), (40, 8), (80, 24), (20, 7)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| draw_transcript(f, &mut app, f.area())).unwrap();
+            let rows = screen_rows(&terminal);
+            assert!(rows.iter().any(|row| row.contains("LAST-LINE")), "{rows:?}");
+            assert!(rows[height as usize - 3].contains('╰'), "bubble border missing: {rows:?}");
+            assert!(rows[height as usize - 2].contains(&" ".repeat(width as usize - 2)), "no bottom gap: {rows:?}");
+        }
+        app.live = Default::default();
+        app.transcript.push(Bubble::Banner {kind: BannerKind::Error,
+            content: format!("{}\nERROR-TAIL", "wide error details ".repeat(500))});
+        let mut terminal = Terminal::new(TestBackend::new(24, 10)).unwrap();
+        terminal.draw(|f| draw_transcript(f, &mut app, f.area())).unwrap();
+        assert!(screen_rows(&terminal).iter().any(|row| row.contains("ERROR-TAIL")));
+    }
+
+    #[test]
+    fn scrolling_handles_more_than_u16_rows_and_stream_growth() {
+        let (mut app, _dir) = dummy_app();
+        app.live.text = format!("TOP\n{}TAIL", "row\n".repeat(66_000));
+        let mut terminal = Terminal::new(TestBackend::new(30, 10)).unwrap();
+        terminal.draw(|f| draw_transcript(f, &mut app, f.area())).unwrap();
+        assert!(screen_rows(&terminal).iter().any(|row| row.contains("TAIL")));
+        app.scroll_offset = usize::MAX;
+        app.at_bottom = false;
+        terminal.draw(|f| draw_transcript(f, &mut app, f.area())).unwrap();
+        assert!(app.scroll_offset > u16::MAX as usize);
+        let before = screen_rows(&terminal);
+        assert!(before.iter().any(|row| row.contains("TOP")));
+        app.live.text.push_str("\nnew\nnew");
+        terminal.draw(|f| draw_transcript(f, &mut app, f.area())).unwrap();
+        assert_eq!(before, screen_rows(&terminal), "streaming moved a scrolled-up reader");
+        app.scroll_offset = 0;
+        app.at_bottom = true;
+        terminal.draw(|f| draw_transcript(f, &mut app, f.area())).unwrap();
+        assert!(screen_rows(&terminal).iter().any(|row| row.contains("new")));
     }
 
     #[test]
@@ -922,12 +992,63 @@ mod tests {
                 app.cursor = cursor;
                 let backend = TestBackend::new(width, height);
                 let mut terminal = Terminal::new(backend).unwrap();
-                terminal.draw(|f| draw(f, &app)).unwrap();
+                terminal.draw(|f| draw(f, &mut app)).unwrap();
                 assert!(
                     buffer_contains_cursor(&terminal),
                     "cursor missing for width={width} input={input:?} cursor={cursor}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn streaming_and_completion_popups_never_cover_the_composer() {
+        let (mut app, _dir) = dummy_app();
+        app.show_sidebar = false;
+        for (width, height) in [(24, 7), (40, 8), (80, 14), (100, 30)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            for multiline in [false, true] {
+                app.input = if multiline { "line\n".repeat(12) } else { "draft".into() };
+                app.cursor = app.input.chars().count();
+                for popup in [
+                    Popup::None,
+                    Popup::Slash {matches: (0..SLASH_COMMANDS.len()).collect(), selected: 0},
+                    Popup::File {prefix: "".into(), matches: vec!["example.rs".into(); 25], selected: 0},
+                ] {
+                    app.popup = popup;
+                    app.stream_event("stream_start", "{}");
+                    for _ in 0..15 {
+                        app.stream_event("char", "streamed text 日本語\n");
+                        terminal.draw(|f| draw(f, &mut app)).unwrap();
+                        assert!(buffer_contains_cursor(&terminal), "composer cursor hidden at {width}x{height}");
+                        assert!(screen_rows(&terminal).iter().any(|row| row.contains("Message")), "composer border/title hidden");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn saved_reply_handoff_does_not_remove_its_bubble_for_a_frame() {
+        let (mut app, _dir) = dummy_app();
+        app.show_sidebar = false;
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        let text = "FIRST\n\n    code\nLAST";
+        app.stream_event("stream_start", "{}");
+        app.stream_event("char", text);
+        for (event, data) in [
+            ("stream_end", "{}".to_string()),
+            ("assistant", text.to_string()),
+            ("assistant_saved", serde_json::json!({"id":7,"role":"assistant","content":text}).to_string()),
+            ("history", serde_json::json!([{"id":7,"role":"assistant","content":text}]).to_string()),
+            ("stream_start", "{}".to_string()),
+        ] {
+            app.stream_event(event, &data);
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            let rows = screen_rows(&terminal);
+            assert_eq!(rows.iter().filter(|row| row.contains("FIRST")).count(), 1, "{event}: {rows:?}");
+            assert!(rows.iter().any(|row| row.contains("LAST")), "{event}: {rows:?}");
+            assert!(buffer_contains_cursor(&terminal));
         }
     }
 
@@ -943,7 +1064,7 @@ mod tests {
         for (w, h) in [(24, 10), (40, 8), (100, 30)] {
             let backend = TestBackend::new(w, h);
             let mut terminal = Terminal::new(backend).unwrap();
-            terminal.draw(|f| draw(f, &app)).unwrap();
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
             assert!(buffer_contains_cursor(&terminal));
         }
     }

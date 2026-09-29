@@ -94,9 +94,14 @@ pub struct App {
     pub transcript: Vec<Bubble>,
     pub live: super::streaming::LiveOutput,
     pub remote: Option<super::remote::Remote>,
-    /// Set of `(role, prefix)` keys we've already rendered, to dedupe new rows
-    /// arriving via polling.
+    /// Durable message IDs already rendered; text prefixes are not identities.
     seen_keys: std::collections::HashSet<String>,
+    /// Transcript rows shown before their persisted IDs arrive (user echoes and
+    /// validated assistant completions). Bind history to these rows in place.
+    pending_echoes: Vec<usize>,
+    /// Assistant rows received since stream_start, including history that beat
+    /// the final SSE event. This prevents either handoff order duplicating them.
+    stream_history: Vec<usize>,
 
     /// Multi-line input buffer.
     pub input: String,
@@ -109,9 +114,11 @@ pub struct App {
 
     pub show_sidebar: bool,
     /// Vertical scroll offset (0 = pinned to bottom).
-    pub scroll_offset: u16,
+    pub scroll_offset: usize,
     /// Track if user was at bottom before new messages (for auto-scroll).
     pub at_bottom: bool,
+    viewport: (usize, u16, u16),
+    event_tx: Option<tokio::sync::mpsc::Sender<(String, String, String)>>,
     /// Track whether the agent loop is currently running for the active session.
     pub agent_active: bool,
 
@@ -138,6 +145,8 @@ impl App {
             live: Default::default(),
             remote: None,
             seen_keys: std::collections::HashSet::new(),
+            pending_echoes: Vec::new(),
+            stream_history: Vec::new(),
             input: String::new(),
             cursor: 0,
             attachments: Vec::new(),
@@ -145,6 +154,8 @@ impl App {
             show_sidebar: true,
             scroll_offset: 0,
             at_bottom: true,
+            viewport: (0, 0, 0),
+            event_tx: None,
             agent_active: false,
             status_msg: None,
             should_quit: false,
@@ -163,13 +174,103 @@ impl App {
         self.status_msg = Some((msg.into(), Instant::now()));
     }
 
+    pub fn update_viewport(&mut self, rows: usize, width: u16, height: u16) {
+        let (old_rows, old_width, _) = self.viewport;
+        if !self.at_bottom && width == old_width {
+            // Hold the reader's position while streamed content grows/shrinks.
+            self.scroll_offset = if rows >= old_rows {
+                self.scroll_offset.saturating_add(rows - old_rows)
+            } else {
+                self.scroll_offset.saturating_sub(old_rows - rows)
+            };
+        }
+        self.viewport = (rows, width, height);
+        self.scroll_offset = self.scroll_offset.min(rows.saturating_sub(height as usize));
+        self.at_bottom = self.scroll_offset == 0;
+    }
+
+    fn scroll_up(&mut self, rows: usize) {
+        let max = self.viewport.0.saturating_sub(self.viewport.2 as usize);
+        self.scroll_offset = self.scroll_offset.saturating_add(rows).min(max);
+        self.at_bottom = self.scroll_offset == 0;
+    }
+
+    fn scroll_down(&mut self, rows: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(rows);
+        self.at_bottom = self.scroll_offset == 0;
+    }
+
+    pub(super) fn stream_event(&mut self, event: &str, data: &str) {
+        match event {
+            "stream_start" => {
+                self.stream_history.clear();
+                self.live.apply(event, data);
+            }
+            "assistant" => {
+                if !data.is_empty() && !self.stream_history.iter().any(|&index|
+                    matches!(self.transcript.get(index), Some(Bubble::Assistant {content}) if content == data))
+                {
+                    let index = self.transcript.len();
+                    self.transcript.push(Bubble::Assistant {content: data.into()});
+                    self.pending_echoes.push(index);
+                    self.stream_history.push(index);
+                }
+                // Final text is validated by the gateway. Keep its bubble while
+                // waiting for history, even across tool continuations/reconnects.
+                self.live.text.clear();
+                self.live.disconnected = false;
+            }
+            "assistant_saved" => {
+                match serde_json::from_str::<Message>(data) {
+                    Ok(message) if message.role == "assistant" && message.id.is_some_and(|id| id > 0) => {
+                        let replaces_live = message.content == self.live.text
+                            || (self.live.disconnected && message.content.starts_with(&self.live.text));
+                        // Install the persisted bubble BEFORE removing live text.
+                        // Remote history polling can be a second behind this event.
+                        self.append_messages(vec![message]);
+                        if replaces_live { self.live.text.clear(); self.live.disconnected = false; }
+                    }
+                    _ => tracing::warn!("Ignoring malformed assistant_saved event; keeping visible reply"),
+                }
+            }
+            "history" => {
+                if let Ok(messages) = serde_json::from_str(data) { self.append_messages(messages); }
+            }
+            "reasoning" => {
+                if !data.is_empty() { self.transcript.push(Bubble::Thinking { content: data.into() }); }
+                self.live.reasoning.clear();
+            }
+            "feedback" | "request_failed" => {
+                let failed = event == "request_failed" || data.starts_with("LLM request failed") || data.starts_with("LLM error:");
+                if event == "request_failed" {
+                    self.agent_active = false;
+                    self.live.apply("stream_abort", "");
+                }
+                // The POST result may repeat the latest SSE error. Do not
+                // dedupe across separate user requests with the same failure.
+                if event != "request_failed" || !matches!(self.transcript.last(), Some(Bubble::Banner {content, ..}) if content == data) {
+                    self.transcript.push(Bubble::Banner {
+                        kind: if failed { BannerKind::Error } else { BannerKind::Info }, content: data.into(),
+                    });
+                }
+            }
+            "connection_error" => self.flash(data),
+            "agent_start" => self.agent_active = true,
+            "agent_stop" => { self.agent_active = false; self.live.tools.clear(); }
+            _ => self.live.apply(event, data),
+        }
+    }
+
     /// Drop transient state when switching session.
     pub fn reset_view(&mut self) {
         self.transcript.clear();
         self.live = Default::default();
         self.seen_keys.clear();
+        self.pending_echoes.clear();
+        self.stream_history.clear();
         self.scroll_offset = 0;
         self.at_bottom = true;
+        self.viewport = (0, 0, 0);
         self.input.clear();
         self.cursor = 0;
         self.attachments.clear();
@@ -193,11 +294,32 @@ impl App {
             if self.seen_keys.contains(&key) {
                 continue;
             }
+            // Polling also recovers a reply if its final SSE notification was
+            // lost. Replace the disconnected preview only with a fresh row.
+            if self.live.disconnected && m.role == "assistant" && !m.content.is_empty()
+                && m.content.starts_with(&self.live.text)
+            {
+                self.live = Default::default();
+            }
             // Skip purely intermediate assistant messages (just tool_calls).
             if m.role == "assistant"
                 && m.tool_calls.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
                 && m.content.is_empty()
             {
+                self.seen_keys.insert(key);
+                continue;
+            }
+            // Both SSE-before-history and history-before-SSE must leave one
+            // stable row. Do not confuse equal text from different message IDs.
+            if let Some(pending) = self.pending_echoes.iter().position(|&index| {
+                match (self.transcript.get(index), m.role.as_str()) {
+                    (Some(Bubble::User {content}), "user") |
+                    (Some(Bubble::Assistant {content}), "assistant") => content == &m.content,
+                    _ => false,
+                }
+            }) {
+                let index = self.pending_echoes.remove(pending);
+                if m.role == "assistant" { self.stream_history.push(index); }
                 self.seen_keys.insert(key);
                 continue;
             }
@@ -230,6 +352,7 @@ impl App {
                 }
                 _ => continue,
             };
+            if m.role == "assistant" { self.stream_history.push(self.transcript.len()); }
             self.transcript.push(bubble);
             self.seen_keys.insert(key);
         }
@@ -293,6 +416,11 @@ impl App {
                 } else {
                     self.transcript.clear();
                     self.seen_keys.clear();
+                    self.pending_echoes.clear();
+                    self.stream_history.clear();
+                    self.live = Default::default();
+                    self.scroll_offset = 0;
+                    self.at_bottom = true;
                     self.flash("cleared");
                 }
             }
@@ -523,17 +651,17 @@ impl App {
 
     /// Send the current input + attachments to the gateway.
     async fn send_message(&mut self) {
-        let text = self.input.trim().to_string();
-        if text.is_empty() && self.attachments.is_empty() {
+        let text = self.input.clone();
+        if text.trim().is_empty() && self.attachments.is_empty() {
             return;
         }
         // Slash commands run locally — they should never leave the TUI.
         // We accept both single-token (`/help`) and multi-token (`/context set foo=bar`).
-        if text.starts_with('/') {
+        if text.trim_start().starts_with('/') {
             self.input.clear();
             self.cursor = 0;
             self.popup = Popup::None;
-            self.run_slash(&text).await;
+            self.run_slash(text.trim()).await;
             return;
         }
 
@@ -550,11 +678,10 @@ impl App {
         } else {
             clean_text.clone()
         };
-        let local_key = format!("user::{}", display.chars().take(80).collect::<String>());
+        self.pending_echoes.push(self.transcript.len());
         self.transcript.push(Bubble::User {
             content: display.clone(),
         });
-        self.seen_keys.insert(local_key);
 
         self.input.clear();
         self.cursor = 0;
@@ -571,17 +698,29 @@ impl App {
             "message": clean_text,
             "attachments": atts,
         });
+        self.scroll_offset = 0;
+        self.at_bottom = true;
+        let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(60 * 30))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new());
-            let _ = client
-                .post(&url)
-                .bearer_auth(&api_key)
-                .json(&body)
-                .send()
-                .await;
+            let result: anyhow::Result<()> = async {
+                let response = client.post(&url).bearer_auth(&api_key).json(&body).send().await
+                    .map_err(crate::gateway::llm::error::ProviderError::from_reqwest)?;
+                anyhow::ensure!(response.status().is_success(), "Chat gateway returned HTTP {} (check connection and gateway key)", response.status().as_u16());
+                let value: serde_json::Value = response.json().await
+                    .map_err(|_| anyhow::anyhow!("Chat gateway returned invalid JSON"))?;
+                anyhow::ensure!(value["success"] == true, "{}", value["error"].as_str().unwrap_or("Chat gateway returned no success result"));
+                Ok(())
+            }.await;
+            if let Err(error) = result {
+                tracing::warn!(error = %error, "TUI chat request failed");
+                if let Some(tx) = event_tx {
+                    let _ = tx.send((user_id, "request_failed".into(), error.to_string())).await;
+                }
+            }
         });
         self.agent_active = true;
         self.flash("sent");
@@ -660,8 +799,10 @@ impl App {
 
 /// Compute a stable dedup key for a DB message.
 fn bubble_key(m: &Message) -> String {
-    let prefix: String = m.content.chars().take(80).collect();
-    format!("{}::{}", m.role, prefix)
+    if let Some(id) = m.id { return format!("id:{id}"); }
+    // Compatibility with older history endpoints lacking IDs: never truncate
+    // content, or two long replies with the same opening collapse into one.
+    format!("legacy:{}:{:?}:{}", m.role, m.tool_call_id, m.content)
 }
 
 /// Find file completion candidates for `@<prefix>`.
@@ -765,19 +906,18 @@ fn split_at_attachments(input: &str) -> (String, Vec<String>) {
             };
             if abs.exists() {
                 paths.push(abs.to_string_lossy().into_owned());
-                // Drop the entire word including its trailing whitespace so
-                // we don't leave a double-space in the cleaned text.
+                // Remove an inline separator along with the attachment, but
+                // never swallow a newline (or indentation on the next line).
+                let separator = &word[trimmed.len()..];
+                if separator != " " { clean.push_str(separator); }
                 continue;
             }
         }
         clean.push_str(word);
     }
-    // Collapse any runs of internal whitespace introduced by the removal.
-    let collapsed = clean
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    (collapsed, paths)
+    // Chat text is not a shell command: preserve newlines, blank lines and
+    // code indentation exactly, both in the local echo and the gateway input.
+    (clean, paths)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -853,6 +993,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut status_clear = tokio::time::interval(Duration::from_millis(500));
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1024);
+    app.event_tx = Some(stream_tx.clone());
     let mut stream_user = String::new();
     let mut stream_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut history_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -888,18 +1029,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
         tokio::select! {
             Some((user, event, data)) = stream_rx.recv() => {
                 if user == app.active_user_id() {
-                    if event == "history" {
-                        if let Ok(messages) = serde_json::from_str(&data) { app.append_messages(messages); }
-                    } else if event == "reasoning" {
-                        app.transcript.push(Bubble::Thinking { content: data.clone() });
-                        app.live.reasoning.clear();
-                    } else {
-                        app.live.apply(&event, &data);
-                    }
-                    if event == "stream_end" { app.live.tools.clear(); }
-                    if event == "assistant_saved" { app.refresh_transcript(); }
-                    if event == "agent_start" { app.agent_active = true; }
-                    if event == "agent_stop" { app.agent_active = false; }
+                    app.stream_event(&event, &data);
                 }
             }
             // Keyboard / paste events.
@@ -929,21 +1059,17 @@ async fn run_loop<B: ratatui::backend::Backend>(
 async fn handle_event(ev: Event, app: &mut App) {
     match ev {
         Event::Paste(text) => {
-            insert_str(app, &text);
+            insert_str(app, &text.replace("\r\n", "\n").replace('\r', "\n"));
             app.update_popup();
         }
         Event::Key(k) if k.kind == KeyEventKind::Press => handle_key(app, k.code, k.modifiers).await,
         Event::Mouse(me) => {
             match me.kind {
                 MouseEventKind::ScrollUp => {
-                    app.scroll_offset = app.scroll_offset.saturating_add(3);
-                    app.at_bottom = false;
+                    app.scroll_up(3);
                 }
                 MouseEventKind::ScrollDown => {
-                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
-                    if app.scroll_offset == 0 {
-                        app.at_bottom = true;
-                    }
+                    app.scroll_down(3);
                 }
                 _ => {}
             }
@@ -968,15 +1094,11 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             return;
         }
         (KeyCode::PageUp, _) => {
-            app.scroll_offset = app.scroll_offset.saturating_add(5);
-            app.at_bottom = false;
+            app.scroll_up(5);
             return;
         }
         (KeyCode::PageDown, _) => {
-            app.scroll_offset = app.scroll_offset.saturating_sub(5);
-            if app.scroll_offset == 0 {
-                app.at_bottom = true;
-            }
+            app.scroll_down(5);
             return;
         }
         (KeyCode::Char(c), KeyModifiers::ALT) if c.is_ascii_digit() => {
@@ -1175,6 +1297,139 @@ mod tests {
         let (clean, atts) = split_at_attachments(&input);
         assert_eq!(clean, "hello world");
         assert_eq!(atts, vec![path]);
+    }
+
+    #[test]
+    fn sending_preserves_line_breaks_blank_lines_and_indentation() {
+        let text = "first\n\n    code  with  spaces\n\tmore\n";
+        assert_eq!(split_at_attachments(text).0, text);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let text = format!("first @{}\n\n    code\nlast", tmp.path().display());
+        assert_eq!(split_at_attachments(&text).0, "first \n\n    code\nlast");
+    }
+
+    #[tokio::test]
+    async fn multiline_input_is_sent_and_echoed_without_flattening() {
+        use wiremock::{matchers::{method, body_partial_json}, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let text = "    first\n\nsecond\n";
+        Mock::given(method("POST")).and(body_partial_json(serde_json::json!({"message":text})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"success":false,"error":"test failure"})))
+            .expect(1).mount(&server).await;
+        let mut app = dummy_app();
+        app.gateway_url = server.uri();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        app.event_tx = Some(tx);
+        app.input = text.into();
+        app.send_message().await;
+        assert!(matches!(&app.transcript[0], Bubble::User { content } if content == text));
+        let (_, event, data) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap().unwrap();
+        assert_eq!(event, "request_failed");
+        app.stream_event(&event, &data);
+        assert!(!app.agent_active);
+        assert!(matches!(&app.transcript[1], Bubble::Banner {kind: BannerKind::Error,content} if content == "test failure"));
+    }
+
+    #[test]
+    fn scrolling_clamps_and_failed_requests_clear_previews_without_duplicate_errors() {
+        let mut app = dummy_app();
+        app.update_viewport(100, 30, 10);
+        app.scroll_up(usize::MAX);
+        assert_eq!(app.scroll_offset, 90);
+        app.scroll_down(5);
+        assert_eq!(app.scroll_offset, 85);
+        app.scroll_down(usize::MAX);
+        assert!(app.at_bottom);
+        app.live.apply("tool_call_delta", r#"{"index":0,"name":"read_file","arguments":"{"}"#);
+        app.stream_event("feedback", "LLM request failed: specific cause");
+        app.stream_event("request_failed", "LLM request failed: specific cause");
+        assert!(app.live.bubbles().is_empty());
+        assert_eq!(app.transcript.len(), 1);
+    }
+
+    fn saved_assistant(id: i64, content: &str) -> Message {
+        let mut message = Message::assistant(content.into());
+        message.id = Some(id);
+        message
+    }
+
+    #[test]
+    fn streamed_reply_survives_saved_history_handoff_in_both_event_orders() {
+        for history_first in [false, true] {
+            let mut app = dummy_app();
+            // Exercise remote mode: there is no synchronous local DB refresh.
+            app.remote = Some(super::super::remote::Remote::new("http://127.0.0.1:0".into(), "test".into()).unwrap());
+            let message = saved_assistant(10, "line one\n\n    line two");
+            app.stream_event("stream_start", "{}");
+            app.stream_event("char", &message.content);
+            if history_first { app.append_messages(vec![message.clone()]); }
+            app.stream_event("assistant", &message.content);
+            assert_eq!(app.transcript.len(), 1);
+            assert!(app.live.text.is_empty());
+            app.stream_event("assistant_saved", &serde_json::to_string(&message).unwrap());
+            app.append_messages(vec![message.clone()]);
+            app.stream_event("stream_start", "{}");
+            assert_eq!(app.transcript.len(), 1);
+            assert!(matches!(&app.transcript[0], Bubble::Assistant {content} if content == &message.content));
+            assert!(app.pending_echoes.is_empty());
+        }
+    }
+
+    #[test]
+    fn saved_notification_installs_reply_immediately_and_ignores_malformed_events() {
+        let mut app = dummy_app();
+        app.stream_event("stream_start", "{}");
+        app.stream_event("char", "complete text");
+        app.stream_event("assistant_saved", "not JSON");
+        assert_eq!(app.live.text, "complete text");
+        app.stream_event("assistant_saved", &serde_json::to_string(&saved_assistant(1, "complete text")).unwrap());
+        assert_eq!(app.transcript.len(), 1);
+        assert!(app.live.text.is_empty());
+        app.stream_event("stream_start", "{}");
+        app.stream_event("char", "next response");
+        app.stream_event("assistant_saved", &serde_json::to_string(&saved_assistant(1, "complete text")).unwrap());
+        assert_eq!(app.live.text, "next response", "late saves must not erase a newer stream");
+    }
+
+    #[test]
+    fn tool_continuations_and_reconnects_keep_validated_replies_visible() {
+        let mut app = dummy_app();
+        app.stream_event("stream_start", "{}");
+        app.stream_event("assistant", "I'll check that.");
+        app.stream_event("stream_start", "{}");
+        assert_eq!(app.transcript.len(), 1);
+        app.append_messages(vec![saved_assistant(1, "I'll check that.")]);
+        app.stream_event("char", "partial");
+        app.stream_event("stream_disconnected", "");
+        assert_eq!(app.live.text, "partial");
+        app.stream_event("char", "possibly gapped tail");
+        assert_eq!(app.live.text, "partial");
+        app.append_messages(vec![saved_assistant(2, "partial reply recovered from history")]);
+        assert_eq!(app.transcript.len(), 2);
+        assert!(app.live.bubbles().is_empty());
+        app.stream_event("stream_abort", "{}");
+        assert_eq!(app.transcript.len(), 2, "only provisional output may be aborted");
+    }
+
+    #[test]
+    fn history_identity_does_not_collapse_repeated_messages_or_shared_prefixes() {
+        let mut app = dummy_app();
+        let first = format!("{} first ending", "same prefix ".repeat(10));
+        let second = format!("{} second ending", "same prefix ".repeat(10));
+        let messages = vec![saved_assistant(1, &first), saved_assistant(2, &second), saved_assistant(3, &second)];
+        app.append_messages(messages.clone());
+        app.append_messages(messages);
+        assert_eq!(app.transcript.len(), 3);
+        // Repeated optimistic user echoes must each bind to a different ID.
+        for id in [4, 5] {
+            app.pending_echoes.push(app.transcript.len());
+            app.transcript.push(Bubble::User {content: "again".into()});
+            let mut message = Message::user("again".into());
+            message.id = Some(id);
+            app.append_messages(vec![message]);
+        }
+        assert_eq!(app.transcript.len(), 5);
+        assert!(app.pending_echoes.is_empty());
     }
 
     #[test]

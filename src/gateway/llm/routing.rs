@@ -217,11 +217,13 @@ impl LLMRouter {
                                 stream.emitted.store(true, Ordering::Relaxed);
                                 crate::dashboard::stream::send(user, "char", text);
                             }
-                            StreamDelta::Reasoning { text } if crate::gateway::task_control::show_thinking(user) => {
+                            StreamDelta::Reasoning { text } if !text.is_empty() && crate::gateway::task_control::show_thinking(user) => {
+                                stream.previewed.store(true, Ordering::Relaxed);
                                 crate::dashboard::stream::send(user, "reasoning_delta", text);
                             }
                             StreamDelta::ToolCall { .. } => {
                                 if let Ok(data) = serde_json::to_string(&delta) {
+                                    stream.previewed.store(true, Ordering::Relaxed);
                                     crate::dashboard::stream::send(user, "tool_call_delta", &data);
                                 }
                             }
@@ -230,6 +232,12 @@ impl LLMRouter {
                     }
                 };
                 tracing::info!(provider = %label(name), attempt = attempts, "LLM attempt started");
+                tracing::debug!(provider = %label(name), attempt = attempts,
+                    model = %req.model.as_deref().map(label).unwrap_or_else(|| "provider default".into()),
+                    messages = req.messages.len(), tools = req.tools.as_ref().map_or(0, Vec::len),
+                    max_output_tokens = ?req.max_tokens, streaming = user.is_some(),
+                    timeout_ms = attempt_deadline.duration_since(attempt_start).as_millis() as u64,
+                    "LLM request metadata (content omitted)");
                 let call = async {
                     if user.is_some() {
                         p.chat_stream_events(req.clone(), &on_delta).await
@@ -239,6 +247,14 @@ impl LLMRouter {
                 };
                 let result = match interruptible(attempt_deadline, cancel, call).await {
                     Ok(Ok(response)) => {
+                        tracing::debug!(provider = %label(name), attempt = attempts,
+                            content_bytes = response.content.as_ref().map_or(0, String::len),
+                            reasoning_bytes = response.reasoning_content.as_ref().map_or(0, String::len),
+                            tool_calls = response.tool_calls.as_ref().map_or(0, Vec::len),
+                            finish_reason = match response.finish_reason.as_deref() {
+                                Some("stop") => "stop", Some("length") => "length",
+                                Some("tool_calls") => "tool_calls", None => "missing", _ => "other",
+                            }, "LLM response metadata before validation");
                         // Include cutoff attempts too, without promoting reasoning to
                         // final text. This event is separate from disposable status.
                         if let Some(user) = user.filter(|u| crate::gateway::task_control::show_thinking(u)) {
@@ -283,6 +299,7 @@ impl LLMRouter {
                         return Ok(response);
                     }
                     Err(mut error) => {
+                        let original_kind = error.kind;
                         let transient_failure = error.kind.retryable();
                         // Once text has reached the UI, a new generation cannot
                         // safely be appended or silently substituted. Discard
@@ -292,7 +309,7 @@ impl LLMRouter {
                         {
                             error.kind = ErrorKind::PartialStream;
                         }
-                        tracing::warn!(provider = %label(name), attempt = attempts, elapsed_ms = attempt_start.elapsed().as_millis() as u64, error = %error, "LLM attempt failed");
+                        tracing::warn!(provider = %label(name), attempt = attempts, elapsed_ms = attempt_start.elapsed().as_millis() as u64, kind = ?error.kind, original_kind = ?original_kind, text_emitted = stream.emitted.load(Ordering::Relaxed), error = %error, "LLM attempt failed");
                         failures.push((label(name), error.clone()));
                         // A known output cutoff is recoverable only before any
                         // visible text, with a strictly larger bounded allowance.
@@ -404,7 +421,7 @@ fn validate_response(mut response: ChatResponse) -> Result<ChatResponse, Provide
     // at ~130 s: long thinking + tool call truncated at max_tokens.
     let mut repaired: Vec<ToolCall> = Vec::new();
     let mut ids = std::collections::HashSet::new();
-    let mut cut_call = false;
+    let mut invalid_call = None;
     for mut call in response.tool_calls.take().unwrap_or_default() {
         if call.id.is_empty() || !ids.insert(call.id.clone()) {
             call.id = format!("call_{}", repaired.len() + 1);
@@ -414,7 +431,7 @@ fn validate_response(mut response: ChatResponse) -> Result<ChatResponse, Provide
             ids.insert(call.id.clone());
         }
         if call.function.name.trim().is_empty() {
-            cut_call = true;
+            invalid_call = Some("provider returned a tool call without a function name; no tools were executed");
             continue;
         }
         if call.function.arguments.trim().is_empty() {
@@ -423,18 +440,27 @@ fn validate_response(mut response: ChatResponse) -> Result<ChatResponse, Provide
             repaired.push(call);
             continue;
         }
-        if call.function.name.is_empty()
-            || !serde_json::from_str::<serde_json::Value>(&call.function.arguments)
-                .is_ok_and(|args| args.is_object())
+        if !serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+            .is_ok_and(|args| args.is_object())
         {
             // Truncated or malformed: never execute a half-arguments call.
-            cut_call = true;
+            invalid_call = Some("tool call arguments are not a valid JSON object (possibly truncated); no tools were executed");
             continue;
         }
         repaired.push(call);
     }
-    if cut_call || (repaired.is_empty() && !has_text) {
-        return Err(ProviderError::new(ErrorKind::InvalidResponse));
+    if let Some(cause) = invalid_call {
+        return Err(ProviderError::with_cause(ErrorKind::InvalidResponse, cause));
+    }
+    if repaired.is_empty() && !has_text {
+        let cause = if response.reasoning_content.as_deref().is_some_and(|text| !text.trim().is_empty()) {
+            "provider returned reasoning only, without an answer or tool calls"
+        } else if response.finish_reason.as_deref() == Some("tool_calls") {
+            "provider reported tool_calls but returned no tool calls"
+        } else {
+            "provider returned no answer text or tool calls"
+        };
+        return Err(ProviderError::with_cause(ErrorKind::InvalidResponse, cause));
     }
     response.tool_calls = (!repaired.is_empty()).then_some(repaired);
     Ok(response)
@@ -443,6 +469,7 @@ fn validate_response(mut response: ChatResponse) -> Result<ChatResponse, Provide
 struct StreamAttempt<'a> {
     user: Option<&'a str>,
     emitted: AtomicBool,
+    previewed: AtomicBool,
     committed: bool,
 }
 impl<'a> StreamAttempt<'a> {
@@ -453,6 +480,7 @@ impl<'a> StreamAttempt<'a> {
         Self {
             user,
             emitted: AtomicBool::new(false),
+            previewed: AtomicBool::new(false),
             committed: false,
         }
     }
@@ -460,7 +488,9 @@ impl<'a> StreamAttempt<'a> {
 impl Drop for StreamAttempt<'_> {
     fn drop(&mut self) {
         if let Some(user) = self.user {
-            if !self.committed && self.emitted.load(Ordering::Relaxed) {
+            // Clear failed reasoning/tool previews as well as text. An attempt
+            // with no visible output must not stop the UI timer before a retry.
+            if !self.committed && (self.emitted.load(Ordering::Relaxed) || self.previewed.load(Ordering::Relaxed)) {
                 crate::dashboard::stream::send(user, "stream_abort", "{}");
             }
             crate::dashboard::stream::send(user, "typing", "false");

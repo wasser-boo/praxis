@@ -3727,6 +3727,7 @@ dependencies = [
  "tracing-appender",
  "tracing-attributes",
  "tracing-subscriber",
+ "unicode-segmentation",
  "urlencoding",
  "uuid",
  "vosk",

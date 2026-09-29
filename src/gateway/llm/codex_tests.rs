@@ -44,9 +44,7 @@ async fn stream(server: &MockServer, text: &str) {
     Mock::given(method("POST"))
         .and(path("/responses"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(text),
+            ResponseTemplate::new(200).set_body_raw(text, "text/event-stream"),
         )
         .mount(server)
         .await;
@@ -91,7 +89,7 @@ async fn codex_completed_tools_must_have_valid_arguments_names_and_unique_ids() 
         "call_id":"call_1", "name":"read_file", "arguments":"{\"path\":\"a\"}"});
     let mut invalid_outputs = Vec::new();
     for (field, value) in [
-        ("arguments", "{\"path\":"), ("arguments", "[]"),
+        ("arguments", "{\"path\":"), ("arguments", "[]"), ("arguments", ""),
         ("name", ""), ("call_id", ""), ("status", "in_progress"),
     ] {
         let mut call = valid.clone();
@@ -217,7 +215,7 @@ async fn codex_parallel_401s_refresh_only_once() {
     Mock::given(method("POST"))
         .and(path("/responses"))
         .and(header("authorization", "Bearer fresh"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(COMPLETE))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(COMPLETE, "text/event-stream"))
         .expect(2)
         .mount(&server)
         .await;
@@ -297,8 +295,9 @@ async fn codex_wire_body_covers_tools_images_history_and_reasoning() {
 #[tokio::test]
 async fn codex_router_does_not_retry_incomplete_with_an_ignored_output_limit() {
     let server = MockServer::start().await;
-    Mock::given(path("/responses")).respond_with(ResponseTemplate::new(200).set_body_string(
-        "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n"
+    Mock::given(path("/responses")).respond_with(ResponseTemplate::new(200).set_body_raw(
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
+        "text/event-stream",
     )).expect(1).mount(&server).await;
     let router = super::super::LLMRouter::with_providers(
         vec![Box::new(provider(&server))],

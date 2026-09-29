@@ -1,197 +1,338 @@
-//! Codex Responses SSE adapter. Display deltas are never executable calls.
+//! Responses SSE framing and validation. Preview fragments are never actions.
 use super::super::{
     error::{ErrorKind, ProviderError},
     http,
     provider::*,
 };
+use serde_json::Value;
 
-/// Only a terminal success may produce executable tool calls. The shared byte
-/// decoder handles CRLF, fragmented UTF-8 and bounded frames without data loss.
-pub(super) async fn parse_sse(
+#[derive(Default)]
+struct Accumulator {
+    text: String,
+    reasoning: String,
+    done_items: usize,
+    events: usize,
+    bytes: usize,
+}
+
+fn invalid(cause: &'static str) -> ProviderError {
+    ProviderError::with_cause(ErrorKind::InvalidResponse, cause)
+}
+
+fn failed(value: &Value) -> ProviderError {
+    // Classify only known machine codes. Server messages can echo credentials
+    // or prompts, so neither errors nor debug logs may retain them.
+    let error = value
+        .pointer("/response/error")
+        .or_else(|| value.get("error"))
+        .unwrap_or(value);
+    let mut error = http::payload_error(200, &serde_json::json!({"error": error}));
+    error.cause = Some("Codex reported a failed response (response.failed/error)");
+    error
+}
+
+fn incomplete(response: &Value) -> ProviderError {
+    match response.pointer("/incomplete_details/reason").and_then(Value::as_str) {
+        Some("max_output_tokens") => ProviderError::with_cause(
+            ErrorKind::OutputLimit, "Codex exhausted its output budget; request a shorter response (this endpoint cannot raise max_tokens)",
+        ),
+        Some("content_filter") => invalid("Codex response blocked by content filtering; rephrase the request"),
+        _ => invalid("Codex reported an incomplete response; no tool calls were accepted"),
+    }
+}
+
+impl Accumulator {
+    fn push(
+        &mut self,
+        event: crate::sse::Event,
+        on_delta: &(dyn Fn(StreamDelta) + Send + Sync),
+    ) -> Result<Option<ChatResponse>, ProviderError> {
+        self.events += 1;
+        self.bytes = self.bytes.saturating_add(event.data.len());
+        if self.bytes > 32 * 1024 * 1024 {
+            return Err(invalid("Codex stream exceeded the 32 MiB safety limit"));
+        }
+        if event.data.trim() == "[DONE]" {
+            return Err(ProviderError::with_cause(
+                ErrorKind::Interrupted,
+                "Codex sent [DONE] without response.completed; no tool calls were accepted",
+            ));
+        }
+        let value: Value = serde_json::from_str(&event.data)
+            .map_err(|_| invalid("Codex SSE event contained malformed JSON"))?;
+        // Some proxies retain only the SSE event name, others only JSON type.
+        let kind = value["type"].as_str().unwrap_or(&event.event);
+        match kind {
+            "response.output_text.delta" | "response.refusal.delta" => {
+                let delta = value["delta"]
+                    .as_str()
+                    .ok_or_else(|| invalid("Codex text delta is missing text"))?;
+                self.text.push_str(delta);
+                on_delta(StreamDelta::Text { text: delta.into() });
+            }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                let delta = value["delta"]
+                    .as_str()
+                    .ok_or_else(|| invalid("Codex reasoning delta is missing text"))?;
+                self.reasoning.push_str(delta);
+                on_delta(StreamDelta::Reasoning { text: delta.into() });
+            }
+            "response.output_item.added" if value["item"]["type"] == "function_call" => {
+                on_delta(StreamDelta::ToolCall {
+                    index: output_index(&value)?,
+                    id: value["item"]["call_id"].as_str().map(str::to_string),
+                    name: value["item"]["name"].as_str().map(str::to_string),
+                    arguments: value["item"]["arguments"].as_str().map(str::to_string),
+                });
+            }
+            "response.function_call_arguments.delta" => {
+                on_delta(StreamDelta::ToolCall {
+                    index: output_index(&value)?,
+                    id: None,
+                    name: None,
+                    arguments: Some(
+                        value["delta"]
+                            .as_str()
+                            .ok_or_else(|| invalid("Codex tool argument delta is missing text"))?
+                            .into(),
+                    ),
+                });
+            }
+            "response.output_item.done" => {
+                if !value["item"].is_object() {
+                    return Err(invalid("Codex output_item.done is missing its item"));
+                }
+                // For diagnostics only: the terminal response must supply the
+                // authoritative output array before any tool is accepted.
+                self.done_items += 1;
+            }
+            "response.failed" | "error" => return Err(failed(&value)),
+            "response.incomplete" => return Err(incomplete(&value["response"])),
+            "response.completed" | "response.done" => {
+                let response = &value["response"];
+                if !response.is_object() {
+                    return Err(invalid(
+                        "Codex completion event is missing its response object",
+                    ));
+                }
+                if response.get("error").is_some_and(|error| !error.is_null()) {
+                    return Err(failed(&value));
+                }
+                match response["status"].as_str() {
+                    Some("failed") => return Err(failed(&value)),
+                    Some("incomplete") => return Err(incomplete(response)),
+                    Some("completed") | None => {}
+                    _ => return Err(invalid("Codex completion event has a non-completed status")),
+                }
+                return self.finish(response).map(Some);
+            }
+            // Lifecycle, usage and new informational event types are harmless.
+            _ => {}
+        }
+        Ok(None)
+    }
+
+    fn finish(&self, response: &Value) -> Result<ChatResponse, ProviderError> {
+        let output = match response.get("output") {
+            Some(Value::Array(items)) => items,
+            _ => {
+                return Err(invalid(
+                    "Codex completed response.output is missing or not an array",
+                ))
+            }
+        };
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut tool_calls = Vec::new();
+        let mut unsupported = false;
+        for item in output {
+            match item["type"].as_str() {
+                Some("message") => {
+                    for part in item["content"].as_array().into_iter().flatten() {
+                        if let Some(text) =
+                            part["text"].as_str().or_else(|| part["refusal"].as_str())
+                        {
+                            content.push_str(text);
+                        }
+                    }
+                }
+                Some("reasoning") => {
+                    for part in item["summary"].as_array().into_iter().flatten() {
+                        if let Some(text) = part["text"].as_str() {
+                            reasoning.push_str(text);
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    if item
+                        .get("status")
+                        .is_some_and(|status| status != "completed")
+                    {
+                        return Err(invalid(
+                            "Codex function call is not completed; no tools were executed",
+                        ));
+                    }
+                    let id = item["call_id"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .ok_or_else(|| {
+                            invalid(
+                                "Codex function call is missing call_id; no tools were executed",
+                            )
+                        })?;
+                    if tool_calls.iter().any(|call: &ToolCall| call.id == id) {
+                        return Err(invalid(
+                            "Codex returned duplicate call_ids; no tools were executed",
+                        ));
+                    }
+                    let name = item["name"]
+                        .as_str()
+                        .filter(|name| !name.trim().is_empty())
+                        .ok_or_else(|| {
+                            invalid(
+                                "Codex function call is missing its name; no tools were executed",
+                            )
+                        })?;
+                    let arguments = item["arguments"].as_str().ok_or_else(|| {
+                        invalid("Codex function call arguments are missing or not a string")
+                    })?;
+                    if !serde_json::from_str::<Value>(arguments).is_ok_and(|args| args.is_object())
+                    {
+                        return Err(invalid("Codex tool arguments are not a valid JSON object (possibly truncated); no tools were executed"));
+                    }
+                    tool_calls.push(ToolCall {
+                        id: id.into(),
+                        function: FunctionCall {
+                            name: name.into(),
+                            arguments: arguments.into(),
+                        },
+                    });
+                }
+                _ => unsupported = true,
+            }
+        }
+        if content.is_empty() {
+            content.clone_from(&self.text);
+        }
+        if reasoning.is_empty() {
+            reasoning.clone_from(&self.reasoning);
+        }
+        if content.trim().is_empty() && tool_calls.is_empty() {
+            return Err(invalid(if unsupported {
+                "Codex completed with unsupported output items and no text or function calls"
+            } else if !reasoning.is_empty() {
+                "Codex completed with reasoning only; no answer or function calls were returned"
+            } else {
+                "Codex completed without any text or function calls"
+            }));
+        }
+        let usage = response.get("usage").filter(|u| u.is_object()).map(|u| {
+            let prompt_tokens = tokens(&u["input_tokens"]);
+            let completion_tokens = tokens(&u["output_tokens"]);
+            Usage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: u["total_tokens"]
+                    .as_u64()
+                    .map(|n| n.min(u32::MAX as u64) as u32)
+                    .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens)),
+            }
+        });
+        Ok(ChatResponse {
+            finish_reason: Some(
+                if tool_calls.is_empty() {
+                    "stop"
+                } else {
+                    "tool_calls"
+                }
+                .into(),
+            ),
+            content: (!content.is_empty()).then_some(content),
+            reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+            tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+            usage,
+        })
+    }
+}
+
+fn tokens(value: &Value) -> u32 {
+    value.as_u64().unwrap_or(0).min(u32::MAX as u64) as u32
+}
+fn output_index(value: &Value) -> Result<usize, ProviderError> {
+    value["output_index"]
+        .as_u64()
+        .filter(|index| *index < 128)
+        .map(|index| index as usize)
+        .ok_or_else(|| invalid("Codex tool preview has a missing or out-of-range output_index"))
+}
+
+pub(super) async fn receive(
     mut response: reqwest::Response,
     on_delta: &(dyn Fn(StreamDelta) + Send + Sync),
 ) -> anyhow::Result<ChatResponse> {
     let headers = response.headers().clone();
-    let mut decoder = crate::sse::Decoder::default();
-    let mut text = String::new();
-    let mut reasoning = String::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(ProviderError::from_reqwest)?
-    {
-        for event in decoder
-            .push(&chunk)
-            .map_err(|_| ProviderError::new(ErrorKind::InvalidResponse))?
+    let status = response.status().as_u16();
+    let mut acc = Accumulator::default();
+    let result = async {
+        if headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .is_some_and(|value| {
+                !value
+                    .to_str()
+                    .unwrap_or("")
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .eq_ignore_ascii_case("text/event-stream")
+            })
         {
-            if event.data == "[DONE]" {
-                continue;
-            }
-            let value: serde_json::Value = serde_json::from_str(&event.data)
-                .map_err(|_| ProviderError::new(ErrorKind::InvalidResponse))?;
-            match value["type"].as_str().unwrap_or(&event.event) {
-                "response.output_text.delta" | "response.refusal.delta" => {
-                    if let Some(delta) = value["delta"].as_str() {
-                        text.push_str(delta);
-                        on_delta(StreamDelta::Text {
-                            text: delta.to_string(),
-                        });
-                    }
+            return Err(invalid(
+                "Codex returned a non-SSE response; expected Content-Type text/event-stream",
+            ));
+        }
+        let mut decoder = crate::sse::Decoder::default();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(ProviderError::from_reqwest)?
+        {
+            // Decode bytes only after a complete line: handles split UTF-8 and
+            // CRLF, unlike decoding each HTTP chunk then looking for \n\n.
+            for event in decoder.push(&chunk).map_err(|_| {
+                invalid("Codex SSE framing is invalid (UTF-8 or frame exceeds 1 MiB)")
+            })? {
+                if let Some(result) = acc.push(event, on_delta)? {
+                    return Ok(result); // completion, not socket EOF, ends the response
                 }
-                "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-                    if let Some(delta) = value["delta"].as_str() {
-                        reasoning.push_str(delta);
-                        on_delta(StreamDelta::Reasoning {
-                            text: delta.to_string(),
-                        });
-                    }
-                }
-                "response.output_item.added" if value["item"]["type"] == "function_call" => {
-                    let item = &value["item"];
-                    on_delta(StreamDelta::ToolCall {
-                        index: value["output_index"].as_u64().unwrap_or(0) as usize,
-                        id: item["call_id"].as_str().map(str::to_string),
-                        name: item["name"].as_str().map(str::to_string),
-                        arguments: None,
-                    });
-                }
-                "response.function_call_arguments.delta" => on_delta(StreamDelta::ToolCall {
-                    index: value["output_index"].as_u64().unwrap_or(0) as usize,
-                    id: None,
-                    name: None,
-                    arguments: value["delta"].as_str().map(str::to_string),
-                }),
-                "response.completed" => {
-                    return completed_response(&value["response"], text, reasoning)
-                }
-                "response.incomplete" => {
-                    let kind = match value["response"]["incomplete_details"]["reason"].as_str() {
-                        Some("max_output_tokens") => ErrorKind::OutputLimit,
-                        _ => ErrorKind::InvalidResponse,
-                    };
-                    return Err(ProviderError {
-                        cause: Some("Codex response incomplete; no tools executed"),
-                        ..ProviderError::new(kind)
-                    }
-                    .into());
-                }
-                "response.failed" | "error" => {
-                    let data = value.get("response").unwrap_or(&value);
-                    // Some error events carry code/type at the top level.
-                    let wrapped = serde_json::json!({"error": data});
-                    let mut error = http::payload_error(
-                        200,
-                        if data.get("error").is_some() {
-                            data
-                        } else {
-                            &wrapped
-                        },
-                    );
-                    http::metadata(&headers, &mut error);
-                    return Err(error.into());
-                }
-                _ => {}
             }
         }
+        Err(ProviderError::with_cause(
+            ErrorKind::Interrupted,
+            "Codex stream ended before response.completed; no tool calls were accepted",
+        ))
     }
-    Err(ProviderError::new(ErrorKind::Interrupted).into())
+    .await
+    .map_err(|mut error| {
+        error.status = Some(status);
+        http::metadata(&headers, &mut error);
+        error
+    });
+    // Never log event bodies, text, tool arguments or arbitrary server messages.
+    tracing::debug!(
+        provider = "codex",
+        http_status = status,
+        events = acc.events,
+        decoded_bytes = acc.bytes,
+        text_bytes = acc.text.len(),
+        reasoning_bytes = acc.reasoning.len(),
+        done_items = acc.done_items,
+        success = result.is_ok(),
+        "Codex stream summary"
+    );
+    Ok(result?)
 }
 
-fn completed_response(
-    completed: &serde_json::Value,
-    text: String,
-    reasoning: String,
-) -> anyhow::Result<ChatResponse> {
-    let invalid = || ProviderError::new(ErrorKind::InvalidResponse);
-    if completed.get("status").is_some_and(|s| s != "completed") {
-        return Err(invalid().into());
-    }
-    let output = completed["output"].as_array().ok_or_else(invalid)?;
-    let mut content = String::new();
-    let mut tool_calls = Vec::new();
-    for item in output {
-        match item["type"].as_str().unwrap_or("") {
-            "message" => {
-                for part in item["content"].as_array().into_iter().flatten() {
-                    if let Some(t) = part["text"].as_str().or_else(|| part["refusal"].as_str()) {
-                        content.push_str(t);
-                    }
-                }
-            }
-            "function_call" => {
-                if item.get("status").is_some_and(|s| s != "completed") {
-                    return Err(invalid().into());
-                }
-                let id = item["call_id"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(invalid)?;
-                let name = item["name"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(invalid)?;
-                let arguments = item["arguments"].as_str().ok_or_else(invalid)?;
-                let parsed: serde_json::Value =
-                    serde_json::from_str(arguments).map_err(|_| invalid())?;
-                if !parsed.is_object() || tool_calls.iter().any(|call: &ToolCall| call.id == id) {
-                    return Err(invalid().into());
-                }
-                tool_calls.push(ToolCall {
-                    id: id.into(),
-                    function: FunctionCall {
-                        name: name.into(),
-                        arguments: arguments.into(),
-                    },
-                });
-            }
-            _ => {}
-        }
-    }
-    if content.is_empty() {
-        content = text;
-    }
-    if content.trim().is_empty() && tool_calls.is_empty() {
-        return Err(invalid().into());
-    }
-    let usage = completed.get("usage").filter(|u| u.is_object()).map(|u| {
-        let prompt_tokens = u["input_tokens"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32;
-        let completion_tokens = u["output_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .min(u32::MAX as u64) as u32;
-        Usage {
-            prompt_tokens,
-            completion_tokens,
-            total_tokens: u["total_tokens"]
-                .as_u64()
-                .map(|n| n.min(u32::MAX as u64) as u32)
-                .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens)),
-        }
-    });
-    Ok(ChatResponse {
-        finish_reason: Some(
-            if tool_calls.is_empty() {
-                "stop"
-            } else {
-                "tool_calls"
-            }
-            .into(),
-        ),
-        content: if content.is_empty() {
-            None
-        } else {
-            Some(content)
-        },
-        reasoning_content: if reasoning.is_empty() {
-            None
-        } else {
-            Some(reasoning)
-        },
-        tool_calls: if tool_calls.is_empty() {
-            None
-        } else {
-            Some(tool_calls)
-        },
-        usage,
-    })
-}
+#[cfg(test)]
+#[path = "codex_stream_tests.rs"]
+mod tests;

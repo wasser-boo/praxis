@@ -225,9 +225,26 @@ checks; offline coverage does not establish live Codex subscription compatibilit
 - Prompt caps are regression tripwires, not a guarantee that arbitrary user
   memory, tool schemas and history fit a 4096-token model context.
 
+## TUI and diagnostic follow-up
+
+The offline merge retains the audit fixes above and adds the TUI fixes:
+explicit/blank line breaks and indentation, column-aware wrapping, bottom
+padding, and scroll offsets that do not overflow on large transcripts. Failed
+tool previews are cleared, provider errors include specific safe causes and
+request IDs, and opt-in debug logs omit stream payloads. Both sets of regression
+tests are retained; live Codex compatibility remains unverified.
+
+The disappearing-box regression is also covered: completion popups cannot erase
+the composer on small terminals; validated replies survive the saved-history
+handoff and tool continuations; disconnects keep clearly marked partial output
+until history/final events recover it. Durable IDs prevent long replies with
+the same opening text from being collapsed into one.
+
 ## Verification
 
-Verified offline against the final source with default Cargo features and real
+### Earlier audit (before the TUI merge)
+
+Verified offline against the audit source with default Cargo features and real
 Microsoft POML **0.0.8** (installed in a temporary virtualenv, not the repository):
 
 - `cargo test -j 1`: **661 library tests passed, 29 ignored; 13 binary tests
@@ -257,4 +274,20 @@ cargo build -j 1
 **Live Codex verification remains outstanding.** No real credentials were read,
 no real tokens were rotated, no live subscription request/device login was made,
 and no deployment was started. The opt-in smoke command in #27 is separate from
-these passing offline checks. The working-tree changes remain uncommitted.
+these passing offline checks.
+
+### Combined offline merge and streaming-visibility verification
+
+Merged the TUI/diagnostic changes onto `d28eb85`, retaining shared OAuth refresh,
+rate-window metadata, secret-store safeguards, login fixes and workflow changes.
+On the agent qube, with one build job and debug symbols disabled:
+
+- `cargo test --offline -- --test-threads=1`: **689 library tests and 13 binary
+  tests passed; 29 optional library tests ignored**. This includes both Codex
+  suites, reconnect/history handoff races and popup/composer rendering tests.
+- The JS syntax, static UI, chat-command and memory UI checks listed above:
+  **passed**.
+- No POML CLI was available in this qube, so real-POML gated/ignored integration
+  checks were not rerun here. Their earlier audit results remain separate above.
+- No live model requests, real credentials, token rotations or deployment were
+  used for this merge verification.

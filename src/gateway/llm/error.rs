@@ -58,7 +58,7 @@ impl fmt::Display for ErrorKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderError {
     pub kind: ErrorKind,
     pub status: Option<u16>,
@@ -76,6 +76,9 @@ impl ProviderError {
             request_id: None,
             cause: None,
         }
+    }
+    pub fn with_cause(kind: ErrorKind, cause: &'static str) -> Self {
+        Self { cause: Some(cause), ..Self::new(kind) }
     }
     pub fn from_reqwest(error: reqwest::Error) -> Self {
         let error = error.without_url();
@@ -182,13 +185,14 @@ pub struct CallFailure {
 }
 impl fmt::Display for CallFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "LLM request failed after {} attempt(s): {}",
-            self.attempts, self.terminal
-        )?;
-        for (provider, error) in &self.failures {
-            write!(f, "; {provider}: {error}")?;
+        write!(f, "LLM request failed after {} attempt(s)", self.attempts)?;
+        for (index, (provider, error)) in self.failures.iter().enumerate() {
+            write!(f, "{} {provider}: {error}", if index == 0 { ":" } else { ";" })?;
+        }
+        // The final attempt normally IS the terminal error. Do not print the
+        // same generic diagnosis twice; retain distinct queue/deadline errors.
+        if self.failures.last().is_none_or(|(_, error)| error != &self.terminal) {
+            write!(f, ": {}", self.terminal)?;
         }
         Ok(())
     }

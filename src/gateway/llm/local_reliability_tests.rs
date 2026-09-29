@@ -31,5 +31,41 @@ fn small_model_cutoff_never_executes_a_partial_batch() {
 fn small_model_empty_tool_name_is_never_repaired_into_an_action() {
     let mut r = response(None, None, "tool_calls");
     r.tool_calls = Some(vec![ToolCall { id: "a".into(), function: FunctionCall {name: "".into(), arguments: "".into()} }]);
-    assert_eq!(validate_response(r).unwrap_err().kind, ErrorKind::InvalidResponse);
+    let error = validate_response(r).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::InvalidResponse);
+    assert!(error.to_string().contains("without a function name"));
+}
+
+#[test]
+fn response_validation_distinguishes_missing_answers_and_bad_arguments() {
+    for (r, cause) in [
+        (response(None, None, "stop"), "no answer text"),
+        (response(None, Some("private reasoning"), "stop"), "reasoning only"),
+        (response(None, None, "tool_calls"), "reported tool_calls"),
+    ] {
+        assert!(validate_response(r).unwrap_err().to_string().contains(cause));
+    }
+    let mut r = response(None, None, "tool_calls");
+    r.tool_calls = Some(vec![ToolCall {id:"a".into(),function:FunctionCall {name:"write_file".into(), arguments:"{SECRET".into()}}]);
+    let error = validate_response(r).unwrap_err();
+    assert!(error.to_string().contains("not a valid JSON object"));
+    assert!(!format!("{error:?}").contains("SECRET"));
+    let failure = CallFailure {attempts:1, failures:vec![("codex".into(),error.clone())], terminal:error};
+    let message = failure.to_string();
+    assert!(message.contains("codex:"));
+    assert_eq!(message.matches("invalid or empty provider response").count(), 1);
+}
+
+#[test]
+fn tool_only_failure_aborts_previews_before_retry() {
+    let user = "tool-only-preview-abort-test";
+    let mut events = crate::dashboard::stream::get_or_create(user).subscribe();
+    let attempt = StreamAttempt::new(Some(user));
+    attempt.previewed.store(true, Ordering::Relaxed);
+    drop(attempt);
+    let mut aborted = false;
+    while let Ok(event) = events.try_recv() {
+        aborted |= event.event == "stream_abort";
+    }
+    assert!(aborted);
 }
