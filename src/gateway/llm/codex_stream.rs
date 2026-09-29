@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 struct Accumulator {
     text: String,
     reasoning: BTreeMap<(u64, u64), String>,
-    done_items: usize,
+    done_items: Vec<Value>,
     events: usize,
     bytes: usize,
 }
@@ -113,8 +113,9 @@ impl Accumulator {
                 if !value["item"].is_object() {
                     return Err(invalid("Codex output_item.done is missing its item"));
                 }
-                // Reasoning is display-only; tools still require authoritative
-                // terminal output before they can be accepted.
+                // Retain complete items: Codex can omit them from the terminal
+                // response.output. Tools still require successful response
+                // completion and validation; preview fragments are never used.
                 if value["item"]["type"] == "reasoning" {
                     for (index, part) in value["item"]["summary"]
                         .as_array()
@@ -130,7 +131,7 @@ impl Accumulator {
                         }
                     }
                 }
-                self.done_items += 1;
+                self.done_items.push(value["item"].clone());
             }
             "response.failed" | "error" => return Err(failed(&value)),
             "response.incomplete" => return Err(incomplete(&value["response"])),
@@ -199,12 +200,14 @@ impl Accumulator {
 
     fn finish(&self, response: &Value) -> Result<ChatAttempt, ProviderError> {
         let output = match response.get("output") {
-            Some(Value::Array(items)) => items,
-            _ => {
-                return Err(invalid(
-                    "Codex completed response.output is missing or not an array",
-                ))
-            }
+            // A populated terminal snapshot is authoritative. Do not merge it
+            // with streamed items, which could duplicate tool executions.
+            Some(Value::Array(items)) if !items.is_empty() => items,
+            // Some Codex streams finish with only status/usage and an empty or
+            // omitted output. Only output_item.done payloads may fill that gap;
+            // added items and argument deltas remain display-only previews.
+            Some(Value::Array(_)) | Some(Value::Null) | None => &self.done_items,
+            _ => return Err(invalid("Codex completed response.output is not an array")),
         };
         let mut content = String::new();
         let mut reasoning_parts = Vec::new();
@@ -407,7 +410,7 @@ pub(super) async fn receive(
         decoded_bytes = acc.bytes,
         text_bytes = acc.text.len(),
         reasoning_bytes = acc.reasoning.values().map(String::len).sum::<usize>(),
-        done_items = acc.done_items,
+        done_items = acc.done_items.len(),
         success = result.is_ok(),
         "Codex stream summary"
     );

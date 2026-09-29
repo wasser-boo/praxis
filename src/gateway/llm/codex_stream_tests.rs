@@ -114,34 +114,156 @@ fn codex_accepts_event_names_and_done_alias_but_not_unfinished_items() {
 }
 
 #[test]
-fn codex_terminal_output_is_authoritative_and_missing_usage_totals_are_recovered() {
+fn codex_nonempty_terminal_output_is_authoritative_and_usage_totals_are_recovered() {
     let mut acc = Accumulator::default();
     acc.push(
         event(json!({"type":"response.output_item.done", "item":call()})),
         &|_| {},
     )
     .unwrap();
-    let error = acc
+    let mut final_call = call();
+    final_call["arguments"] = json!("{\"path\":\"final\"}");
+    let mut response = completed(json!([final_call]));
+    response["response"]["usage"] = json!({"input_tokens":7,"output_tokens":5});
+    let response = acc.push(event(response), &|_| {}).unwrap().unwrap().response;
+    let calls = response.tool_calls.unwrap();
+    assert_eq!(calls.len(), 1, "terminal and streamed items must not be duplicated");
+    assert_eq!(calls[0].function.arguments, "{\"path\":\"final\"}");
+    assert_eq!(response.usage.unwrap().total_tokens, 12);
+
+    // A nonempty terminal output replaces, rather than merges with, done items.
+    let response = acc
         .push(
-            event(json!({"type":"response.completed", "response":{"status":"completed"}})),
+            event(completed(json!([{"type":"message","content":[{"text":"final answer"}]}]))),
             &|_| {},
         )
-        .unwrap_err();
-    assert!(error.to_string().contains("response.output is missing"));
-    let error = acc.push(event(completed(json!([]))), &|_| {}).unwrap_err();
-    assert!(error.to_string().contains("without any text"));
-    let mut response = completed(json!([call()]));
-    response["response"]["usage"] = json!({"input_tokens":7,"output_tokens":5});
+        .unwrap()
+        .unwrap()
+        .response;
+    assert_eq!(response.content.as_deref(), Some("final answer"));
+    assert!(response.tool_calls.is_none());
+}
+
+#[test]
+fn codex_completed_items_supply_output_when_terminal_omits_it() {
+    for kind in ["response.completed", "response.done"] {
+        for output in [None, Some(Value::Null), Some(json!([]))] {
+            let mut acc = Accumulator::default();
+            assert!(acc
+                .push(
+                    event(json!({"type":"response.output_item.done","output_index":0,"item":call()})),
+                    &|_| {},
+                )
+                .unwrap()
+                .is_none(), "done items must wait for successful response completion");
+            let mut terminal = json!({"type":kind,"response":{"status":"completed",
+                "usage":{"input_tokens":7,"output_tokens":5}}});
+            if let Some(output) = output {
+                terminal["response"]["output"] = output;
+            }
+            let attempt = acc.push(event(terminal), &|_| {}).unwrap().unwrap();
+            assert!(attempt.continuation.is_none());
+            assert_eq!(attempt.response.finish_reason.as_deref(), Some("tool_calls"));
+            let calls = attempt.response.tool_calls.unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id, "call_1");
+            assert_eq!(calls[0].function.name, "read_file");
+            assert_eq!(calls[0].function.arguments, "{\"path\":\"日本🙂\"}");
+            assert_eq!(attempt.response.usage.unwrap().total_tokens, 12);
+        }
+    }
+}
+
+#[test]
+fn codex_preview_fragments_never_supply_missing_terminal_tools() {
+    let mut acc = Accumulator::default();
+    for value in [
+        json!({"type":"response.output_item.added","output_index":0,"item":call()}),
+        json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"{}"}),
+        json!({"type":"response.function_call_arguments.done","output_index":0,"arguments":"{}"}),
+    ] {
+        assert!(acc.push(event(value), &|_| {}).unwrap().is_none());
+    }
     assert_eq!(
-        acc.push(event(response), &|_| {})
-            .unwrap()
-            .unwrap()
-            .response
-            .usage
-            .unwrap()
-            .total_tokens,
-        12
+        acc.push(event(completed(json!([]))), &|_| {}).unwrap_err().kind,
+        ErrorKind::InvalidResponse
     );
+}
+
+#[test]
+fn codex_done_item_fallback_preserves_messages_and_replayable_reasoning() {
+    let reasoning = json!({"type":"reasoning","id":"rs_1","summary":[],
+        "encrypted_content":"OPAQUE-SECRET"});
+    let mut acc = Accumulator::default();
+    acc.push(
+        event(json!({"type":"response.output_item.done","item":reasoning})),
+        &|_| {},
+    ).unwrap();
+    let attempt = acc.push(event(completed(json!([]))), &|_| {}).unwrap().unwrap();
+    assert_eq!(attempt.response.finish_reason.as_deref(), Some("reasoning"));
+    let state = attempt.continuation.unwrap();
+    assert!(!format!("{state:?}").contains("OPAQUE-SECRET"));
+    let ProviderContinuation::Codex { input } = state;
+    assert_eq!(input, vec![reasoning]);
+
+    // Done-only messages also work when text deltas were omitted by a proxy.
+    acc.push(
+        event(json!({"type":"response.output_item.done","item":{"type":"message",
+            "content":[{"type":"output_text","text":"Hello 日本🙂"}]}})),
+        &|_| {},
+    ).unwrap();
+    let attempt = acc.push(event(completed(json!([]))), &|_| {}).unwrap().unwrap();
+    assert!(attempt.continuation.is_none());
+    assert_eq!(attempt.response.content.as_deref(), Some("Hello 日本🙂"));
+}
+
+#[test]
+fn codex_done_items_do_not_override_failed_incomplete_or_malformed_terminals() {
+    for (terminal, kind) in [
+        (json!({"type":"response.failed","response":{"error":{"code":"server_error"}}}), ErrorKind::Unavailable),
+        (json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}), ErrorKind::OutputLimit),
+        (json!({"type":"response.completed","response":{"status":"failed","error":{"code":"server_error"}}}), ErrorKind::Unavailable),
+        (json!({"type":"response.completed","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}), ErrorKind::OutputLimit),
+        (json!({"type":"response.completed","response":{"status":"in_progress","output":[]}}), ErrorKind::InvalidResponse),
+        (json!({"type":"response.completed","response":{"status":"completed","output":{}}}), ErrorKind::InvalidResponse),
+        (json!({"type":"response.completed"}), ErrorKind::InvalidResponse),
+    ] {
+        let mut acc = Accumulator::default();
+        acc.push(event(json!({"type":"response.output_item.done","item":call()})), &|_| {}).unwrap();
+        assert_eq!(acc.push(event(terminal), &|_| {}).unwrap_err().kind, kind);
+    }
+    let mut acc = Accumulator::default();
+    acc.push(event(json!({"type":"response.output_item.done","item":call()})), &|_| {}).unwrap();
+    assert_eq!(acc.push(crate::sse::Event {
+        event: "message".into(), data: "[DONE]".into(),
+    }, &|_| {}).unwrap_err().kind, ErrorKind::Interrupted);
+}
+
+#[tokio::test]
+async fn codex_done_item_fallback_validates_the_entire_tool_batch() {
+    for (field, value, diagnostic) in [
+        ("call_id", json!(""), "missing call_id"),
+        ("call_id", json!("call_1"), "duplicate call_ids"),
+        ("name", json!(""), "missing its name"),
+        ("arguments", json!("{SECRET"), "not a valid JSON object"),
+        ("arguments", json!("[]"), "not a valid JSON object"),
+        ("arguments", json!({}), "not a string"),
+        ("status", json!("in_progress"), "not completed"),
+    ] {
+        let mut bad_call = call();
+        bad_call["call_id"] = json!("call_2");
+        bad_call[field] = value;
+        let (_server, response) = serve(wire(&[
+            json!({"type":"response.output_item.done","output_index":0,"item":call()}),
+            json!({"type":"response.output_item.done","output_index":1,"item":bad_call}),
+            completed(json!([])),
+        ]), "text/event-stream").await;
+        let error = receive(response, &|_| {}).await.unwrap_err();
+        assert_eq!(error.downcast_ref::<ProviderError>().unwrap().kind, ErrorKind::InvalidResponse);
+        assert!(error.to_string().contains(diagnostic), "{error}");
+        assert!(error.to_string().contains("req_test-123"));
+        assert!(!format!("{error:?}").contains("SECRET"));
+    }
 }
 
 #[tokio::test]

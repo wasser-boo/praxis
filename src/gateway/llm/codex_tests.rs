@@ -148,6 +148,86 @@ async fn codex_both_stream_entry_points_forward_their_display_deltas() {
 }
 
 #[tokio::test]
+async fn codex_streamed_tools_with_empty_terminal_output_execute_once_and_continue() {
+    use serde_json::{json, Value};
+    let server = MockServer::start().await;
+    Mock::given(path("/responses"))
+        .respond_with(|req: &wiremock::Request| {
+            let body: Value = req.body_json().unwrap();
+            let input = body["input"].as_array().unwrap();
+            let results: Vec<_> = input.iter()
+                .filter(|item| item["type"] == "function_call_output").collect();
+            let events = if results.is_empty() {
+                vec![
+                    json!({"type":"response.output_item.added","output_index":0,"item":{
+                        "type":"function_call","id":"fc_1","call_id":"call_1",
+                        "name":"agent_feedback","arguments":"","status":"in_progress"}}),
+                    json!({"type":"response.function_call_arguments.delta","output_index":0,
+                        "delta":"{\"message\":"}),
+                    json!({"type":"response.function_call_arguments.delta","output_index":0,
+                        "delta":"\"Exactly once\"}"}),
+                    json!({"type":"response.output_item.done","output_index":0,"item":{
+                        "type":"function_call","id":"fc_1","call_id":"call_1",
+                        "name":"agent_feedback","arguments":"{\"message\":\"Exactly once\"}",
+                        "status":"completed"}}),
+                    json!({"type":"response.completed","response":{"status":"completed","output":[]}}),
+                ]
+            } else {
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0]["call_id"], "call_1");
+                let calls: Vec<_> = input.iter()
+                    .filter(|item| item["type"] == "function_call").collect();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0]["call_id"], "call_1");
+                assert_eq!(calls[0]["arguments"], "{\"message\":\"Exactly once\"}");
+                vec![json!({"type":"response.completed","response":{"status":"completed",
+                    "output":[{"type":"message","content":[{"type":"output_text","text":"Finished"}]}]}})]
+            };
+            let sse: String = events.iter().map(|event| format!("data: {event}\n\n")).collect();
+            ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream")
+        })
+        .expect(3) // One streamed preview request, then a two-turn tool loop; no retries.
+        .mount(&server).await;
+    let router = super::super::LLMRouter::with_providers(
+        vec![Box::new(provider(&server))], "codex".into(), vec![], Default::default(),
+    );
+    let user = "codex-empty-terminal-tool-loop";
+    let mut events = crate::dashboard::stream::get_or_create(user).subscribe();
+    let mut req = request();
+    req.tools = Some(vec![ToolDefinition {
+        tool_type: "function".into(),
+        function: FunctionDefinition {
+            name: "agent_feedback".into(), description: "Feedback".into(),
+            parameters: json!({"type":"object","properties":{"message":{"type":"string"}}}),
+        },
+    }]);
+    let response = router.chat_controlled(
+        req.clone(), None, Some(user), &tokio_util::sync::CancellationToken::new(),
+    ).await.unwrap();
+    assert_eq!(response.finish_reason.as_deref(), Some("tool_calls"));
+    assert_eq!(response.tool_calls.unwrap().len(), 1);
+    let mut previews = 0;
+    let mut ends = 0;
+    while let Ok(event) = events.try_recv() {
+        assert_ne!(event.event, "stream_abort");
+        if event.event == "tool_call_delta" { previews += 1; }
+        if event.event == "stream_end" { ends += 1; }
+    }
+    assert_eq!(previews, 3);
+    assert_eq!(ends, 1);
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::db::Database::new(dir.path()).unwrap();
+    let result = router.chat_with_tools(
+        &db, user, req.messages, req.tools.unwrap(), Some(2), None, None, None,
+    ).await.unwrap();
+    assert_eq!(result.response, "Finished");
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.feedback_messages, vec!["Exactly once"]);
+    crate::dashboard::stream::remove(user);
+}
+
+#[tokio::test]
 async fn codex_refresh_rejection_requires_fresh_login_without_echoing_secrets() {
     for status in [400, 401, 403] {
         let server = MockServer::start().await;
