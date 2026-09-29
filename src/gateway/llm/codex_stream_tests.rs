@@ -570,3 +570,13 @@ async fn codex_completion_ends_read_without_waiting_for_socket_eof() {
         Some("done")
     );
 }
+
+#[test]
+fn usage_metrics_codex_partial_counts_are_unavailable() {
+    for usage in [json!({}), json!({"output_tokens":5}), json!({"input_tokens":4294967296u64,"output_tokens":5})] {
+        let mut value = completed(json!([{"type":"message","content":[{"type":"output_text","text":"ok"}]}]));
+        value["response"]["usage"] = usage;
+        let response = Accumulator::default().push(event(value), &|_| {}).unwrap().unwrap().response;
+        assert!(response.usage.is_none(), "missing/overflowed counts must not become zero/clamped tokens: {:?}", response.usage);
+    }
+}

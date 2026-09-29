@@ -176,7 +176,9 @@ impl LLMRouter {
             // Native continuation state belongs only to this logical call and
             // provider, never to durable history or a configured fallback.
             let mut continuation: Option<ProviderContinuation> = None;
-            let mut usage = None;
+            // Zero is the additive identity only before any successful step.
+            // Once a step lacks usage, the logical-call total stays unavailable.
+            let mut usage = Some(Usage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
             if index > 0 {
                 // Use the explicitly configured fallback's own default model.
                 req.model = None;
@@ -427,12 +429,13 @@ impl LLMRouter {
 }
 
 fn add_usage(total: &mut Option<Usage>, usage: Option<Usage>) {
-    if let Some(usage) = usage {
-        let total = total.get_or_insert(Usage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
-        total.prompt_tokens = total.prompt_tokens.saturating_add(usage.prompt_tokens);
-        total.completion_tokens = total.completion_tokens.saturating_add(usage.completion_tokens);
-        total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
-    }
+    *total = total.as_ref().zip(usage.as_ref()).and_then(|(total, usage)| {
+        Some(Usage {
+            prompt_tokens: total.prompt_tokens.checked_add(usage.prompt_tokens)?,
+            completion_tokens: total.completion_tokens.checked_add(usage.completion_tokens)?,
+            total_tokens: total.total_tokens.checked_add(usage.total_tokens)?,
+        })
+    });
 }
 
 fn label(name: &str) -> String {

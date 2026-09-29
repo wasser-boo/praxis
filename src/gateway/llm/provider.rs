@@ -146,6 +146,41 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+impl Usage {
+    /// A usage sample is available only when both provider counters are exact.
+    /// Never turn missing/invalid counters into reported zero or silently clamp.
+    pub(crate) fn from_counts(input: &serde_json::Value, output: &serde_json::Value) -> Option<Self> {
+        let prompt_tokens = Self::counter(input)?;
+        let completion_tokens = Self::counter(output)?;
+        Some(Self { prompt_tokens, completion_tokens,
+            total_tokens: prompt_tokens.checked_add(completion_tokens)? })
+    }
+
+    pub(crate) fn counter(value: &serde_json::Value) -> Option<u32> {
+        u32::try_from(value.as_u64()?).ok()
+    }
+
+    pub(crate) fn openai(value: &serde_json::Value) -> Option<Self> {
+        Self::with_total(value, "prompt_tokens", "completion_tokens")
+    }
+
+    pub(crate) fn responses(value: &serde_json::Value) -> Option<Self> {
+        Self::with_total(value, "input_tokens", "output_tokens")
+    }
+
+    fn with_total(value: &serde_json::Value, input: &str, output: &str) -> Option<Self> {
+        let mut usage = Self::from_counts(&value[input], &value[output])?;
+        // A missing total can be derived exactly, not estimated from text.
+        // Preserve a supplied valid total; reject inconsistent/invalid samples.
+        if let Some(total) = value.get("total_tokens").filter(|v| !v.is_null()) {
+            let total = Self::counter(total)?;
+            if total < usage.total_tokens { return None; }
+            usage.total_tokens = total;
+        }
+        Some(usage)
+    }
+}
+
 /// Request-local provider state. Never persist it as chat history, display it,
 /// or forward it to a fallback provider. In particular, encrypted reasoning is
 /// opaque and must not appear in diagnostics.
