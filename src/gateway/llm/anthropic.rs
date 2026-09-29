@@ -278,10 +278,20 @@ pub fn parse_anthropic_response(data: &serde_json::Value) -> anyhow::Result<Chat
         content,
         tool_calls,
         finish_reason: data["stop_reason"].as_str().map(|s| s.to_string()),
-        usage: Some(Usage {
-            prompt_tokens: data["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
-            completion_tokens: data["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
-            total_tokens: 0,
-        }),
+        usage: parse_usage(&data["usage"]),
     })
+}
+
+fn parse_usage(value: &serde_json::Value) -> Option<Usage> {
+    let mut usage = Usage::from_counts(&value["input_tokens"], &value["output_tokens"])?;
+    // Anthropic's input_tokens excludes cache hits/writes. Those two top-level
+    // counters are disjoint; cache_creation's duration breakdown is NOT extra.
+    // https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+    for field in ["cache_creation_input_tokens", "cache_read_input_tokens"] {
+        if let Some(count) = value.get(field) {
+            usage.prompt_tokens = usage.prompt_tokens.checked_add(Usage::counter(count)?)?;
+        }
+    }
+    usage.total_tokens = usage.prompt_tokens.checked_add(usage.completion_tokens)?;
+    Some(usage)
 }

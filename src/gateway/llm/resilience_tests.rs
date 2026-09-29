@@ -636,3 +636,41 @@ async fn resilience_output_limit_without_a_growable_bound_never_retries_or_falls
         assert!(fallback_calls.lock().unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+async fn usage_metrics_continuation_must_not_present_partial_sum_as_complete() {
+    struct Continued { calls: std::sync::atomic::AtomicUsize, samples: Vec<Option<Usage>> }
+    #[async_trait::async_trait]
+    impl LLMProvider for Continued {
+        fn name(&self) -> &str { "usage-fixture" }
+        fn as_any(&self) -> &dyn std::any::Any { self }
+        async fn chat(&self, _: ChatRequest) -> anyhow::Result<ChatResponse> { unreachable!() }
+        async fn chat_attempt(&self, _: ChatRequest, _: Option<&ProviderContinuation>, _: Option<&(dyn Fn(StreamDelta)+Send+Sync)>) -> anyhow::Result<ChatAttempt> {
+            let index = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let first = index + 1 < self.samples.len();
+            let mut response = reply();
+            response.usage = self.samples[index].clone();
+            if first { response.content = None; response.finish_reason = Some("reasoning".into()); }
+            Ok(ChatAttempt {response,continuation:first.then_some(ProviderContinuation::Codex {input:vec![]})})
+        }
+    }
+    let known = Some(Usage {prompt_tokens:7,completion_tokens:5,total_tokens:12});
+    let huge = Some(Usage {prompt_tokens:u32::MAX,completion_tokens:0,total_tokens:u32::MAX});
+    for streamed in [false, true] {
+        for (samples, expected) in [
+            (vec![None, known.clone()], None),
+            (vec![known.clone(), None], None),
+            (vec![known.clone(), None, known.clone()], None),
+            (vec![known.clone(), known.clone(), known.clone()], Some(36)),
+            (vec![huge.clone(), known.clone()], None),
+        ] {
+            let r = LLMRouter::with_providers(vec![Box::new(Continued {calls:0.into(),samples})],
+                "usage-fixture".into(),vec![],ResilienceConfig {max_attempts:3,..Default::default()});
+            let response = if streamed { r.streaming_chat(request(), None, "usage-continuation-fixture").await }
+                else { r.chat(request(), None).await }.unwrap();
+            assert_eq!(response.usage.map(|u|u.total_tokens), expected,
+                "only a complete, exact logical-call sum is available");
+            crate::dashboard::stream::remove("usage-continuation-fixture");
+        }
+    }
+}

@@ -17,11 +17,7 @@ impl Accumulator {
     fn push(&mut self, data: Value, on_delta: &(dyn Fn(StreamDelta) + Send + Sync)) -> anyhow::Result<()> {
         if data.get("error").is_some() { return Err(http::payload_error(200, &data).into()); }
         if let Some(usage) = data.get("usage").filter(|u| u.is_object()) {
-            self.usage = Some(Usage {
-                prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
-                completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
-                total_tokens: usage["total_tokens"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
-            });
+            self.usage = Usage::openai(usage);
         }
         for choice in data["choices"].as_array().into_iter().flatten() {
             if choice["index"].as_u64().unwrap_or(0) != 0 { continue; }
@@ -107,4 +103,19 @@ mod tests {
     fn native_stream_requires_explicit_completion() {
         assert!(Accumulator::default().finish().is_err());
     }
+    #[test]
+    fn usage_metrics_llamacpp_stream_preserves_unknown_and_deduplicates_snapshots() {
+        for (usage, expected) in [
+            (serde_json::json!({"completion_tokens":5}), serde_json::Value::Null),
+            (serde_json::json!({"prompt_tokens":7,"completion_tokens":5}),
+                serde_json::json!({"prompt_tokens":7,"completion_tokens":5,"total_tokens":12})),
+        ] {
+            let mut acc = Accumulator::default();
+            for _ in 0..2 {
+                acc.push(serde_json::json!({"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":usage}), &|_| {}).unwrap();
+            }
+            assert_eq!(serde_json::to_value(acc.finish().unwrap().usage).unwrap(), expected);
+        }
+    }
+
 }

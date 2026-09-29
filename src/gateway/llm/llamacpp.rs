@@ -303,22 +303,7 @@ impl LLMProvider for LlamaCppProvider {
             content,
             tool_calls,
             finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),
-            usage: data["usage"].as_object().map(|u| Usage {
-                // A partial usage object must never panic the adapter:
-                // serde_json's Map index panics on missing keys.
-                prompt_tokens: u
-                    .get("prompt_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-                completion_tokens: u
-                    .get("completion_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-                total_tokens: u
-                    .get("total_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-            }),
+            usage: Usage::openai(&data["usage"]),
         })
     }
 

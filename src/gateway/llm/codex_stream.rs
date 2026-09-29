@@ -303,18 +303,7 @@ impl Accumulator {
                 "Codex completed without any text or function calls"
             }));
         }
-        let usage = response.get("usage").filter(|u| u.is_object()).map(|u| {
-            let prompt_tokens = tokens(&u["input_tokens"]);
-            let completion_tokens = tokens(&u["output_tokens"]);
-            Usage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: u["total_tokens"]
-                    .as_u64()
-                    .map(|n| n.min(u32::MAX as u64) as u32)
-                    .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens)),
-            }
-        });
+        let usage = Usage::responses(&response["usage"]);
         Ok(ChatAttempt {
             response: ChatResponse {
                 finish_reason: Some(
@@ -339,9 +328,6 @@ impl Accumulator {
     }
 }
 
-fn tokens(value: &Value) -> u32 {
-    value.as_u64().unwrap_or(0).min(u32::MAX as u64) as u32
-}
 fn output_index(value: &Value) -> Result<usize, ProviderError> {
     value["output_index"]
         .as_u64()

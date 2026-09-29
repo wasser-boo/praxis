@@ -373,9 +373,7 @@ fn check_completion(done_reason: Option<&str>) -> anyhow::Result<()> {
 }
 
 fn parse_usage(data: &serde_json::Value) -> Option<Usage> {
-    let prompt = data.get("prompt_eval_count")?.as_u64()?.min(u64::from(u32::MAX)) as u32;
-    let completion = data.get("eval_count")?.as_u64()?.min(u64::from(u32::MAX)) as u32;
-    Some(Usage { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt.saturating_add(completion) })
+    Usage::from_counts(&data["prompt_eval_count"], &data["eval_count"])
 }
 
 fn parse_tool_calls_from_message(message: &serde_json::Value) -> Option<Vec<ToolCall>> {

@@ -496,3 +496,141 @@ fn resilience_router_rejects_empty_keys_and_shares_same_account_gates() {
     let r = LLMRouter::new(&config, &secrets);
     assert!(!Arc::ptr_eq(&r.gates["openai"], &r.gates["openrouter"]));
 }
+
+// Regression for issue #4: missing/invalid provider counters are not zero tokens.
+// Exercise actual wire adapters, not a second copy of their parsing logic.
+#[tokio::test]
+async fn usage_metrics_http_requires_complete_exact_counters() {
+    use serde_json::json;
+    let mut failures = Vec::new();
+    for name in ADAPTERS.iter().copied().chain(["free_router"]) {
+        let server = MockServer::start().await;
+        let (p, endpoint, template): (Box<dyn LLMProvider>, _, _) = if name == "free_router" {
+            (Box::new(super::free_router::FreeRouterProvider::new(None, "test".into(), server.uri())),
+                "/free/v1/chat/completions", json!({"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}))
+        } else { adapter(name, server.uri()) };
+        let anthropic = name.contains("anthropic");
+        let (input, output) = if anthropic { ("input_tokens", "output_tokens") }
+            else if name == "ollama" { ("prompt_eval_count", "eval_count") }
+            else { ("prompt_tokens", "completion_tokens") };
+        for (case, counters, expected) in [
+            ("missing", serde_json::Value::Null, serde_json::Value::Null),
+            ("empty", json!({}), serde_json::Value::Null),
+            ("array", json!([]), serde_json::Value::Null),
+            ("fraction", json!({input:7.5,output:5}), serde_json::Value::Null),
+            ("boolean", json!({input:true,output:5}), serde_json::Value::Null),
+            ("partial", json!({output:5}), serde_json::Value::Null),
+            ("negative", json!({input:-1,output:5}), serde_json::Value::Null),
+            ("string", json!({input:"7",output:5}), serde_json::Value::Null),
+            ("overflow", json!({input:4294967296u64,output:5}), serde_json::Value::Null),
+            ("sum_overflow", json!({input:4294967295u64,output:1}), serde_json::Value::Null),
+            ("zero", json!({input:0,output:0}), json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0})),
+            ("no_total", json!({input:7,output:5}), json!({"prompt_tokens":7,"completion_tokens":5,"total_tokens":12})),
+        ] {
+            let mut data = template.clone();
+            if name == "ollama" {
+                data.as_object_mut().unwrap().remove("prompt_eval_count");
+                data.as_object_mut().unwrap().remove("eval_count");
+                if let Some(obj) = counters.as_object() { data.as_object_mut().unwrap().extend(obj.clone()); }
+            } else { data["usage"] = counters; }
+            Mock::given(method("POST")).and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_json(data))
+                .expect(1).mount(&server).await;
+            let response = p.chat(request()).await.unwrap();
+            assert_eq!(response.content.as_deref(), Some("ok"), "usage must not break valid content");
+            let actual = serde_json::to_value(response.usage).unwrap();
+            if actual != expected { failures.push(format!("{name}/{case}: expected {expected}, got {actual}")); }
+            server.reset().await;
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn usage_metrics_anthropic_total_includes_disjoint_cached_input() {
+    let response = super::anthropic::parse_anthropic_response(&serde_json::json!({
+        "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
+        "usage":{"input_tokens":7,"output_tokens":5,"cache_creation_input_tokens":11,
+            "cache_read_input_tokens":13,"cache_creation":{"ephemeral_5m_input_tokens":11}}
+    })).unwrap();
+    assert_eq!(serde_json::to_value(response.usage).unwrap(),
+        serde_json::json!({"prompt_tokens":31,"completion_tokens":5,"total_tokens":36}));
+}
+
+#[test]
+fn usage_metrics_totals_are_exact_or_unavailable_not_wrapped() {
+    use serde_json::json;
+    for responses in [false, true] {
+        let (input, output) = if responses { ("input_tokens", "output_tokens") } else { ("prompt_tokens", "completion_tokens") };
+        for (total, expected) in [(json!(null), Some(12)), (json!(12), Some(12)), (json!(19), Some(19)),
+            (json!(0), None), (json!(-1), None), (json!("12"), None), (json!(12.5), None), (json!(4294967296u64), None)] {
+            let data = json!({input:7,output:5,"total_tokens":total});
+            let usage = if responses { Usage::responses(&data) } else { Usage::openai(&data) };
+            assert_eq!(usage.map(|u| u.total_tokens), expected, "{data}");
+        }
+        let data = json!({input:4294967295u64,output:0});
+        let usage = if responses { Usage::responses(&data) } else { Usage::openai(&data) };
+        assert_eq!(usage.unwrap().total_tokens, u32::MAX);
+    }
+}
+
+#[test]
+fn usage_metrics_anthropic_invalid_cache_counts_do_not_hide_missing_usage() {
+    use serde_json::json;
+    for field in ["cache_creation_input_tokens", "cache_read_input_tokens"] {
+        for count in [json!(null),json!(-1),json!(0.5),json!("13"),json!(4294967296u64),json!(4294967295u64)] {
+            let response = super::anthropic::parse_anthropic_response(&json!({
+                "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
+                "usage":{"input_tokens":7,"output_tokens":5,field:count}
+            })).unwrap();
+            assert!(response.usage.is_none(), "{field} malformed/overflow cache count cannot be a valid usage sample");
+        }
+    }
+}
+
+#[tokio::test]
+async fn usage_metrics_ollama_stream_keeps_missing_distinct_from_zero() {
+    use serde_json::json;
+    for counters in [json!({}),json!({"eval_count":5}),json!({"prompt_eval_count":0,"eval_count":0}),
+        json!({"prompt_eval_count":7,"eval_count":5}),json!({"prompt_eval_count":4294967296u64,"eval_count":5})] {
+        let server = MockServer::start().await;
+        let mut end = counters.clone(); end["done"] = json!(true);
+        let body = format!("{}\n{end}\n", json!({"message":{"content":"Not a token counter: 世界"},"done":false}));
+        Mock::given(method("POST")).and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body)).expect(1).mount(&server).await;
+        let (p, _, _) = adapter("ollama", server.uri());
+        let r = p.chat_stream(request(), &|_| {}).await.unwrap();
+        assert_eq!(r.content.as_deref(), Some("Not a token counter: 世界"));
+        let expected = match counters["prompt_eval_count"].as_u64() {
+            Some(0) => json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}),
+            Some(7) => json!({"prompt_tokens":7,"completion_tokens":5,"total_tokens":12}),
+            _ => json!(null),
+        };
+        assert_eq!(serde_json::to_value(r.usage).unwrap(), expected);
+    }
+}
+
+#[tokio::test]
+async fn usage_metrics_failed_retry_is_not_added_to_validated_reply() {
+    for streamed in [false, true] {
+        let server = MockServer::start().await;
+        let calls = AtomicUsize::new(0);
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "choices":[{"message":{"content": if first { "" } else { "ok" }},
+                        "finish_reason":if first { "length" } else { "stop" }}],
+                    "usage":{"prompt_tokens":7,"completion_tokens":if first {10} else {5},
+                        "total_tokens":if first {17} else {12}}
+                }))
+            }).expect(2).mount(&server).await;
+        let (p, _, _) = adapter("openai", server.uri());
+        let r = LLMRouter::with_providers(vec![p], "openai".into(),vec![],policy());
+        let response = if streamed { r.streaming_chat(request(),None,"usage-retry-fixture").await }
+            else { r.chat(request(),None).await }.unwrap();
+        assert_eq!(serde_json::to_value(response.usage).unwrap(),
+            serde_json::json!({"prompt_tokens":7,"completion_tokens":5,"total_tokens":12}));
+        crate::dashboard::stream::remove("usage-retry-fixture");
+    }
+}
