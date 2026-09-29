@@ -1268,7 +1268,20 @@ async function refreshChatMessages(autoplayAudio, reconcile) {
         }
         // Stable DB identities, not text prefixes, handle both repeated text
         // and overlap between SSE, regular polling and explicit reloads.
-        for (const m of data.messages) renderChatMessage(m, autoplayAudio);
+        // Build once per synchronous replay, after pruning. Keeping this local
+        // avoids retaining detached nodes across clear/reload/session changes.
+        const savedMessages = new Map([...container.querySelectorAll('.chat-msg[data-message-id]')]
+            .map(div => [div.dataset.messageId, div]));
+        const terminalCalls = new Map();
+        for (const div of container.querySelectorAll('.chat-terminal-call')) {
+            const id = div.dataset.toolCallId;
+            if (!terminalCalls.has(id)) terminalCalls.set(id, []);
+            terminalCalls.get(id).push(div);
+        }
+        for (const m of data.messages) {
+            const div = renderChatMessage(m, autoplayAudio, savedMessages, terminalCalls);
+            if (div && m.id != null) savedMessages.set(String(m.id), div);
+        }
         const welcome = container.querySelector('.chat-welcome');
         if (welcome) {
             if (container.querySelector('.chat-msg')) welcome.remove();
@@ -1328,12 +1341,13 @@ function chatTerminalCommand(args) {
     } catch (_) { return null; } // A truncated JSON preview is NOT the command.
 }
 
-function chatRenderTerminalCall(callId, tool, command, messageId = null) {
+function chatRenderTerminalCall(callId, tool, command, messageId = null, terminalCalls = null) {
     if (callId == null) return;
     const id = String(callId);
     const savedId = messageId == null ? null : String(messageId);
-    const matches = [...document.querySelectorAll('#chat-messages .chat-terminal-call')]
-        .filter(el => el.dataset.toolCallId === id);
+    const matches = terminalCalls ? (terminalCalls.get(id) || [])
+        : [...document.querySelectorAll('#chat-messages .chat-terminal-call')]
+            .filter(el => el.dataset.toolCallId === id);
     // A provider may reuse its call ID in a different assistant message.
     // Only adopt a provisional live card once; saved rows keep their identity.
     let div = savedId == null ? matches[matches.length - 1]
@@ -1343,6 +1357,10 @@ function chatRenderTerminalCall(callId, tool, command, messageId = null) {
         div = addChatMessage('tool', `<div class="terminal-command-header"><span>🔧 <b>${escapeHtml(tool)}</b></span></div>`);
         div.classList.add('chat-terminal-call');
         div.dataset.toolCallId = id;
+        if (terminalCalls) {
+            matches.push(div);
+            terminalCalls.set(id, matches);
+        }
         const content = div.querySelector('.msg-content');
         const copy = document.createElement('button');
         copy.type = 'button';
@@ -1379,9 +1397,9 @@ function chatRenderTerminalCall(callId, tool, command, messageId = null) {
     return div;
 }
 
-function renderChatMessage(m, autoplayAudio = false) {
+function renderChatMessage(m, autoplayAudio = false, savedMessages = null, terminalCalls = null) {
     if (!m) return null;
-    let div = chatSavedMessage(m.id);
+    let div = savedMessages ? savedMessages.get(String(m.id)) : chatSavedMessage(m.id);
     // Discord-mirror rows keep their origin, but use DB IDs for dedup too.
     if ((m.role === 'discord_user' || m.role === 'discord_bot') && m.discord_meta) {
         if (!div) div = [...document.querySelectorAll('#chat-messages .chat-msg.discord')]
@@ -1408,11 +1426,12 @@ function renderChatMessage(m, autoplayAudio = false) {
                 return;
             }
         }
-        const replies = [...document.querySelectorAll('#chat-messages .chat-msg.assistant')];
         // Streamed bubbles don't have a DB id until assistant_saved arrives.
         // Match the full text only for such provisional identities, never the
         // old 80-character dedup key (two replies can share the same prefix).
-        if (!div) div = replies.find(el => !el.dataset.messageId && el.chatText === m.content);
+        // Already-saved replies need no scan of the assistant transcript.
+        if (!div) div = [...document.querySelectorAll('#chat-messages .chat-msg.assistant')]
+            .find(el => !el.dataset.messageId && el.chatText === m.content);
         if (!div) div = addChatMessage('assistant', m.content);
         if (div.chatText !== m.content) {
             div.querySelector('.msg-content').innerHTML = renderMarkdown(m.content);
@@ -1431,7 +1450,7 @@ function renderChatMessage(m, autoplayAudio = false) {
         for (const tc of m.tool_calls) {
             const fn = tc && (tc.function || tc);
             if (fn && chatIsTerminalTool(fn.name)) {
-                chatRenderTerminalCall(tc.id, fn.name, chatTerminalCommand(fn.arguments), m.id);
+                chatRenderTerminalCall(tc.id, fn.name, chatTerminalCommand(fn.arguments), m.id, terminalCalls);
             }
         }
     }
