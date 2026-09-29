@@ -5,11 +5,12 @@ use super::super::{
     provider::*,
 };
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Default)]
 struct Accumulator {
     text: String,
-    reasoning: String,
+    reasoning: BTreeMap<(u64, u64), String>,
     done_items: usize,
     events: usize,
     bytes: usize,
@@ -46,7 +47,7 @@ impl Accumulator {
         &mut self,
         event: crate::sse::Event,
         on_delta: &(dyn Fn(StreamDelta) + Send + Sync),
-    ) -> Result<Option<ChatResponse>, ProviderError> {
+    ) -> Result<Option<ChatAttempt>, ProviderError> {
         self.events += 1;
         self.bytes = self.bytes.saturating_add(event.data.len());
         if self.bytes > 32 * 1024 * 1024 {
@@ -74,8 +75,18 @@ impl Accumulator {
                 let delta = value["delta"]
                     .as_str()
                     .ok_or_else(|| invalid("Codex reasoning delta is missing text"))?;
-                self.reasoning.push_str(delta);
-                on_delta(StreamDelta::Reasoning { text: delta.into() });
+                self.reasoning_part(&value, delta, false, on_delta);
+            }
+            "response.reasoning_summary_text.done" | "response.reasoning_text.done" => {
+                let text = value["text"]
+                    .as_str()
+                    .ok_or_else(|| invalid("Codex completed reasoning part is missing text"))?;
+                self.reasoning_part(&value, text, true, on_delta);
+            }
+            "response.reasoning_summary_part.added" | "response.reasoning_summary_part.done" => {
+                if let Some(text) = value["part"]["text"].as_str().filter(|s| !s.is_empty()) {
+                    self.reasoning_part(&value, text, true, on_delta);
+                }
             }
             "response.output_item.added" if value["item"]["type"] == "function_call" => {
                 on_delta(StreamDelta::ToolCall {
@@ -102,8 +113,23 @@ impl Accumulator {
                 if !value["item"].is_object() {
                     return Err(invalid("Codex output_item.done is missing its item"));
                 }
-                // For diagnostics only: the terminal response must supply the
-                // authoritative output array before any tool is accepted.
+                // Reasoning is display-only; tools still require authoritative
+                // terminal output before they can be accepted.
+                if value["item"]["type"] == "reasoning" {
+                    for (index, part) in value["item"]["summary"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                    {
+                        if let Some(text) = part["text"].as_str() {
+                            let location = serde_json::json!({
+                                "output_index": value["output_index"], "summary_index": index,
+                            });
+                            self.reasoning_part(&location, text, true, on_delta);
+                        }
+                    }
+                }
                 self.done_items += 1;
             }
             "response.failed" | "error" => return Err(failed(&value)),
@@ -132,7 +158,46 @@ impl Accumulator {
         Ok(None)
     }
 
-    fn finish(&self, response: &Value) -> Result<ChatResponse, ProviderError> {
+    fn reasoning_part(
+        &mut self,
+        value: &Value,
+        text: &str,
+        done: bool,
+        on_delta: &(dyn Fn(StreamDelta) + Send + Sync),
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let key = (
+            value["output_index"].as_u64().unwrap_or(0),
+            value["summary_index"]
+                .as_u64()
+                .or_else(|| value["content_index"].as_u64())
+                .unwrap_or(0),
+        );
+        let separator = !self.reasoning.is_empty() && !self.reasoning.contains_key(&key);
+        let part = self.reasoning.entry(key).or_default();
+        let delta = if done {
+            text.strip_prefix(part.as_str()).unwrap_or("")
+        } else {
+            text
+        };
+        if !delta.is_empty() {
+            if separator {
+                on_delta(StreamDelta::Reasoning {
+                    text: "\n\n".into(),
+                });
+            }
+            on_delta(StreamDelta::Reasoning { text: delta.into() });
+        }
+        if done {
+            *part = text.into();
+        } else {
+            part.push_str(text);
+        }
+    }
+
+    fn finish(&self, response: &Value) -> Result<ChatAttempt, ProviderError> {
         let output = match response.get("output") {
             Some(Value::Array(items)) => items,
             _ => {
@@ -142,7 +207,8 @@ impl Accumulator {
             }
         };
         let mut content = String::new();
-        let mut reasoning = String::new();
+        let mut reasoning_parts = Vec::new();
+        let mut reasoning_items = Vec::new();
         let mut tool_calls = Vec::new();
         let mut unsupported = false;
         for item in output {
@@ -157,9 +223,10 @@ impl Accumulator {
                     }
                 }
                 Some("reasoning") => {
+                    reasoning_items.push(item.clone());
                     for part in item["summary"].as_array().into_iter().flatten() {
-                        if let Some(text) = part["text"].as_str() {
-                            reasoning.push_str(text);
+                        if let Some(text) = part["text"].as_str().filter(|s| !s.is_empty()) {
+                            reasoning_parts.push(text);
                         }
                     }
                 }
@@ -214,14 +281,21 @@ impl Accumulator {
         if content.is_empty() {
             content.clone_from(&self.text);
         }
-        if reasoning.is_empty() {
-            reasoning.clone_from(&self.reasoning);
-        }
-        if content.trim().is_empty() && tool_calls.is_empty() {
+        let reasoning = if reasoning_parts.is_empty() {
+            self.reasoning
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            reasoning_parts.join("\n\n")
+        };
+        let reasoning_only = content.trim().is_empty() && tool_calls.is_empty();
+        if reasoning_only
+            && (unsupported || (reasoning_items.is_empty() && reasoning.trim().is_empty()))
+        {
             return Err(invalid(if unsupported {
                 "Codex completed with unsupported output items and no text or function calls"
-            } else if !reasoning.is_empty() {
-                "Codex completed with reasoning only; no answer or function calls were returned"
             } else {
                 "Codex completed without any text or function calls"
             }));
@@ -238,19 +312,26 @@ impl Accumulator {
                     .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens)),
             }
         });
-        Ok(ChatResponse {
-            finish_reason: Some(
-                if tool_calls.is_empty() {
-                    "stop"
-                } else {
-                    "tool_calls"
-                }
-                .into(),
-            ),
-            content: (!content.is_empty()).then_some(content),
-            reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
-            tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
-            usage,
+        Ok(ChatAttempt {
+            response: ChatResponse {
+                finish_reason: Some(
+                    if reasoning_only {
+                        "reasoning"
+                    } else if tool_calls.is_empty() {
+                        "stop"
+                    } else {
+                        "tool_calls"
+                    }
+                    .into(),
+                ),
+                content: (!content.is_empty()).then_some(content),
+                reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+                tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+                usage,
+            },
+            continuation: reasoning_only.then_some(ProviderContinuation::Codex {
+                input: reasoning_items,
+            }),
         })
     }
 }
@@ -269,7 +350,7 @@ fn output_index(value: &Value) -> Result<usize, ProviderError> {
 pub(super) async fn receive(
     mut response: reqwest::Response,
     on_delta: &(dyn Fn(StreamDelta) + Send + Sync),
-) -> anyhow::Result<ChatResponse> {
+) -> anyhow::Result<ChatAttempt> {
     let headers = response.headers().clone();
     let status = response.status().as_u16();
     let mut acc = Accumulator::default();
@@ -325,7 +406,7 @@ pub(super) async fn receive(
         events = acc.events,
         decoded_bytes = acc.bytes,
         text_bytes = acc.text.len(),
-        reasoning_bytes = acc.reasoning.len(),
+        reasoning_bytes = acc.reasoning.values().map(String::len).sum::<usize>(),
         done_items = acc.done_items,
         success = result.is_ok(),
         "Codex stream summary"

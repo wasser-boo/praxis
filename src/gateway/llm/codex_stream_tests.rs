@@ -61,7 +61,9 @@ fn codex_crlf_utf8_and_tool_previews_survive_every_fragment_boundary() {
                 }
             }
         }
-        let result = result.unwrap();
+        let attempt = result.unwrap();
+        assert!(attempt.continuation.is_none());
+        let result = attempt.response;
         assert_eq!(
             result.content.as_deref(),
             Some("Hello 日本🙂\n\nsecond line")
@@ -95,7 +97,7 @@ fn codex_accepts_event_names_and_done_alias_but_not_unfinished_items() {
         )
         .unwrap()
         .unwrap();
-    assert_eq!(response.tool_calls.unwrap().len(), 1);
+    assert_eq!(response.response.tool_calls.unwrap().len(), 1);
     assert_eq!(
         Accumulator::default()
             .push(
@@ -134,6 +136,7 @@ fn codex_terminal_output_is_authoritative_and_missing_usage_totals_are_recovered
         acc.push(event(response), &|_| {})
             .unwrap()
             .unwrap()
+            .response
             .usage
             .unwrap()
             .total_tokens,
@@ -171,13 +174,9 @@ async fn codex_stream_failures_keep_exhausted_rate_windows_and_diagnostics() {
 }
 
 #[test]
-fn codex_empty_reasoning_only_and_malformed_events_have_specific_diagnostics() {
+fn codex_empty_and_malformed_events_have_specific_diagnostics() {
     for (value, cause) in [
         (completed(json!([])), "without any text"),
-        (
-            completed(json!([{"type":"reasoning","summary":[{"text":"private thought"}]}])),
-            "reasoning only",
-        ),
         (
             completed(json!([{"type":"custom_tool_call"}])),
             "unsupported output",
@@ -202,6 +201,65 @@ fn codex_empty_reasoning_only_and_malformed_events_have_specific_diagnostics() {
         .unwrap_err();
     assert!(error.to_string().contains("malformed JSON"));
     assert!(!format!("{error:?}").contains("SECRET"));
+}
+
+#[test]
+fn codex_reasoning_only_is_a_continuation_not_an_answer() {
+    for item in [
+        json!({"type":"reasoning", "summary":[{"text":"[headline]Prüfen[/headline]"}]}),
+        json!({"type":"reasoning", "summary":[], "encrypted_content":"OPAQUE-SECRET"}),
+    ] {
+        let attempt = Accumulator::default()
+            .push(event(completed(json!([item.clone()]))), &|_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.response.finish_reason.as_deref(), Some("reasoning"));
+        assert!(attempt.response.content.is_none());
+        assert!(attempt.response.tool_calls.is_none());
+        let state = attempt.continuation.unwrap();
+        assert!(!format!("{state:?}").contains("OPAQUE-SECRET"));
+        let ProviderContinuation::Codex { input } = state;
+        assert_eq!(input, vec![item]);
+    }
+}
+
+#[test]
+fn codex_reasoning_headlines_parts_and_done_events_are_not_lost_or_duplicated() {
+    let mut acc = Accumulator::default();
+    let deltas = Mutex::new(String::new());
+    let on_delta = |delta| {
+        if let StreamDelta::Reasoning { text } = delta {
+            deltas.lock().unwrap().push_str(&text);
+        }
+    };
+    for value in [
+        json!({"type":"response.reasoning_summary_part.added", "output_index":0, "summary_index":0, "part":{"type":"summary_text", "text":""}}),
+        json!({"type":"response.reasoning_summary_text.delta", "output_index":0, "summary_index":0, "delta":"[headline]Prüfen"}),
+        json!({"type":"response.reasoning_summary_text.delta", "output_index":0, "summary_index":0, "delta":"[/headline]"}),
+        json!({"type":"response.reasoning_summary_text.done", "output_index":0, "summary_index":0, "text":"[headline]Prüfen[/headline]"}),
+        json!({"type":"response.reasoning_summary_part.done", "output_index":0, "summary_index":0, "part":{"text":"[headline]Prüfen[/headline]"}}),
+        // Some proxies only retain done events. Preserve their text too.
+        json!({"type":"response.reasoning_summary_text.done", "output_index":0, "summary_index":1, "text":"Nächster Schritt 日本🙂"}),
+        json!({"type":"response.output_item.done", "output_index":0, "item":{"type":"reasoning", "summary":[{"text":"[headline]Prüfen[/headline]"},{"text":"Nächster Schritt 日本🙂"}]}}),
+    ] {
+        assert!(acc.push(event(value), &on_delta).unwrap().is_none());
+    }
+    let expected = "[headline]Prüfen[/headline]\n\nNächster Schritt 日本🙂";
+    assert_eq!(*deltas.lock().unwrap(), expected);
+    // With and without a terminal summary, identical text must be retained.
+    for summary in [
+        json!([]),
+        json!([{"text":"[headline]Prüfen[/headline]"},{"text":"Nächster Schritt 日本🙂"}]),
+    ] {
+        let result = acc
+            .push(
+                event(completed(json!([{"type":"reasoning", "summary":summary}]))),
+                &on_delta,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.response.reasoning_content.as_deref(), Some(expected));
+    }
 }
 
 #[test]
@@ -385,5 +443,8 @@ async fn codex_completion_ends_read_without_waiting_for_socket_eof() {
     )
     .await;
     server.abort();
-    assert_eq!(result.unwrap().unwrap().content.as_deref(), Some("done"));
+    assert_eq!(
+        result.unwrap().unwrap().response.content.as_deref(),
+        Some("done")
+    );
 }

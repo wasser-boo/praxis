@@ -146,6 +146,33 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+/// Request-local provider state. Never persist it as chat history, display it,
+/// or forward it to a fallback provider. In particular, encrypted reasoning is
+/// opaque and must not appear in diagnostics.
+#[derive(Clone)]
+pub enum ProviderContinuation {
+    Codex { input: Vec<serde_json::Value> },
+}
+impl std::fmt::Debug for ProviderContinuation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProviderContinuation { .. }")
+    }
+}
+impl ProviderContinuation {
+    pub(crate) fn estimated_tokens(&self) -> u64 {
+        match self {
+            Self::Codex { input } => serde_json::to_vec(input).map_or(0, |s| s.len() as u64 / 3),
+        }
+    }
+}
+
+/// One network attempt, not necessarily the end of a logical LLM call.
+#[derive(Debug)]
+pub struct ChatAttempt {
+    pub response: ChatResponse,
+    pub continuation: Option<ProviderContinuation>,
+}
+
 /// Display-only deltas. Never execute a tool from these fragments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -174,6 +201,20 @@ pub trait LLMProvider: Send + Sync {
         on_delta: &(dyn Fn(StreamDelta) + Send + Sync),
     ) -> anyhow::Result<ChatResponse> {
         self.chat_stream(request, &|text| on_delta(StreamDelta::Text { text })).await
+    }
+    /// The router owns continuation budgets, pacing and cancellation. Adapters
+    /// must not hide additional inference requests inside a single attempt.
+    async fn chat_attempt(
+        &self,
+        request: ChatRequest,
+        _continuation: Option<&ProviderContinuation>,
+        on_delta: Option<&(dyn Fn(StreamDelta) + Send + Sync)>,
+    ) -> anyhow::Result<ChatAttempt> {
+        let response = match on_delta {
+            Some(on_delta) => self.chat_stream_events(request, on_delta).await?,
+            None => self.chat(request).await?,
+        };
+        Ok(ChatAttempt { response, continuation: None })
     }
     /// Whether increasing ChatRequest.max_tokens changes the wire request.
     /// Subscription endpoints with a fixed output budget must not be replayed

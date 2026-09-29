@@ -1,6 +1,6 @@
 use super::{
     error::{CallFailure, ErrorKind, ProviderError},
-    provider::{ChatRequest, ChatResponse, ContentPart, LLMProvider, ToolCall, StreamDelta},
+    provider::{ChatAttempt, ChatRequest, ChatResponse, ContentPart, LLMProvider, ProviderContinuation, ToolCall, StreamDelta, Usage},
     resilience::{self, interruptible, ProviderGate, ResilienceConfig},
     LLMRouter,
 };
@@ -173,6 +173,10 @@ impl LLMRouter {
                 }
             };
             let mut req = request.clone();
+            // Native continuation state belongs only to this logical call and
+            // provider, never to durable history or a configured fallback.
+            let mut continuation: Option<ProviderContinuation> = None;
+            let mut usage = None;
             if index > 0 {
                 // Use the explicitly configured fallback's own default model.
                 req.model = None;
@@ -190,7 +194,9 @@ impl LLMRouter {
             while attempts < allowance {
                 // Output-limit recovery can enlarge the next request. Reserve
                 // its full allowance through the same gate before sending it.
-                let tokens = resilience::estimated_tokens(&req);
+                let tokens = resilience::estimated_tokens(&req).saturating_add(
+                    continuation.as_ref().map_or(0, ProviderContinuation::estimated_tokens),
+                );
                 let permit = match interruptible(deadline, cancel, gate.acquire(tokens, user)).await
                 {
                     Ok(Ok(permit)) => permit,
@@ -238,22 +244,21 @@ impl LLMRouter {
                     max_output_tokens = ?req.max_tokens, streaming = user.is_some(),
                     timeout_ms = attempt_deadline.duration_since(attempt_start).as_millis() as u64,
                     "LLM request metadata (content omitted)");
-                let call = async {
-                    if user.is_some() {
-                        p.chat_stream_events(req.clone(), &on_delta).await
-                    } else {
-                        p.chat(req.clone()).await
-                    }
-                };
+                let call = p.chat_attempt(
+                    req.clone(), continuation.as_ref(),
+                    if user.is_some() { Some(&on_delta) } else { None },
+                );
                 let result = match interruptible(attempt_deadline, cancel, call).await {
-                    Ok(Ok(response)) => {
+                    Ok(Ok(attempt)) => {
+                        let response = &attempt.response;
                         tracing::debug!(provider = %label(name), attempt = attempts,
                             content_bytes = response.content.as_ref().map_or(0, String::len),
                             reasoning_bytes = response.reasoning_content.as_ref().map_or(0, String::len),
                             tool_calls = response.tool_calls.as_ref().map_or(0, Vec::len),
                             finish_reason = match response.finish_reason.as_deref() {
                                 Some("stop") => "stop", Some("length") => "length",
-                                Some("tool_calls") => "tool_calls", None => "missing", _ => "other",
+                                Some("tool_calls") => "tool_calls", Some("reasoning") => "reasoning",
+                                None => "missing", _ => "other",
                             }, "LLM response metadata before validation");
                         // Include cutoff attempts too, without promoting reasoning to
                         // final text. This event is separate from disposable status.
@@ -262,7 +267,20 @@ impl LLMRouter {
                                 crate::dashboard::stream::send(user, "reasoning", text);
                             }
                         }
-                        validate_response(response)
+                        if attempt.continuation.is_some() {
+                            if response.finish_reason.as_deref() != Some("reasoning")
+                                || response.content.as_deref().is_some_and(|s| !s.trim().is_empty())
+                                || response.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())
+                                || stream.emitted.load(Ordering::Relaxed)
+                            {
+                                Err(ProviderError::with_cause(ErrorKind::InvalidResponse,
+                                    "provider supplied an unsafe reasoning continuation; no tools were accepted"))
+                            } else {
+                                Ok(attempt)
+                            }
+                        } else {
+                            validate_response(attempt.response).map(|response| ChatAttempt { response, continuation: None })
+                        }
                     },
                     Ok(Err(error)) => Err(ProviderError::from_anyhow(&error)),
                     Err(mut error) => {
@@ -273,19 +291,40 @@ impl LLMRouter {
                     }
                 };
                 match result {
-                    Ok(mut response) => {
-                        if user.is_some_and(crate::gateway::task_control::template_omitted) && response.tool_calls.is_none() {
-                            if let Some(text) = response.content.as_mut() {
-                                let marker = crate::gateway::task_control::TEMPLATE_OMITTED_MARKER;
-                                if !text.ends_with(marker) { text.push_str("\n\n"); text.push_str(marker); }
-                            }
-                        }
+                    Ok(ChatAttempt { mut response, continuation: next }) => {
                         if let Some(usage) = &response.usage {
                             let actual = u64::from(usage.total_tokens).max(
                                 u64::from(usage.prompt_tokens) + u64::from(usage.completion_tokens),
                             );
                             if actual > 0 {
                                 gate.reconcile(permit.reservation, actual);
+                            }
+                        }
+                        add_usage(&mut usage, response.usage.take());
+                        if let Some(next) = next {
+                            // A completed thinking step is neither a failed
+                            // preview nor an assistant answer. Keep its display
+                            // and re-enter the same attempt/time/rate gates.
+                            stream.committed = true;
+                            if let Some(user) = user { crate::dashboard::stream::send(user, "stream_end", "{}"); }
+                            if attempts >= allowance {
+                                let error = ProviderError::with_cause(ErrorKind::ReasoningOnly,
+                                    "reasoning continuation reached the configured LLM attempt limit; no final answer was returned");
+                                failures.push((label(name), error.clone()));
+                                return Err(CallFailure { attempts, failures, terminal: error }.into());
+                            }
+                            continuation = Some(next);
+                            resilience::progress(user, &format!(
+                                "LLM {}: reasoning step completed; continuing ({}/{}).",
+                                label(name), attempts + 1, max_attempts,
+                            ));
+                            continue;
+                        }
+                        response.usage = usage;
+                        if user.is_some_and(crate::gateway::task_control::template_omitted) && response.tool_calls.is_none() {
+                            if let Some(text) = response.content.as_mut() {
+                                let marker = crate::gateway::task_control::TEMPLATE_OMITTED_MARKER;
+                                if !text.ends_with(marker) { text.push_str("\n\n"); text.push_str(marker); }
                             }
                         }
                         stream.committed = true;
@@ -384,6 +423,15 @@ impl LLMRouter {
         tokio::time::timeout(Duration::from_secs(10), provider.health_check())
             .await
             .unwrap_or(false)
+    }
+}
+
+fn add_usage(total: &mut Option<Usage>, usage: Option<Usage>) {
+    if let Some(usage) = usage {
+        let total = total.get_or_insert(Usage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+        total.prompt_tokens = total.prompt_tokens.saturating_add(usage.prompt_tokens);
+        total.completion_tokens = total.completion_tokens.saturating_add(usage.completion_tokens);
+        total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
     }
 }
 

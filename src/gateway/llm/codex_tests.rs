@@ -50,6 +50,9 @@ async fn stream(server: &MockServer, text: &str) {
         .await;
 }
 
+#[path = "codex_continuation_tests.rs"]
+mod continuation_tests;
+
 const COMPLETE: &str = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Grüße 日本語\"}]}]}}\r\n\r\n";
 
 #[tokio::test]

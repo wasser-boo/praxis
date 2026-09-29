@@ -294,7 +294,9 @@ impl CodexProvider {
             "parallel_tool_calls": false,
             "store": false,
             "stream": true,
-            "include": [],
+            // store=false requires replayable reasoning for stateless continuation.
+            "include": ["reasoning.encrypted_content"],
+            "reasoning": {"summary": "auto"},
         });
         if let Some(thinking) = request.thinking {
             // Original Codex models require reasoning and low/medium/high.
@@ -303,12 +305,23 @@ impl CodexProvider {
                 ThinkingMode::Xhigh if matches!(model, "gpt-5" | "gpt-5-codex" | "gpt-5.1-codex" | "gpt-5.1-codex-mini") => "high",
                 _ => thinking.level().unwrap_or("low"),
             };
-            body["reasoning"] = serde_json::json!({"effort": level, "summary": "auto"});
+            body["reasoning"]["effort"] = serde_json::json!(level);
         }
         body
     }
 
     async fn send(&self, body: &serde_json::Value, on_delta: &(dyn Fn(StreamDelta) + Send + Sync)) -> anyhow::Result<ChatResponse> {
+        let attempt = self.send_attempt(body, on_delta).await?;
+        if attempt.continuation.is_some() {
+            return Err(super::error::ProviderError::with_cause(
+                super::error::ErrorKind::ReasoningOnly,
+                "Codex needs a continuation; no final answer or tool calls were returned",
+            ).into());
+        }
+        Ok(attempt.response)
+    }
+
+    async fn send_attempt(&self, body: &serde_json::Value, on_delta: &(dyn Fn(StreamDelta) + Send + Sync)) -> anyhow::Result<ChatAttempt> {
         let mut auth = self.auth();
         if jwt_expired(&auth.access_token) {
             auth = self.refresh(&auth).await?;
@@ -352,6 +365,38 @@ impl LLMProvider for CodexProvider {
 
     async fn chat_stream_events(&self, request: ChatRequest, on_delta: &(dyn Fn(StreamDelta) + Send + Sync)) -> anyhow::Result<ChatResponse> {
         self.send(&self.build_body(&request), on_delta).await
+    }
+
+    async fn chat_attempt(
+        &self,
+        request: ChatRequest,
+        continuation: Option<&ProviderContinuation>,
+        on_delta: Option<&(dyn Fn(StreamDelta) + Send + Sync)>,
+    ) -> anyhow::Result<ChatAttempt> {
+        let mut body = self.build_body(&request);
+        let mut previous = match continuation {
+            Some(ProviderContinuation::Codex { input }) => input.clone(),
+            None => Vec::new(),
+        };
+        body["input"].as_array_mut().expect("Codex input array").extend(previous.clone());
+        let mut attempt = self.send_attempt(&body, on_delta.unwrap_or(&|_| {})).await?;
+        if let Some(ProviderContinuation::Codex { input }) = &mut attempt.continuation {
+            previous.append(input);
+            // Do not turn a summary into an assistant answer or fabricated tool
+            // result. Replay native output and explicitly request the next step.
+            previous.push(serde_json::json!({"type":"message", "role":"developer", "content":[{
+                "type":"input_text",
+                "text":"Continue the original task from the preceding reasoning. Return the next required function call or the final answer, not only a reasoning summary. Do not repeat actions already recorded in tool results."
+            }]}));
+            if serde_json::to_vec(&previous)?.len() > 32 * 1024 * 1024 {
+                return Err(super::error::ProviderError::with_cause(
+                    super::error::ErrorKind::ReasoningOnly,
+                    "Codex continuation exceeded the 32 MiB safety limit",
+                ).into());
+            }
+            *input = previous;
+        }
+        Ok(attempt)
     }
 
     // The subscription endpoint rejects max_output_tokens; its own budget
