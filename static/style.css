@@ -672,3 +672,9 @@ body.agent-loop-running .agent-badge { animation: agent-pulse 2s ease-in-out inf
     background:rgba(0,0,0,0.25); border-radius:4px; padding:0.05rem 0.35rem;
 }
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+
+/* Tool receipts: raw/copy controls affect presentation only. */
+.tool-result-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.4rem; }
+.tool-result-controls button { font-size: 0.75rem; }
+.tool-result-controls button:focus-visible { outline: 2px solid var(--accent-purple); outline-offset: 2px; }
+.tool-result-note { color: var(--text-secondary); font-size: 0.75rem; }

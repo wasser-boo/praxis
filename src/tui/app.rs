@@ -71,6 +71,8 @@ pub enum Bubble {
     Assistant { content: String },
     Thinking { content: String },
     Tool { name: String, content: String },
+    // Original receipt retained for raw view/copy; formatting cached once per saved row.
+    ToolResult { name: String, content: String, display: String },
     System { content: String },
     Banner { kind: BannerKind, content: String },
 }
@@ -203,7 +205,7 @@ impl App {
         if let Some(bubble) = self.transcript.get(index) {
             let content = match bubble {
                 Bubble::User {content} | Bubble::Assistant {content} | Bubble::Thinking {content}
-                | Bubble::Tool {content, ..} | Bubble::System {content} | Bubble::Banner {content, ..} => content,
+                | Bubble::Tool {content, ..} | Bubble::ToolResult {content, ..} | Bubble::System {content} | Bubble::Banner {content, ..} => content,
             };
             self.copy_selection = Some(CopySelection {index, content: content.clone(), reveal: true});
             self.popup = Popup::None;
@@ -429,7 +431,8 @@ impl App {
                 "assistant" => Bubble::Assistant {
                     content: m.content.clone(),
                 },
-                "tool" => Bubble::Tool {
+                "tool" => Bubble::ToolResult {
+                    display: super::tool_result::format(&m.content).unwrap_or_else(|| m.content.clone()),
                     name: m.tool_name.clone().unwrap_or_else(|| "tool".to_string()),
                     content: m.content.clone(),
                 },
@@ -652,7 +655,7 @@ impl App {
                 self.transcript.push(Bubble::Banner {
                     kind: BannerKind::Info,
                     content: format!(
-                        "Keys: F2 mouse ON/OFF (native selection when OFF); F3 message copy mode.\nCopy: Up/Down/Home/End select; Ctrl+C or y requests terminal clipboard (OSC 52).\nEsc/F3 leaves copy mode; Ctrl+Q always quits; Ctrl+C quits outside copy mode.\nPgUp/PgDn scroll with or without mouse capture.\nPaste: use your terminal paste shortcut; multiline/Unicode stays in the draft.\nIf OSC 52 is unsupported/blocked, use F2 then native selection/copy.\n\nCommands:\n{body}\n\nAttach files with @path. Use Tab/Enter to autocomplete.\n\
+                        "Keys: F2 mouse ON/OFF (native selection when OFF); F3 message copy mode.\nCopy: tool results show/copy their full raw receipt (not the formatted view).\nUp/Down/Home/End select; Ctrl+C or y requests terminal clipboard (OSC 52).\nEsc/F3 leaves copy mode; Ctrl+Q always quits; Ctrl+C quits outside copy mode.\nPgUp/PgDn scroll with or without mouse capture.\nPaste: use your terminal paste shortcut; multiline/Unicode stays in the draft.\nIf OSC 52 is unsupported/blocked, use F2 then native selection/copy.\n\nCommands:\n{body}\n\nAttach files with @path. Use Tab/Enter to autocomplete.\n\
                          /context examples:\n  \
                             /context set custom_data.device=main settings.max_llm_turns=20\n  \
                             /context set settings.voice_tts_enabled=true\n  \
@@ -1750,7 +1753,7 @@ mod tests {
         assert!(matches!(&app.transcript[0], Bubble::Assistant {content} if content == "Plan"));
         assert!(matches!(&app.transcript[1], Bubble::Tool {content, ..} if content == "first\n  command"));
         assert!(matches!(&app.transcript[2], Bubble::Tool {content, ..} if content == "second 世界"));
-        assert!(matches!(&app.transcript[3], Bubble::Tool {content, ..} if content == "result text"));
+        assert!(matches!(&app.transcript[3], Bubble::ToolResult {content, ..} if content == "result text"));
     }
 
     #[tokio::test]
@@ -1910,6 +1913,43 @@ mod tests {
         replace_at_token(&mut app, "al", "/etc/hosts");
         assert_eq!(app.input, "see @/etc/hosts");
         assert_eq!(app.cursor, app.input.chars().count());
+    }
+
+    #[tokio::test]
+    async fn structured_results_remote_history_keeps_raw_for_copy() {
+        use wiremock::{matchers::{method, path, header}, Mock, MockServer, ResponseTemplate};
+        let raw = serde_json::json!({"stdout":"first\n  世界\nlast","stderr":"","exit_code":0,
+            "nested":{"key":"literal\\n"}}).to_string();
+        {
+            let mut app = dummy_app();
+            let user = app.active_user_id().to_owned();
+            let mut message = Message::tool(raw.clone(), "fixture".into());
+            message.tool_name = Some("execute_terminal".into());
+            message.id = Some(41);
+            let server = MockServer::start().await;
+            let history = {
+                Mock::given(method("GET")).and(path(format!("/v1/messages/{user}")))
+                    .and(header("Authorization", "Bearer synthetic-key"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"messages":[message]})))
+                    .expect(1).mount(&server).await;
+                let remote = super::super::remote::Remote::new(server.uri(), "synthetic-key".into()).unwrap();
+                app.remote = Some(remote.clone());
+                remote.messages(&user).await.unwrap()
+            };
+            for _ in 0..2 {
+                app.stream_event("history", &serde_json::to_string(&history).unwrap());
+            }
+            assert_eq!(app.transcript.len(), 1);
+            assert!(matches!(&app.transcript[0], Bubble::ToolResult {content,display,..}
+                if content == &raw && display.contains("first\n  世界\nlast")));
+            handle_key(&mut app, KeyCode::F(3), KeyModifiers::NONE).await;
+            handle_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).await;
+            assert_eq!(app.pending_clipboard.as_deref(), Some(raw.as_str()));
+            assert_eq!(history[0].content, raw, "client formatting must not mutate API history");
+            app.reset_view();
+            app.stream_event("history", &serde_json::to_string(&history).unwrap());
+            assert!(matches!(&app.transcript[0], Bubble::ToolResult {content,..} if content == &raw));
+        }
     }
 
     fn dummy_app() -> App {

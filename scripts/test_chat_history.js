@@ -90,6 +90,114 @@ function releaseHistory() { const d = delayed; delayed = null; json(d.res, d.dat
         }
     }
     try {
+
+        const structuredRaw = JSON.stringify({stdout:'FIRST\nSECOND 世界',stderr:'warning\nlast',exit_code:3});
+        await check('structured-results', [
+            {id:41,role:'tool',tool_name:'execute_terminal',tool_call_id:'structured',content:structuredRaw}
+        ], async page => {
+            const output = row(page,41).locator('.tool-out').first();
+            assert((await output.textContent()).includes('FIRST\nSECOND 世界'), 'stdout must decode JSON newlines');
+            assert(!(await output.textContent()).includes('\\n'), 'presentation must not show serialized escapes');
+        });
+
+        await check('structured-results-corpus', [], async page => {
+            const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/structured_tool_results.json'),'utf8'));
+            for (const fixture of fixtures) {
+                const actual = await page.evaluate(f => chatFormatToolResult(f.raw), fixture);
+                assert.equal(actual, fixture.display, fixture.name);
+            }
+            const large = '世界 👩‍💻\n  next\n'.repeat(10000);
+            const raw = JSON.stringify({stdout:large,stderr:'',exit_code:0});
+            assert((await page.evaluate(raw => chatFormatToolResult(raw),raw)).includes(large));
+            // Use the real renderer, not innerHTML, even for script-shaped output.
+            const script = '<script>window.injected = true</script>\n<img src=x onerror="window.injected = true">';
+            messages.default = [{id:71,role:'tool',tool_name:'nonterminal_fixture',content:JSON.stringify({stdout:script,exit_code:0})},
+                {id:72,role:'tool',tool_name:'empty_fixture',content:''}];
+            await page.evaluate(() => pollChatMessages());
+            assert((await row(page,71).locator('.tool-out').textContent()).includes(script));
+            assert.equal(await row(page,71).locator('.tool-out script, .tool-out img').count(),0);
+            assert.equal(await page.evaluate(() => window.injected), undefined);
+            assert.equal(await row(page,72).locator('.tool-out').textContent(),'');
+            assert.equal(await row(page,72).locator('.tool-result-raw').isVisible(),false);
+        });
+        await check('structured-results-controls', [
+            {id:41,role:'tool',tool_name:'execute_terminal',tool_call_id:'structured',content:structuredRaw}
+        ], async page => {
+            await page.evaluate(() => Object.defineProperty(navigator,'clipboard',{configurable:true,
+                value:{writeText:async text=> {window.fixtureCopy=text;}}}));
+            const output = row(page,41).locator('.tool-out');
+            const toggle = row(page,41).locator('.tool-result-raw');
+            await toggle.focus();
+            assert.equal(await toggle.evaluate(el=>getComputedStyle(el).outlineStyle),'solid');
+            await toggle.press('Enter');
+            assert.equal(await output.textContent(),structuredRaw);
+            assert.equal(await toggle.getAttribute('aria-pressed'),'true');
+            await row(page,41).locator('.tool-result-copy').click();
+            assert.equal(await page.evaluate(()=>window.fixtureCopy),structuredRaw);
+            // Polling must leave the exact text node, raw mode and selection intact.
+            await output.evaluate(el=>{window.originalResultNode=el.firstChild;const range=document.createRange();
+                range.selectNodeContents(el);getSelection().removeAllRanges();getSelection().addRange(range);});
+            await page.evaluate(async()=>{await pollChatMessages();await pollChatMessages();});
+            assert(await output.evaluate(el=>el.firstChild===window.originalResultNode));
+            assert.equal(await page.evaluate(()=>getSelection().toString()),structuredRaw);
+            assert.equal(await toggle.getAttribute('aria-pressed'),'true');
+            assert.equal(messages.default[0].content,structuredRaw);
+            await toggle.click();
+            assert((await output.textContent()).includes('FIRST\nSECOND 世界'));
+            const changed = JSON.stringify({stdout:'UPDATED\nLAST',stderr:'',exit_code:0});
+            messages.default[0].content=changed;
+            await page.evaluate(()=>pollChatMessages());
+            await toggle.click();
+            assert.equal(await output.textContent(),changed,'toggle closure must use updated receipt');
+            await row(page,41).locator('.tool-result-copy').click();
+            assert.equal(await page.evaluate(()=>window.fixtureCopy),changed);
+            await page.reload({waitUntil:'domcontentloaded'});
+            await page.evaluate(async()=>{showTab('chat');await pollChatMessages();stopChatPolling();});
+            assert((await row(page,41).locator('.tool-out').textContent()).includes('UPDATED\nLAST'));
+            await page.evaluate(()=>switchChatSession('other'));
+            assert.equal(await page.locator('.tool-result-controls').count(),0);
+        });
+        await check('structured-results-live-history', [], async page => {
+            const full=JSON.stringify({stdout:'live\n'+'世界 '.repeat(1000)+'\nFULL_END',stderr:'',exit_code:0});
+            const preview=full.slice(0,80);
+            emit('tool_result',{tool:'execute_terminal',call_id:'receipt',duration_ms:2,result:preview});
+            await page.waitForFunction(()=>document.querySelector('.tool-result-note')?.textContent.includes('Live-Vorschau'));
+            const provisional=page.locator('[data-tool-result-call-id="receipt"]');
+            assert.equal(await provisional.locator('.tool-out').textContent(),preview,'incomplete JSON must not be guessed');
+            assert.equal(await provisional.locator('.tool-result-copy').textContent(),'Vorschau kopieren');
+            messages.default=[{id:81,role:'tool',tool_name:'execute_terminal',tool_call_id:'receipt',content:full}];
+            await page.evaluate(async()=>{await pollChatMessages();await pollChatMessages();});
+            assert.equal(await page.locator('#chat-messages .chat-msg.tool').count(),1);
+            assert((await row(page,81).locator('.tool-out').textContent()).includes('\nFULL_END'));
+            assert.equal(await row(page,81).locator('.tool-result-note').textContent(),'');
+            messages.default.push({...messages.default[0],id:82});
+            await page.evaluate(()=>pollChatMessages());
+            assert.equal(await page.locator('#chat-messages .chat-msg.tool').count(),2,'reused call IDs in different saved rows remain distinct');
+        });
+
+        await check('structured-results-unchanged-poll', [], async page => {
+            messages.default = Array.from({length:200},(_,i)=>({id:i+1,role:'tool',tool_name:'execute_terminal',
+                content:JSON.stringify({stdout:'LONG 世界\n'.repeat(100),stderr:'',exit_code:0})}));
+            await page.evaluate(()=>pollChatMessages());
+            await page.evaluate(()=>{
+                window.originalFormatter=chatFormatToolResult;window.resultFormatCalls=0;
+                chatFormatToolResult=(...args)=>{window.resultFormatCalls++;return window.originalFormatter(...args);};
+            });
+            const output = row(page,1).locator('.tool-out');
+            await output.evaluate(el=>{el.scrollTop=120;window.resultScroll=el.scrollTop;});
+            await page.evaluate(async()=>{await pollChatMessages();await pollChatMessages();});
+            assert.equal(await page.evaluate(()=>window.resultFormatCalls),0,'unchanged receipts must not be reparsed on polling');
+            assert(await output.evaluate(el=>el.scrollTop===window.resultScroll),'unchanged poll must preserve output scroll');
+            for(const width of [360,980]) {
+                await page.setViewportSize({width,height:820});
+                assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'controls/output must fit mobile');
+            }
+            // A command that looks like a receipt is still an inert exact command.
+            const command=JSON.stringify({stdout:'NOT\nA_RESULT'});
+            await page.evaluate(command=>renderChatMessage({id:500,role:'assistant',content:'',tool_calls:[
+                {id:'json-command',name:'execute_terminal',arguments:JSON.stringify({command})}]}),command);
+            assert.equal(await page.locator('.terminal-command').textContent(),command);
+        });
         const prefix = 'Identical prefix '.repeat(8);
         await check('stored-responses', [
             assistant(1, 'Complete answer alongside a tool call.', complete),
