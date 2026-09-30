@@ -1,6 +1,12 @@
+<p align="center">
+  <img src="static/logo.svg" alt="Praxis" width="200">
+</p>
+
 # Praxis — AI Agent Platform
 
 Self-hosted AI agent platform with Discord bot, dashboard, tool-calling, and QEMU VM support. Your data, your keys, your rules.
+
+**Website**: [getpraxis.boo](https://getpraxis.boo)
 
 ## Features
 

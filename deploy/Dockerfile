@@ -58,6 +58,11 @@ RUN --mount=type=cache,target=/root/.npm \
 
 # --------------------------------------------------------------- Runtime
 FROM debian:bookworm-slim
+# QEMU is NOT bundled to avoid GPL licensing obligations for the project.
+# Users who want VM support install it at runtime:
+#   docker exec -it <container> apt-get update && apt-get install -y qemu-system-x86 qemu-utils
+# Or add to docker-compose.yml:
+#   command: ["bash", "-c", "apt-get update && apt-get install -y qemu-system-x86 qemu-utils && /usr/local/bin/docker-entrypoint.sh run"]
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
