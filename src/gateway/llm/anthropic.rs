@@ -14,7 +14,7 @@ impl AnthropicProvider {
             api_key,
             model,
             base_url,
-            client: reqwest::Client::new(),
+            client: super::http::client(),
         }
     }
 }
@@ -33,6 +33,32 @@ impl LLMProvider for AnthropicProvider {
             "max_tokens": request.max_tokens.unwrap_or(4096),
         });
 
+        // Extended thinking: Anthropic requires an explicit token budget and
+        // forbids temperature overrides alongside it.
+        match request.thinking {
+            Some(t) if t.level().is_some() => {
+                // Stufen → Budget-Scala: low 1k, medium 2k, high 4k, xhigh 8k
+                // (Anthropic kennt keine Level, nur Token-Budget).
+                let budget = request.max_tokens.map(|m| (m / 2).max(1024)).unwrap_or(match t.level() {
+                    Some("low") => 1024,
+                    Some("medium") => 2048,
+                    Some("xhigh") => 8192,
+                    _ => 4096,
+                }).min(match t.level() {
+                    Some("low") => 2048,
+                    Some("medium") => 4096,
+                    Some("xhigh") => 16384,
+                    _ => 8192,
+                });
+                body["thinking"] = serde_json::json!({ "type": "enabled", "budget_tokens": budget });
+                body.as_object_mut().map(|o| o.remove("temperature"));
+            }
+            Some(super::provider::ThinkingMode::Off) => {
+                body["thinking"] = serde_json::json!({ "type": "disabled" });
+            }
+            _ => {}
+        }
+
         if !system_prompt.is_empty() {
             body["system"] = serde_json::json!(system_prompt);
         }
@@ -48,15 +74,9 @@ impl LLMProvider for AnthropicProvider {
             .header("anthropic-version", "2023-06-01")
             .json(&body)
             .send()
-            .await?;
+            .await.map_err(super::error::ProviderError::from_reqwest)?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Anthropic API error {}: {}", status, text);
-        }
-
-        let data: serde_json::Value = resp.json().await?;
+        let data = super::http::json(resp).await?;
         parse_anthropic_response(&data)
     }
 
@@ -254,13 +274,24 @@ pub fn parse_anthropic_response(data: &serde_json::Value) -> anyhow::Result<Chat
     };
 
     Ok(ChatResponse {
+        reasoning_content: None,
         content,
         tool_calls,
         finish_reason: data["stop_reason"].as_str().map(|s| s.to_string()),
-        usage: Some(Usage {
-            prompt_tokens: data["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
-            completion_tokens: data["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
-            total_tokens: 0,
-        }),
+        usage: parse_usage(&data["usage"]),
     })
+}
+
+fn parse_usage(value: &serde_json::Value) -> Option<Usage> {
+    let mut usage = Usage::from_counts(&value["input_tokens"], &value["output_tokens"])?;
+    // Anthropic's input_tokens excludes cache hits/writes. Those two top-level
+    // counters are disjoint; cache_creation's duration breakdown is NOT extra.
+    // https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+    for field in ["cache_creation_input_tokens", "cache_read_input_tokens"] {
+        if let Some(count) = value.get(field) {
+            usage.prompt_tokens = usage.prompt_tokens.checked_add(Usage::counter(count)?)?;
+        }
+    }
+    usage.total_tokens = usage.prompt_tokens.checked_add(usage.completion_tokens)?;
+    Some(usage)
 }

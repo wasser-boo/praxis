@@ -8,6 +8,16 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 
+#[cfg(feature = "songbird")]
+async fn request_voice_response(client: &WsClient, payload: OutgoingMessage) -> anyhow::Result<String> {
+    // The gateway always sends "Thinking..." before the final reply. Consume
+    // progress/events as well, or the next utterance receives the previous reply.
+    client
+        .send_and_recv_until_response(payload, |_| {})
+        .await?
+        .map_err(anyhow::Error::msg)
+}
+
 fn generate_silent_wav(duration_ms: u32) -> Vec<u8> {
     let spec = hound::WavSpec {
         channels: 1,
@@ -70,17 +80,7 @@ impl DiscordHandler {
                 let guild_id = msg.guild_id.map(|g| g.to_string());
                 let channel_id = msg.channel_id.to_string();
 
-                let guild_allowed = guild_id
-                    .as_ref()
-                    .map(|g| {
-                        ctx.settings.allowed_guilds.contains(g)
-                            || ctx.settings.allowed_guilds.contains(&"*".to_string())
-                    })
-                    .unwrap_or(true);
-                let channel_allowed = ctx.settings.allowed_channels.contains(&channel_id)
-                    || ctx.settings.allowed_channels.contains(&"*".to_string());
-
-                guild_allowed && channel_allowed
+                crate::discord::commands::channel_allowed(&ctx.settings, guild_id.as_deref(), &channel_id)
             }
             Err(_) => false,
         }
@@ -207,9 +207,58 @@ impl EventHandler for DiscordHandler {
             }
         };
 
-        // Handle file attachments - download to appropriate folder
+        // Reject disallowed channels before downloading or injecting anything.
+        if !self.check_channel_allowed(&msg).await {
+            tracing::warn!("Message from guild/channel not in allowed list, ignoring");
+            return;
+        }
+
+        // Mirror the Discord message into the dashboard chat so the user sees
+        // Discord traffic next to dashboard-originated messages. Persisted in
+        // the messages table so it survives reloads (SSE alone is transient).
+        {
+            let author_name = msg.author.name.clone();
+            let channel_id_str = msg.channel_id.to_string();
+            let content_clone = msg.content.clone();
+            let uid = pairing.user_id.clone();
+            let is_dm = msg.guild_id.is_none();
+            let payload = serde_json::json!({
+                "direction": "user",
+                "channel_id": channel_id_str,
+                "channel_kind": if is_dm { "dm" } else { "guild" },
+                "author": author_name,
+                "content": content_clone,
+            });
+            crate::dashboard::stream::send(
+                &uid,
+                "discord_message",
+                &payload.to_string(),
+            );
+            // Persist for the dashboard chat history (role discord_user).
+            if !content_clone.trim().is_empty() {
+                let db = self.db.clone();
+                let stored = crate::db::messages::Message::discord_mirror(
+                    content_clone,
+                    "user",
+                    &author_name,
+                    &channel_id_str,
+                    if is_dm { "dm" } else { "guild" },
+                );
+                tokio::spawn(async move {
+                    if let Err(e) = db.add_message(&uid, &stored) {
+                        tracing::warn!("Failed to persist Discord mirror message: {}", e);
+                    }
+                });
+            }
+        }
+
+        // Attachment writes are opt-in; failure to load policy is fail-closed.
         let mut attachment_context = String::new();
-        if !msg.attachments.is_empty() {
+        let download = self.db.load_context(&pairing.user_id).is_ok_and(|ctx| ctx.settings.download);
+        if !msg.attachments.is_empty() && !download {
+            attachment_context.push_str("\n[Attachments not downloaded: enable settings.download to allow saving Discord attachments.]");
+        }
+        if !msg.attachments.is_empty() && download {
             let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
             let vm_enabled = std::env::var("VM_ENABLED").map(|v| v == "true").unwrap_or(false);
 
@@ -288,11 +337,6 @@ impl EventHandler for DiscordHandler {
             return;
         }
 
-        if !self.check_channel_allowed(&msg).await {
-            tracing::warn!("Message from guild/channel not in allowed list, ignoring");
-            return;
-        }
-
         let typing_channel_id = msg.channel_id;
         let typing_http = ctx.http.clone();
 
@@ -330,6 +374,9 @@ impl EventHandler for DiscordHandler {
 
         let mut thinking_msg_ids: Vec<serenity::model::id::MessageId> = Vec::new();
 
+        let mirror_uid = pairing.user_id.clone();
+        let mirror_channel = msg.channel_id.to_string();
+        let mirror_kind = if msg.guild_id.is_none() { "dm" } else { "guild" };
         loop {
             match ws_client.recv().await {
                 Ok(IncomingMessage::Response { content, .. }) => {
@@ -343,15 +390,54 @@ impl EventHandler for DiscordHandler {
                         {
                             tracing::error!("Failed to send response: {}", e);
                         }
+                        // Mirror the bot's Discord reply into the dashboard chat.
+                        let bot_meta = serde_json::json!({
+                            "direction": "bot",
+                            "channel_id": mirror_channel,
+                            "channel_kind": mirror_kind,
+                            "author": "bot",
+                            "content": trimmed,
+                        });
+                        crate::dashboard::stream::send(
+                            &mirror_uid,
+                            "discord_message",
+                            &bot_meta.to_string(),
+                        );
+                        // Persist for the dashboard chat history (role discord_bot).
+                        let db = self.db.clone();
+                        let stored = crate::db::messages::Message::discord_mirror(
+                            trimmed.to_string(),
+                            "bot",
+                            "bot",
+                            &mirror_channel,
+                            mirror_kind,
+                        );
+                        let mirror_uid2 = mirror_uid.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = db.add_message(&mirror_uid2, &stored) {
+                                tracing::warn!("Failed to persist Discord mirror bot reply: {}", e);
+                            }
+                        });
                     } else {
                         tracing::warn!("LLM returned empty response, skipping send");
                     }
                     break;
                 }
+                Ok(IncomingMessage::Reasoning { user_id, content }) => {
+                    if user_id == pairing.user_id {
+                        // Persistent output, NOT one of the disposable "Thinking..."
+                        // status messages. Split without dropping any provider text.
+                        if let Err(e) = send_thinking_split(&ctx.http, msg.channel_id, &content).await {
+                            tracing::error!(%e, "Failed to send reasoning");
+                        }
+                    }
+                }
                 Ok(IncomingMessage::Feedback { content, .. }) => {
                     match msg.channel_id.say(&ctx.http, &content).await {
                         Ok(feedback_msg) => {
                             thinking_msg_ids.push(feedback_msg.id);
+                            // Interim status ("Thinking...") is visible in Discord
+                            // only; the dashboard already streams its own feedback.
                         }
                         Err(e) => {
                             tracing::error!("Failed to send feedback: {}", e);
@@ -390,6 +476,67 @@ impl EventHandler for DiscordHandler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Interaction::Command(command) = interaction {
             match command.data.name.as_str() {
+                "skill" => {
+                    if let Err(error) = crate::discord::commands::handle_skill_command(&self.db, &ctx, &command).await {
+                        tracing::error!(%error, "Skill command response failed");
+                    }
+                }
+                "show_thinking" => {
+                    let enabled = command.data.options.iter().find(|o| o.name == "enabled")
+                        .and_then(|o| o.value.as_bool());
+                    let reply = match (self.db.get_pairing_by_discord(&command.user.id.to_string()), enabled) {
+                        (Ok(Some(pairing)), Some(enabled)) => {
+                            match self.db.merge_context(&pairing.user_id, serde_json::json!({"settings.show_thinking":enabled})) {
+                                Ok(_) => format!("Thinking display: {}", if enabled { "on" } else { "off" }),
+                                Err(_) => "Could not save thinking visibility.".into(),
+                            }
+                        }
+                        _ => "Pair first, then use /show_thinking enabled:true or false.".into(),
+                    };
+                    let _ = command.create_response(&ctx.http,
+                        serenity::builder::CreateInteractionResponse::Message(
+                            serenity::builder::CreateInteractionResponseMessage::new().content(reply).ephemeral(true)
+                        )).await;
+                }
+                "thinking" => {
+                    let discord_user_id = command.user.id.to_string();
+                    let mode = command.data.options.iter()
+                        .find(|o| o.name == "mode")
+                        .and_then(|o| o.value.as_str())
+                        .unwrap_or("auto")
+                        .to_ascii_lowercase();
+                    let reply = match self.db.get_pairing_by_discord(&discord_user_id) {
+                        Ok(Some(pairing)) => {
+                            let valid = matches!(mode.as_str(), "on" | "off" | "auto" | "low" | "medium" | "high" | "xhigh");
+                            if !valid {
+                                "Invalid mode. Use off, low, medium, high, xhigh, on, or auto.".to_string()
+                            } else {
+                                match crate::context_cmd::parse(&format!("/context set settings.thinking_mode={mode}")) {
+                                    Ok(op) => {
+                                        let result = crate::context_cmd::apply(&self.db, &pairing.user_id, &op);
+                                        if result.starts_with("✓") {
+                                            let suffix = if mode == "auto" { " (provider default)" } else { "" };
+                                            format!("🧠 Thinking mode set to **{mode}**{suffix}")
+                                        } else {
+                                            result
+                                        }
+                                    }
+                                    Err(e) => format!("error: {e}"),
+                                }
+                            }
+                        }
+                        _ => "You are not paired with this bot.".to_string(),
+                    };
+                    let _ = command
+                        .create_response(
+                            &ctx.http,
+                            serenity::builder::CreateInteractionResponse::Message(
+                                serenity::builder::CreateInteractionResponseMessage::new()
+                                    .content(reply),
+                            ),
+                        )
+                        .await;
+                }
                 "pair" => {
                     if let Err(e) =
                         crate::discord::commands::handle_pair_command(&self.db, &ctx, &command)
@@ -599,6 +746,12 @@ impl EventHandler for DiscordHandler {
                                     )
                                     .await;
 
+                                    // Session-Hook (pgpu §12.4): Voice-Session
+                                    // startet → GPU-Slots vorwärmen (LLM für
+                                    // Antworten, media für TTS; STT läuft
+                                    // router-lokal). Fire-and-forget.
+                                    crate::gpu_router::wake_slots_for_session();
+
                                     // Check context for deafened and voice_enabled settings
                                     let discord_user_id = command.user.id.to_string();
                                     let (should_deafen, voice_listening) =
@@ -774,6 +927,7 @@ impl EventHandler for DiscordHandler {
                                                 engine: stt_type,
                                                 api_key,
                                                 model_path,
+                                                vosk_url: ctx.settings.voice_vosk_url.clone(),
                                                 elevenlabs_model: ctx
                                                     .settings
                                                     .elevenlabs_stt_model
@@ -850,44 +1004,22 @@ impl EventHandler for DiscordHandler {
                                                 channel_id: format!("voice:{}", guild_id),
                                             };
 
-                                            // Acquire request lock to prevent race with text handler
-                                            let _req_guard = req_lock.lock().await;
-
-                                            {
+                                            // Serialize complete requests, not just the first
+                                            // feedback frame, then release locks before Discord HTTP.
+                                            let response_text = {
+                                                let _req_guard = req_lock.lock().await;
                                                 let ws = ws_client.lock().await;
-                                                if let Err(e) = ws.send(payload).await {
-                                                    tracing::error!(
-                                                        "VOICE_PIPELINE: Failed to send to gateway: {}",
-                                                        e
-                                                    );
-                                                    continue;
-                                                }
-                                            }
-
-                                            // Consume the response and send text to Discord
-                                            let response_text;
-                                            {
-                                                let ws = ws_client.lock().await;
-                                                match ws.recv().await {
-                                                    Ok(crate::discord::ws_client::IncomingMessage::Response { content, .. }) => {
+                                                match request_voice_response(&ws, payload).await {
+                                                    Ok(content) => {
                                                         tracing::info!("VOICE_PIPELINE: Got response ({} chars)", content.len());
-                                                        response_text = Some(content);
+                                                        Some(content)
                                                     }
-                                                    Ok(crate::discord::ws_client::IncomingMessage::Feedback { .. }) => {
-                                                        response_text = None;
-                                                    }
-                                                    Ok(crate::discord::ws_client::IncomingMessage::Error { message }) => {
-                                                        tracing::warn!("VOICE_PIPELINE: Gateway error: {}", message);
-                                                        response_text = None;
-                                                    }
-                                                    Ok(_) => { response_text = None; }
                                                     Err(e) => {
-                                                        tracing::warn!("VOICE_PIPELINE: Failed to receive response: {}", e);
-                                                        response_text = None;
+                                                        tracing::warn!("VOICE_PIPELINE: Gateway request failed: {}", e);
+                                                        None
                                                     }
                                                 }
-                                            }
-                                            // _req_guard dropped here, releasing lock
+                                            };
 
                                             // Send text response to Discord channel
                                             if let Some(text) = response_text {
@@ -1316,33 +1448,59 @@ impl EventHandler for DiscordHandler {
     }
 }
 
-/// Split a message into chunks of max 2000 characters (Discord limit).
-/// Tries to split at newlines first, then at spaces, then hard-cut.
+/// Lossless Discord chunks, conservatively counted in UTF-16 code units.
+/// Keep separators/indentation. A minimum of two units fits any Unicode scalar.
 pub fn split_message(content: &str, max_len: usize) -> Vec<String> {
-    if content.len() <= max_len {
-        return vec![content.to_string()];
-    }
-
+    let limit = max_len.max(2);
+    if content.is_empty() { return vec![String::new()]; }
     let mut chunks = Vec::new();
     let mut remaining = content;
-
-    while remaining.len() > max_len {
-        // Try to split at newline
-        let split_pos = remaining[..max_len]
-            .rfind('\n')
-            .or_else(|| remaining[..max_len].rfind(' '))
-            .unwrap_or(max_len);
-
-        let (chunk, rest) = remaining.split_at(split_pos);
-        chunks.push(chunk.trim().to_string());
-        remaining = rest.trim_start();
+    while !remaining.is_empty() {
+        let mut units = 0;
+        let mut end = 0;
+        for (i, ch) in remaining.char_indices() {
+            if units + ch.len_utf16() > limit { break; }
+            units += ch.len_utf16();
+            end = i + ch.len_utf8();
+        }
+        if end < remaining.len() {
+            let window = &remaining[..end];
+            if let Some(i) = window.rfind('\n').or_else(|| window.rfind(' ')) {
+                end = i + 1; // Include separator; never trim the user's output.
+            }
+        }
+        let (chunk, rest) = remaining.split_at(end);
+        chunks.push(chunk.to_string());
+        remaining = rest;
     }
-
-    if !remaining.is_empty() {
-        chunks.push(remaining.to_string());
-    }
-
     chunks
+}
+
+/// Complete, clearly labelled thinking boxes. Split embedded fence runs too so
+/// model-supplied backticks cannot escape the box or swallow following output.
+pub fn thinking_boxes(content: &str) -> Vec<String> {
+    const PREFIX: &str = "**Thinking**\n```text\n";
+    const SUFFIX: &str = "\n```";
+    let budget = 2000 - PREFIX.encode_utf16().count() - SUFFIX.encode_utf16().count();
+    let mut out = Vec::new();
+    for chunk in split_message(content, budget) {
+        let mut rest = chunk.as_str();
+        while !rest.is_empty() {
+            let end = rest.find("```").map_or(rest.len(), |p| p + 2);
+            out.push(format!("{PREFIX}{}{SUFFIX}", &rest[..end]));
+            rest = &rest[end..];
+        }
+    }
+    out
+}
+
+async fn send_thinking_split(
+    http: &serenity::http::Http,
+    channel: serenity::model::id::ChannelId,
+    content: &str,
+) -> Result<(), serenity::Error> {
+    for part in thinking_boxes(content) { send_message_split(http, channel, &part).await?; }
+    Ok(())
 }
 
 /// Send a message to Discord, splitting if necessary.
@@ -1353,14 +1511,93 @@ pub async fn send_message_split(
 ) -> Result<(), serenity::Error> {
     let chunks = split_message(content, 2000);
     for chunk in chunks {
-        channel_id.say(http, &chunk).await?;
+        if !chunk.is_empty() {
+            channel_id.send_message(http, serenity::builder::CreateMessage::new()
+                .content(&chunk)
+                .allowed_mentions(serenity::builder::CreateAllowedMentions::new()
+                    .all_users(false).all_roles(false).everyone(false))).await?;
+        }
     }
     Ok(())
 }
 
 #[cfg(test)]
+#[path = "output_tests.rs"]
+mod output_tests;
+
+#[cfg(test)]
 mod discord_tests {
     use super::*;
+
+    #[test]
+    fn test_split_message_multibyte_no_panic() {
+        // Regression: a 4-byte emoji (🔜) straddling the 2000-byte limit used to
+        // panic with "end byte index 2000 is not a char boundary".
+        let emoji = "🔜";
+        let mut content = String::new();
+        while content.len() < 4000 {
+            content.push_str(emoji);
+        }
+        let chunks = split_message(&content, 2000);
+        assert!(!chunks.is_empty());
+        let rejoined: String = chunks.concat();
+        // Nothing lost: every emoji survives the round trip.
+        assert_eq!(rejoined.chars().filter(|c| *c == '🔜').count(), content.chars().count());
+    }
+
+    #[test]
+    fn test_split_message_prefers_newline_and_space() {
+        let content = "a".repeat(1990) + "\n" + &"b".repeat(100);
+        let chunks = split_message(&content, 2000);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], "a".repeat(1990) + "\n");
+
+        let spaced = "x".repeat(1995) + " yyyyy";
+        let chunks = split_message(&spaced, 2000);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], "x".repeat(1995) + " ");
+    }
+
+    #[cfg(feature = "songbird")]
+    #[tokio::test]
+    async fn test_voice_gateway_waits_for_final_reply_without_lagging_one_turn() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as Frame;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for expected in ["first", "second", "error"] {
+                let frame = socket.next().await.unwrap().unwrap();
+                let request: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                assert_eq!(request["content"], expected);
+                assert_eq!(request["channel_id"], "voice:123");
+                let progress = serde_json::json!({"type": "feedback", "user_id": "test-user", "content": "Thinking..."});
+                socket.send(Frame::Text(progress.to_string())).await.unwrap();
+                socket.send(Frame::Text(serde_json::json!({"type": "event", "event": "progress", "payload": {}}).to_string())).await.unwrap();
+                let response = if expected == "error" {
+                    serde_json::json!({"type": "error", "message": "mock gateway error"})
+                } else {
+                    serde_json::json!({"type": "response", "user_id": "test-user", "content": format!("reply to {expected}")})
+                };
+                socket.send(Frame::Text(response.to_string())).await.unwrap();
+            }
+        });
+        let client = WsClient::connect(&url).await.unwrap();
+        for input in ["first", "second", "error"] {
+            let payload = OutgoingMessage::Message {
+                user_id: "test-user".into(), content: input.into(), channel_id: "voice:123".into(),
+            };
+            let reply = tokio::time::timeout(Duration::from_secs(3), request_voice_response(&client, payload)).await.unwrap();
+            if input == "error" {
+                assert!(reply.unwrap_err().to_string().contains("mock gateway error"));
+            } else {
+                assert_eq!(reply.unwrap(), format!("reply to {input}"));
+            }
+        }
+        server.await.unwrap();
+    }
 
     #[test]
     fn test_handler_types_exist() {
@@ -1391,7 +1628,7 @@ mod discord_tests {
 
         let chunks = split_message(&msg, 2000);
         assert_eq!(chunks.len(), 2);
-        assert!(chunks[0].ends_with('a'));
+        assert!(chunks[0].ends_with("a\n"));
         assert!(chunks[1].starts_with('b'));
     }
 

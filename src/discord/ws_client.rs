@@ -17,6 +17,8 @@ pub enum IncomingMessage {
     Response { user_id: String, content: String },
     #[serde(rename = "feedback")]
     Feedback { user_id: String, content: String },
+    #[serde(rename = "reasoning")]
+    Reasoning { user_id: String, content: String },
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(rename = "pong")]
@@ -148,6 +150,9 @@ impl WsClient {
                 IncomingMessage::Feedback { content, .. } => {
                     on_feedback(&content);
                 }
+                // Voice/compaction convenience path consumes final answers only.
+                // Discord text delivery handles reasoning as a separate message.
+                IncomingMessage::Reasoning { .. } => {}
                 IncomingMessage::Error { message } => {
                     return Ok(Err(message));
                 }

@@ -1,25 +1,74 @@
 pub mod agent_loop;
 pub mod auth;
 pub mod cron_scheduler;
+pub mod delegation;
 pub mod http_handler;
+pub mod client_api;
+pub mod providers;
+pub mod compaction;
+pub mod decision_profiles;
+pub mod decision_client;
+pub mod decision_routing;
+pub mod workflow_actions;
+#[cfg(test)]
+mod decision_tests;
+#[cfg(test)]
+mod workflow_action_tests;
+#[cfg(test)]
+mod state_machine_tests;
+#[cfg(test)]
+mod template_render_tests;
 pub mod llm;
 pub mod message_handler;
+mod feedback;
 pub mod poml;
+pub mod prompt;
+pub mod prompt_change;
 pub mod rate_limiter;
+pub mod task_control;
 pub mod templates;
+pub mod tool_results;
 pub mod ws_handler;
 
 use std::sync::Arc;
+
+/// Hot-swappable LLM router: `/login` and provider changes replace the router
+/// without restarting the gateway. Callers take a snapshot with `get()`.
+#[derive(Clone)]
+pub struct LlmHandle(Arc<std::sync::RwLock<Arc<llm::LLMRouter>>>);
+
+impl LlmHandle {
+    pub fn new(router: llm::LLMRouter) -> Self {
+        Self(Arc::new(std::sync::RwLock::new(Arc::new(router))))
+    }
+    pub fn get(&self) -> Arc<llm::LLMRouter> {
+        self.0.read().map(|g| g.clone()).unwrap_or_else(|e| e.into_inner().clone())
+    }
+    pub fn swap(&self, router: llm::LLMRouter) {
+        match self.0.write() {
+            Ok(mut guard) => *guard = Arc::new(router),
+            Err(poisoned) => *poisoned.into_inner() = Arc::new(router),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct GatewayState {
     pub db: crate::db::Database,
     pub config: crate::config::Config,
     pub secrets: crate::db::secrets::Secrets,
-    pub llm: Arc<llm::LLMRouter>,
+    pub llm: LlmHandle,
     pub plugins: Arc<crate::plugins::PluginRegistry>,
     pub event_tx: tokio::sync::broadcast::Sender<crate::event_channel::GatewayEvent>,
     pub start_time: std::time::Instant,
+}
+
+/// Global reference to the running gateway state, set in `start`. Tools that
+/// need to spawn sub-agent loops (e.g. delegation) access it from here.
+static GATEWAY_STATE: once_cell::sync::OnceCell<GatewayState> = once_cell::sync::OnceCell::new();
+
+pub fn state_ref() -> Option<&'static GatewayState> {
+    GATEWAY_STATE.get()
 }
 
 pub async fn start(db: crate::db::Database, config: crate::config::Config) -> anyhow::Result<()> {
@@ -31,7 +80,9 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
         &plugins_dir,
     )));
 
-    let llm = Arc::new(llm::LLMRouter::new(&config, &secrets));
+    // Endpoint/model choices made with /login live in the secret store.
+    let llm = LlmHandle::new(llm::LLMRouter::new(&providers::effective_config(&config, &secrets), &secrets));
+    llm.get().validate_configuration()?;
 
     let state = GatewayState {
         db: db.clone(),
@@ -42,18 +93,22 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
         event_tx,
         start_time: std::time::Instant::now(),
     };
+    let _ = GATEWAY_STATE.set(state.clone());
 
     let rate_limiter = Arc::new(rate_limiter::UserRateLimiter::new(60));
 
     let app = axum::Router::new()
         .route("/health", axum::routing::get(http_handler::health_check))
         .route("/api/auth/login", axum::routing::post(auth::login_handler))
-        .route("/v1/chat", axum::routing::post(http_handler::chat_handler))
         .with_state(state.clone());
 
     let protected = axum::Router::new()
+        .merge(client_api::routes())
+        .route("/v1/chat", axum::routing::post(http_handler::chat_handler))
         .route("/ws", axum::routing::get(ws_handler::ws_handler))
         .route("/api/status", axum::routing::get(http_handler::status))
+        .route("/v1/events/:user", axum::routing::get(http_handler::events))
+        .route("/v1/stop/:user", axum::routing::post(http_handler::stop))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -73,6 +128,12 @@ pub async fn start(db: crate::db::Database, config: crate::config::Config) -> an
             interval.tick().await;
             if let Err(e) = run_due_cron_jobs(&cron_db).await {
                 tracing::error!("Cron scheduler error: {}", e);
+            }
+            // Housekeeping: drop old finished background jobs so the
+            // in-memory registry cannot grow without bound.
+            crate::tools::execute_terminal::cleanup_finished_jobs();
+            if let Err(error) = cron_db.prune_tool_outputs() {
+                tracing::warn!(%error, "Tool-output retention cleanup failed");
             }
         }
     });

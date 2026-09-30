@@ -13,7 +13,8 @@ static DELETE_VAR_REGEX: Lazy<Regex> =
 static READ_VAR_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\[\[([a-zA-Z_][a-zA-Z0-9_]*)\]\]").unwrap());
 
-static THINK_TAG_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"<think>([\s\S]*?)</think>").unwrap());
+static THINK_TAG_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"<think>([\s\S]*?)</think>").unwrap());
 
 #[allow(dead_code)]
 static AGENT_SIGNAL_REGEX: Lazy<Regex> =
@@ -42,8 +43,7 @@ pub enum AgentSignal {
 
 pub async fn render(template_path: &str, context: &serde_json::Value) -> anyhow::Result<String> {
     tracing::info!(template = %template_path, "[POML] rendering template");
-    let poml_cli = std::env::var("POML_CLI")
-        .unwrap_or_else(|_| "poml".to_string());
+    let poml_cli = std::env::var("POML_CLI").unwrap_or_else(|_| "poml".to_string());
 
     let context_file = NamedTempFile::new()?;
     std::fs::write(context_file.path(), serde_json::to_string_pretty(context)?)?;
@@ -73,6 +73,78 @@ pub async fn render(template_path: &str, context: &serde_json::Value) -> anyhow:
             render_simple(template_path, context).await
         }
     }
+}
+
+/// Render instructions/validation with the real Microsoft CLI, without fallback.
+/// Unlike `render`, this returns plain text rather than speaker-mode JSON.
+/// The caller supplies only the variables the template needs, not stored secrets.
+pub async fn render_strict(
+    template_path: &str,
+    context: &serde_json::Value,
+) -> anyhow::Result<String> {
+    render_strict_candidate(template_path, context, None).await
+}
+
+/// For validation, redirect reads of the final destination to the candidate.
+/// This also exposes direct/transitive self-includes to the real renderer.
+pub(crate) async fn render_strict_candidate(
+    template_path: &str,
+    context: &serde_json::Value,
+    destination: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let cli = std::env::var("POML_CLI")
+        .context("Set POML_CLI to the installed Microsoft POML JavaScript CLI path")?;
+    let context_file = NamedTempFile::new()?;
+    // Canonical public/saved JSON is sm_data. Retain a render-only alias so
+    // existing user-owned POML templates do not break during an upgrade.
+    let mut render_context = context.clone();
+    if let Some(data) = context.get("sm_data") {
+        render_context["cl_data"] = data.clone();
+    }
+    std::fs::write(context_file.path(), serde_json::to_vec(&render_context)?)?;
+    let mut command = tokio::process::Command::new("node");
+    let _preload = if let Some(destination) = destination {
+        let preload = tempfile::Builder::new().suffix(".cjs").tempfile()?;
+        std::fs::write(preload.path(), include_str!("poml_overlay.cjs"))?;
+        command
+            .arg("--require")
+            .arg(preload.path())
+            .env("PRAXIS_POML_DESTINATION", destination)
+            .env("PRAXIS_POML_CANDIDATE", template_path);
+        Some(preload)
+    } else {
+        None
+    };
+    command
+        .args(["--", &cli, "--file", template_path, "--context-file"])
+        .arg(context_file.path())
+        .args(["--strict", "--speakerMode=false"])
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), command.output())
+        .await
+        .context("POML rendering timed out after 30 seconds")?
+        .context("Unable to run Node/POML; check Node and POML_CLI")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "POML rendering failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+            .chars()
+            .take(1500)
+            .collect::<String>()
+    );
+    // The CLI always returns a JSON envelope, even with speaker mode disabled.
+    let result: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("POML output is not a JSON result")?;
+    let text = result
+        .get("messages")
+        .and_then(serde_json::Value::as_str)
+        .context("POML output has no plain-text messages field")?;
+    anyhow::ensure!(
+        !text.trim().is_empty(),
+        "POML rendering returned empty output"
+    );
+    Ok(text.trim().to_string())
 }
 
 async fn render_simple(template_path: &str, context: &serde_json::Value) -> anyhow::Result<String> {

@@ -381,6 +381,7 @@ mod tests {
     #[test]
     fn test_chat_message_with_tool_calls_serialize() {
         let msg = ChatMessage {
+     reasoning_content: None,
             role: "assistant".to_string(),
             content: Some("Let me check.".to_string()),
             content_parts: None,
@@ -405,6 +406,7 @@ mod tests {
     #[test]
     fn test_chat_message_tool_result_serialize() {
         let msg = ChatMessage {
+     reasoning_content: None,
             role: "tool".to_string(),
             content: Some("file contents".to_string()),
             content_parts: None,

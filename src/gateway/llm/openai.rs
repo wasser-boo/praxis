@@ -14,7 +14,7 @@ impl OpenAIProvider {
             api_key,
             model,
             base_url,
-            client: reqwest::Client::new(),
+            client: super::http::client(),
         }
     }
 }
@@ -94,15 +94,9 @@ impl LLMProvider for OpenAIProvider {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
             .send()
-            .await?;
+            .await.map_err(super::error::ProviderError::from_reqwest)?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("OpenAI API error {}: {}", status, text);
-        }
-
-        let data: serde_json::Value = resp.json().await?;
+        let data = super::http::json(resp).await?;
         let choice = &data["choices"][0];
         let message = &choice["message"];
 
@@ -127,14 +121,11 @@ impl LLMProvider for OpenAIProvider {
         });
 
         Ok(ChatResponse {
+            reasoning_content: None,
             content,
             tool_calls,
             finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),
-            usage: data["usage"].as_object().map(|u| Usage {
-                prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
-                total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-            }),
+            usage: Usage::openai(&data["usage"]),
         })
     }
 

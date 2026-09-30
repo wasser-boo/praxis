@@ -1,0 +1,77 @@
+[
+  {
+    "name": "decoded-lines",
+    "raw": "{\"stdout\":\"first\\n  世界 👩‍💻\\n\",\"stderr\":\"warn\\nlast\",\"exit_code\":2}",
+    "display": "stdout:\nfirst\n  世界 👩‍💻\n\n\nstderr:\nwarn\nlast\n\nexit_code: 2"
+  },
+  {
+    "name": "empty-success",
+    "raw": "{\"stdout\":\"\",\"stderr\":\"\",\"exit_code\":0}",
+    "display": "stdout:\n\n\nstderr:\n\n\nexit_code: 0"
+  },
+  {
+    "name": "stderr-only",
+    "raw": "{\"stderr\":\"error\\nnext\",\"exit_code\":null}",
+    "display": "stderr:\nerror\nnext\n\nexit_code: null"
+  },
+  {
+    "name": "single-decode",
+    "raw": "{\"stdout\":\"C:\\\\new\\\\test \\\\\\\\server\\\\share /^\\\\n+$/\\n{\\\"nested\\\":\\\"real\\\\nnewline\\\"}\\n<script>window.injected=true</script>&<b>literal</b>\"}",
+    "display": "stdout:\nC:\\new\\test \\\\server\\share /^\\n+$/\n{\"nested\":\"real\\nnewline\"}\n<script>window.injected=true</script>&<b>literal</b>"
+  },
+  {
+    "name": "metadata",
+    "raw": "{\"stdout\":\"ok\",\"_praxis_tool_output\":{\"output_id\":\"fixture\",\"storage_truncated\":true},\"details\":{\"items\":[\"a\\nb\",3]},\"stdout_truncated\":true}",
+    "display": "stdout:\nok\n\nmetadata:\n{\n  \"_praxis_tool_output\": {\n    \"output_id\": \"fixture\",\n    \"storage_truncated\": true\n  },\n  \"details\": {\n    \"items\": [\n      \"a\\nb\",\n      3\n    ]\n  },\n  \"stdout_truncated\": true\n}"
+  },
+  {
+    "name": "plain-path-regex",
+    "raw": "C:\\new\\file /^\\n+$/",
+    "display": null
+  },
+  {
+    "name": "truncated",
+    "raw": "{\"stdout\":\"first\\nsecond",
+    "display": null
+  },
+  {
+    "name": "not-string",
+    "raw": "{\"stdout\":42,\"stderr\":\"do not hide mixed schema\"}",
+    "display": null
+  },
+  {
+    "name": "null-stdout",
+    "raw": "{\"stdout\":null}",
+    "display": null
+  },
+  {
+    "name": "nested-object",
+    "raw": "{\"result\":{\"stdout\":\"nested\\ntext\"}}",
+    "display": null
+  },
+  {
+    "name": "nonterminal",
+    "raw": "{\"matches\":[{\"text\":\"a\\nb\"}]}",
+    "display": null
+  },
+  {
+    "name": "string-root",
+    "raw": "\"first\\nsecond\"",
+    "display": null
+  },
+  {
+    "name": "array",
+    "raw": "[\"first\\nsecond\"]",
+    "display": null
+  },
+  {
+    "name": "empty",
+    "raw": "",
+    "display": null
+  },
+  {
+    "name": "deep-json",
+    "raw": "{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":{\"nested\":0}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
+    "display": null
+  }
+]

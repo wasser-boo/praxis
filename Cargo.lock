@@ -3671,7 +3671,7 @@ dependencies = [
 
 [[package]]
 name = "praxis"
-version = "0.3.0"
+version = "1.0.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3693,9 +3693,11 @@ dependencies = [
  "governor",
  "hostname",
  "hound",
+ "httpdate",
  "image",
  "jsonwebtoken",
  "lazy_static",
+ "libc",
  "minimp3",
  "once_cell",
  "png",
@@ -3725,11 +3727,13 @@ dependencies = [
  "tracing-appender",
  "tracing-attributes",
  "tracing-subscriber",
+ "unicode-segmentation",
  "urlencoding",
  "uuid",
  "vosk",
  "whisper-rs",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]
@@ -5650,8 +5654,12 @@ checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
 dependencies = [
  "futures-util",
  "log",
+ "rustls 0.23.40",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tungstenite 0.24.0",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -5679,6 +5687,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -5939,6 +5948,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.8.6",
+ "rustls 0.23.40",
+ "rustls-pki-types",
  "sha1",
  "thiserror 1.0.69",
  "utf-8",

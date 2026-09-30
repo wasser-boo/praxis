@@ -4,12 +4,20 @@ pub fn set_context_value(
     key: &str,
     value: &str,
 ) -> anyhow::Result<()> {
+    let canonical = crate::db::contexts::canonical_context_key(key);
+    let key = canonical.as_ref();
+    if key.contains('.') || matches!(key, "system_template" | "active_skill" | "sm_data") {
+        let key = if matches!(key, "system_template" | "active_skill") { format!("settings.{key}") } else { key.to_string() };
+        let value = crate::context_cmd::parse_value(value)?;
+        db.merge_context_from_agent(user_id, serde_json::json!({key: value}))?;
+        return Ok(());
+    }
     let mut ctx = db.load_context(user_id)?;
 
     match key {
         "mode" => ctx.mode = value.to_string(),
         "username" => ctx.username = Some(value.to_string()),
-        "cl_file" => ctx.cl_file = Some(value.to_string()),
+        "sm_file" => ctx.sm_file = Some(value.to_string()),
         "active_state" => ctx.active_state = Some(value.to_string()),
         "voice_enabled" => ctx.settings.voice_enabled = value.parse().unwrap_or(false),
         "voice_tts_enabled" => ctx.settings.voice_tts_enabled = value.parse().unwrap_or(false),
@@ -22,6 +30,8 @@ pub fn set_context_value(
         }
         "max_llm_turns" => ctx.settings.max_llm_turns = value.parse().ok(),
         "max_tool_calls" => ctx.settings.max_tool_calls = value.parse().ok(),
+        "history_token_limit" => ctx.settings.history_token_limit = value.parse().ok(),
+        "tool_result_limit" => ctx.settings.tool_result_limit = value.parse().ok(),
         "provider" => ctx.settings.provider = Some(value.to_string()),
         "model" => ctx.settings.model = Some(value.to_string()),
         "vision_provider" => ctx.settings.vision_provider = Some(value.to_string()),
@@ -48,11 +58,18 @@ pub fn delete_context_value(
     user_id: &str,
     key: &str,
 ) -> anyhow::Result<()> {
+    let canonical = crate::db::contexts::canonical_context_key(key);
+    let key = canonical.as_ref();
+    if key.contains('.') || matches!(key, "system_template" | "active_skill" | "sm_data") {
+        let key = if matches!(key, "system_template" | "active_skill") { format!("settings.{key}") } else { key.to_string() };
+        db.merge_context_from_agent(user_id, serde_json::json!({key: null}))?;
+        return Ok(());
+    }
     let mut ctx = db.load_context(user_id)?;
 
     match key {
         "username" => ctx.username = None,
-        "cl_file" => ctx.cl_file = None,
+        "sm_file" => ctx.sm_file = None,
         "active_state" => ctx.active_state = None,
         "max_llm_turns" => ctx.settings.max_llm_turns = None,
         "max_tool_calls" => ctx.settings.max_tool_calls = None,

@@ -1,4 +1,6 @@
 pub mod agent_control;
+pub mod discovery;
+pub mod memory;
 pub mod context_tools;
 pub mod discord_interactive;
 pub mod discord_send_embed;
@@ -9,11 +11,20 @@ pub mod execute_terminal;
 pub mod get_context;
 pub mod rag_ingest;
 pub mod rag_query;
+pub mod registry;
 pub mod understand_image;
+pub mod update_template;
+pub mod use_skill;
+pub mod search_skills;
 pub mod vector;
 pub mod vm_tools;
 pub mod web_interactive;
 pub mod write_file;
+pub mod tool_output;
+pub mod read_file;
+
+#[cfg(test)]
+mod tool_output_tests;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -1,0 +1,96 @@
+{
+  "name": "comfyui",
+  "description": "Create, edit, validate, run and download complete ComfyUI workflows with dynamic local-file and prompt inputs",
+  "version": "1.0.0",
+  "enabled": true,
+  "context": {"comfyui_workflow_base_url": "", "comfyui_workflow_user": ""},
+  "secrets": ["comfyui_api_key"],
+  "tools": [
+    {
+      "name": "comfyui_nodes",
+      "description": "Discover real installed ComfyUI node classes before building a workflow. With node_class, get exact required/optional input schemas, current model/file choices, output types and output slot indices. Otherwise search a bounded catalog page. Build complete connected API graphs with an output node; do not invent node names, model filenames or universal media support. Configuration: COMFYUI_BASE_URL or custom_data.comfyui_workflow_base_url.",
+      "parameters": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "node_class": {"type": "string", "maxLength": 256, "description": "Exact class name to inspect; mutually exclusive with catalog filters"},
+          "query": {"type": "string", "maxLength": 256},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+          "offset": {"type": "integer", "minimum": 0, "maximum": 1000000, "default": 0}
+        }
+      },
+      "handler": {"type": "script", "path": "nodes.py", "interpreter": "python3"}
+    },
+    {
+      "name": "comfyui_workflow",
+      "description": "Create, read, modify, validate and download ComfyUI workflows via server userdata API. list: saved JSON names. get: workflow JSON, sha256 and downloadable local file. save: create a complete API or editor graph from workflow or workflow_path; overwrite defaults false. edit: apply atomic local JSON Patch add/replace/remove/test operations, then save; requires the sha256 from get to detect stale edits (not server-side CAS). Can add/remove/reconnect nodes, edit widgets or editor layout. validate: check an API graph against installed node schemas/model choices and connections without executing. A complete workflow must have valid connections and an output node. Only a successful run verifies runtime behavior; save/edit do not install nodes/models or execute. Editor nodes/links JSON can be stored/edited but must be exported as API format before execution. Files use the existing Praxis download endpoint.",
+      "parameters": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "action": {"type": "string", "enum": ["list", "get", "save", "edit", "validate"]},
+          "name": {"type": "string", "maxLength": 240, "description": "For get/save/edit: relative name under ComfyUI's workflows userdata folder, e.g. portraits/edit.api.json"},
+          "workflow": {"type": "object", "description": "For save/validate: complete JSON graph. API format is {node_id:{class_type,inputs}}. Editor JSON has nodes/links arrays."},
+          "workflow_path": {"type": "string", "maxLength": 4096, "description": "For save/validate: existing local JSON file instead of workflow; relative to Praxis cwd or absolute"},
+          "workflow_name": {"type": "string", "maxLength": 240, "description": "For validate: saved server workflow instead of workflow/workflow_path"},
+          "overwrite": {"type": "boolean", "default": false, "description": "For save only: explicitly replace an existing workflow"},
+          "expected_sha256": {"type": "string", "minLength": 64, "maxLength": 64, "description": "Required for edit: server content sha256 from the latest get"},
+          "patch": {
+            "type": "array", "minItems": 1, "maxItems": 100,
+            "description": "For edit: JSON Patch, e.g. replace /6/inputs/text, add /12 node, replace /9/inputs/images connection, remove /12. Array indexes and ~0/~1 JSON pointer escapes supported.",
+            "items": {"type": "object", "additionalProperties": false, "properties": {
+              "op": {"type": "string", "enum": ["add", "replace", "remove", "test"]},
+              "path": {"type": "string"}, "value": {}
+            }, "required": ["op", "path"]}
+          },
+          "include_workflow": {"type": "boolean", "default": true, "description": "For get: include graph JSON in the response as well as its download file"},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "For list only"},
+          "offset": {"type": "integer", "minimum": 0, "maximum": 1000000, "default": 0, "description": "For list only"}
+        },
+        "required": ["action"]
+      },
+      "handler": {"type": "script", "path": "workflow.py", "interpreter": "python3"}
+    },
+    {
+      "name": "comfyui_run",
+      "description": "Run a complete ComfyUI API workflow once, only when the user requests execution. Choose exactly one workflow_name (server), workflow_path (local), or workflow (inline). Explicitly bind prompt_targets, files and typed overrides; never guess positive versus negative prompt nodes or silently replace unrelated inputs. Files can be any readable regular local file, regardless of extension, uploaded unchanged via /upload/image; compatibility depends on the selected installed loader. Use an exact existing path (including an earlier downloaded attachment), not a remote URL. Reuse the returned upload descriptor, never a local path on the GPU server. Performs installed-node preflight, then queues exactly once; no retries or remote interruption. Default wait_seconds=0 returns a prompt_id immediately; use comfyui_result for completion/downloads. Running does not mutate the saved template. GPU/model/custom-node execution may cost resources or use paid nodes; no automatic node/model installation.",
+      "parameters": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "workflow_name": {"type": "string", "maxLength": 240, "description": "Saved server workflow name under workflows/, ending in .json"},
+          "workflow_path": {"type": "string", "maxLength": 4096, "description": "Path to an existing API-format JSON on the Praxis host"},
+          "workflow": {"type": "object", "description": "Complete inline API-format graph {node_id:{class_type,inputs}}"},
+          "prompt": {"type": "string", "minLength": 1, "maxLength": 32000, "description": "Exact text to bind to prompt_targets (required when targets are supplied); does not translate or interpolate JSON"},
+          "prompt_targets": {"type": "array", "maxItems": 64, "description": "Required with prompt. Explicit input destinations, e.g. [{node_id:'6',input:'text'}]", "items": {
+            "type": "object", "additionalProperties": false,
+            "properties": {"node_id": {"type": "string"}, "input": {"type": "string"}}, "required": ["node_id", "input"]
+          }},
+          "files": {"type": "array", "maxItems": 32, "description": "Upload local inputs, binding each returned ComfyUI input filename to the given node input. Any file extension; the workflow's loader decides support. No Discord-specific constraints. Multiple references/loader nodes supported.", "items": {
+            "type": "object", "additionalProperties": false,
+            "properties": {"path": {"type": "string", "maxLength": 4096}, "node_id": {"type": "string"}, "input": {"type": "string"}}, "required": ["path", "node_id", "input"]
+          }},
+          "overrides": {"type": "array", "maxItems": 256, "description": "Typed node input changes for this run (seed, dimensions, negative prompt, model, connections or an existing server-side input filename). No JSON string substitution. Cannot overlap other bindings.", "items": {
+            "type": "object", "additionalProperties": false,
+            "properties": {"node_id": {"type": "string"}, "input": {"type": "string"}, "value": {}}, "required": ["node_id", "input", "value"]
+          }},
+          "preflight": {"type": "boolean", "default": true, "description": "Check installed node schemas before uploading/queuing. Set false for custom dynamic schemas/VALIDATE_INPUTS not representable in object_info; ComfyUI still validates /prompt. Local format, binding and file checks always apply."},
+          "wait_seconds": {"type": "number", "minimum": 0, "maximum": 900, "default": 0, "description": "Optional bounded wait before returning. Pending work is resumed with comfyui_result, never resubmitted."},
+          "output_nodes": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string"}, "description": "Only download these nodes' results. Does not restrict execution of other output nodes."}
+        }
+      },
+      "handler": {"type": "script", "path": "run.py", "interpreter": "python3"}
+    },
+    {
+      "name": "comfyui_result",
+      "description": "Check/wait for a previously returned ComfyUI prompt_id and download its completed files to Praxis. Never requeues a job. Handles standard filename/subfolder/type descriptors under any output key: images, audio, videos, gifs or custom files. Returns local paths and existing authenticated /api/files download links plus bounded structured outputs. Custom absolute paths/URLs are not fetched; custom output nodes must expose standard /view descriptors. Pending means queued/running or absent from retained history, not failure. Errors preserve the prompt_id so you can inspect/recover without spending again.",
+      "parameters": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "prompt_id": {"type": "string", "maxLength": 128},
+          "wait_seconds": {"type": "number", "minimum": 0, "maximum": 900, "default": 0},
+          "output_nodes": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string"}}
+        },
+        "required": ["prompt_id"]
+      },
+      "handler": {"type": "script", "path": "result.py", "interpreter": "python3"}
+    }
+  ]
+}

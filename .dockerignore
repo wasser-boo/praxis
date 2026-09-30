@@ -1,0 +1,12 @@
+# Build-Kontext schlank halten: Cargo-Cache und VCS nie ins Image ziehen.
+# Achtung: docs/, examples/, integrations/, skills/, static/, templates/,
+# workflows/, contexts/, plugins/, migrations/ sind RUNTIME-Assets — assets.rs
+# bettet sie per include_bytes! ein und der Build bricht ohne sie ab.
+target/
+.git/
+tests/
+*.zip
+nohup.out
+.env
+release/
+docs/media/

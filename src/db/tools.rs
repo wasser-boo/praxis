@@ -1,5 +1,6 @@
 use super::Database;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tool {
@@ -11,6 +12,41 @@ pub struct Tool {
 
 fn tools_file(db: &Database) -> std::path::PathBuf {
     db.data_dir().join("tools.json")
+}
+
+fn plugin_tools_file(db: &Database) -> std::path::PathBuf {
+    db.data_dir().join("plugin_tools.json")
+}
+
+fn load_plugin_tools(db: &Database) -> anyhow::Result<HashMap<String, bool>> {
+    let path = plugin_tools_file(db);
+    if path.exists() {
+        let data = std::fs::read_to_string(&path)?;
+        Ok(serde_json::from_str(&data)?)
+    } else {
+        Ok(HashMap::new())
+    }
+}
+
+fn save_plugin_tools(db: &Database, tools: &HashMap<String, bool>) -> anyhow::Result<()> {
+    let path = plugin_tools_file(db);
+    let json = serde_json::to_string_pretty(tools)?;
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
+pub fn get_plugin_tool_enabled(db: &Database, name: &str) -> bool {
+    load_plugin_tools(db).ok().and_then(|m| m.get(name).copied()).unwrap_or(true)
+}
+
+pub fn set_plugin_tool_enabled(db: &Database, name: &str, enabled: bool) -> anyhow::Result<()> {
+    let mut tools = load_plugin_tools(db)?;
+    tools.insert(name.to_string(), enabled);
+    save_plugin_tools(db, &tools)
+}
+
+pub fn list_plugin_tools(db: &Database) -> anyhow::Result<HashMap<String, bool>> {
+    load_plugin_tools(db)
 }
 
 fn load_tools(db: &Database) -> anyhow::Result<Vec<Tool>> {
@@ -141,12 +177,74 @@ pub fn init_default_tools(db: &Database) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn get_default_tools() -> Vec<Tool> {
+/// Canonical built-in contracts shared by discovery and state-based routing.
+pub(crate) fn get_default_tools() -> Vec<Tool> {
     vec![
+        crate::tools::tool_output::definition(),
+        Tool {
+            name: "search_tools".into(),
+            description: Some("Search enabled builtin/plugin capabilities by name or keywords and load matching schemas for the NEXT model turn in this task. Start here for web search, memory/SRS, media, Discord, VM, scheduling or other non-core tools. Never enables disabled tools. Use precise queries; do not enumerate the catalog.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":256},"limit":{"type":"integer","minimum":1,"maximum":8,"default":5},"replace":{"type":"boolean","description":"Replace earlier discoveries when the 24 additional-tool limit is reached; core tools stay available","default":false}},"required":["query"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "memory_profile_load".into(),
+            description: Some("Load an existing user-owned memory profile for the current session/persona. On entering language_instructor load language_instructor, not a general memory bucket. If exists=false, call memory_profile_create then load again. Never load unrelated profiles without a relevant user request. Shared is separate and cannot be selected.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":128}},"required":["name"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "memory_profile_create".into(),
+            description: Some("Create an empty named memory category owned only by this user. Existing data is never replaced or copied from general memory. Then use memory_profile_load. Examples: language_instructor, code_assistant, researcher. Do not create one bucket for unrelated modes.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":128}},"required":["name"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "memory_profile_list".into(),
+            description: Some("List this user's memory profile names only, without revealing other profiles' contents or other users. Use to locate the relevant category before loading it.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "memory_get".into(),
+            description: Some("Read a typed variable from the ACTIVE memory profile (SRS, xp, learning_profile etc.), not context custom_data. Returns profile and value; echo both as expected_profile/expected_value when writing. scope=shared is only for rare general name/pronouns/time_zone facts, never course or project data.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string","maxLength":128},"scope":{"type":"string","enum":["profile","shared"],"default":"profile"}},"required":["key"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "memory_set".into(),
+            description: Some("Persist typed JSON in the active memory profile. First memory_get, then pass its profile/value as expected_profile/expected_value to protect concurrent edits and mode switches. Null deletes. Shared writes require explicit scope, expected_profile=shared, and a reason for a user-authorized general fact (name/pronouns/time_zone); use VERY RARELY. No credentials. Confirm only success.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"key":{"type":"string","maxLength":128},"value":{},"expected_value":{"description":"Previously read JSON value; null if absent"},"expected_profile":{"type":"string","maxLength":128},"scope":{"type":"string","enum":["profile","shared"],"default":"profile"},"reason":{"type":"string","maxLength":256}},"required":["key","value"],"additionalProperties":false}),
+            is_enabled: true,
+        },
         Tool {
             name: "execute_terminal".into(),
-            description: Some("Run shell command".into()),
+            description: Some("Run shell command. Long-running commands: use run_background instead, then poll with background_status (finished jobs also announce themselves).".into()),
             parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "run_background".into(),
+            description: Some("Start a long-running shell command DETACHED (compile, download, server). Returns a job id immediately so you can keep working. The job announces its completion to the user's dashboard automatically; poll background_status only if you need the result mid-task.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"}},"required":["command"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "background_status".into(),
+            description: Some("Check status/output of a detached background command. Call without job_id to list all jobs.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"job_id":{"type":"string"}}}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "delegate_task".into(),
+            description: Some("Delegate ONE self-contained subtask to a fresh child agent with its own forked context (inherits settings/memory snapshot). You continue working after it returns. Delegated tasks CANNOT delegate further (one level only). The child does NOT see your conversation; pass everything it needs in 'task'/'context'.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"task":{"type":"string","description":"Complete, self-contained task description"},"context":{"type":"string","description":"Optional extra context/data for the child"},"timeout_secs":{"type":"integer","description":"Max runtime (default 600, max 3600)"}},"required":["task"]}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "list_delegations".into(),
+            description: Some("List your delegated tasks and their status/results.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
             is_enabled: true,
         },
         Tool {
@@ -697,9 +795,21 @@ fn get_default_tools() -> Vec<Tool> {
             is_enabled: true,
         },
         Tool {
+            name: "search_skills".into(),
+            description: Some("Search the persistent skill metadata index using a few keywords. Returns at most 20 names, short descriptions, required_parameters and activation flags, never instructions. Hidden skills are excluded. A user_only result needs human selection via /skill or authenticated context controls. Refine the query rather than enumerating the catalog. Follow the POML discovery policy.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string","maxLength":512,"description":"Literal word-prefix search over names/descriptions. Empty lists a bounded first page."},"limit":{"type":"integer","minimum":1,"maximum":20,"default":5}},"required":["query"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
+            name: "use_skill".into(),
+            description: Some("Load one registered skill's instructions on demand. Discover matching names and required_parameters with search_skills, following the POML discovery policy. Hidden dependencies may be loaded by exact name. User-only skills cannot be activated by this tool. Follow returned instructions with normal tools; loading does not execute scripts or complete the task.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","maxLength":64,"description":"Exact registered skill name"},"parameters":{"type":"object","description":"Required non-empty string inputs advertised by discovery; additional inputs are skill-specific.","additionalProperties":true}},"required":["name","parameters"],"additionalProperties":false}),
+            is_enabled: true,
+        },
+        Tool {
             name: "update_template".into(),
-            description: Some("Update or create a POML template file. The template is validated by rendering it with POML before saving. Templates control system prompts, roles, and task behaviors.".into()),
-            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"Template name (use / for subdirectories, e.g. 'tasks/custom'). .poml extension is added automatically."},"content":{"type":"string","description":"Full POML template content as XML"}},"required":["name","content"]}),
+            description: Some("Update or create a POML template. Strictly renders a temporary file before replacing the destination; validation failure leaves existing content unchanged. Requires Node and POML_CLI.".into()),
+            parameters: serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"Template name without .poml, e.g. tasks/custom. Use letters, numbers, underscores, hyphens and / separators; no absolute paths or traversal."},"content":{"type":"string","description":"Full POML template content"},"context":{"type":"object","description":"Optional complete JSON context for validation; omitted uses synthetic system variables, never saved user data."}},"required":["name","content"]}),
             is_enabled: true,
         },
     ]
@@ -735,11 +845,25 @@ mod tool_tests {
     }
 
     #[test]
+    fn test_use_skill_registration_and_upgrade() {
+        let (db, _dir) = test_db();
+        save(&db, &get_default_tools()[0]).unwrap();
+        init_default_tools(&db).unwrap();
+        let tool = get(&db, "use_skill").unwrap();
+        assert!(tool.is_enabled);
+        assert_eq!(tool.parameters["properties"]["parameters"]["type"], "object");
+        disable(&db, "use_skill").unwrap();
+        init_default_tools(&db).unwrap();
+        assert!(!get(&db, "use_skill").unwrap().is_enabled);
+        assert!(!to_tool_definitions(&db).unwrap().iter().any(|t| t.function.name == "use_skill"));
+    }
+
+    #[test]
     fn test_init_default_tools() {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 55);
+        assert_eq!(tools.len(), get_default_tools().len());
     }
 
     #[test]
@@ -748,19 +872,21 @@ mod tool_tests {
         init_default_tools(&db).unwrap();
         init_default_tools(&db).unwrap();
         let tools = list(&db).unwrap();
-        assert_eq!(tools.len(), 55);
+        assert_eq!(tools.len(), get_default_tools().len());
     }
 
     #[test]
     fn test_list_enabled() {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
+        let expected = get_default_tools().iter().filter(|tool| tool.is_enabled).count();
         let enabled = list_enabled(&db).unwrap();
-        assert_eq!(enabled.len(), 29);
+        assert_eq!(enabled.len(), expected);
 
         disable(&db, "execute_terminal").unwrap();
         let enabled = list_enabled(&db).unwrap();
-        assert_eq!(enabled.len(), 28);
+        assert_eq!(enabled.len(), expected - 1);
+        assert!(enabled.iter().all(|tool| tool.name != "execute_terminal"));
     }
 
     #[test]
@@ -850,8 +976,17 @@ mod tool_tests {
         let (db, _dir) = test_db();
         init_default_tools(&db).unwrap();
         let defs = to_tool_definitions(&db).unwrap();
-        assert_eq!(defs.len(), 29);
-        assert_eq!(defs[0].function.name, "execute_terminal");
+        let expected = get_default_tools().iter().filter(|tool| tool.is_enabled).count();
+        assert_eq!(defs.len(), expected);
+        // Preserve the full enabled-default order, not a stale hard-coded
+        // assumption that execute_terminal precedes progressive discovery.
+        let expected_names: Vec<_> = get_default_tools().into_iter()
+            .filter(|tool| tool.is_enabled).map(|tool| tool.name).collect();
+        let actual_names: Vec<_> = defs.iter().map(|tool| tool.function.name.clone()).collect();
+        assert_eq!(actual_names, expected_names);
+        for name in ["execute_terminal", "memory_profile_create", "memory_profile_load", "memory_profile_list"] {
+            assert!(actual_names.iter().any(|actual| actual == name));
+        }
     }
 
     #[test]
@@ -862,7 +997,8 @@ mod tool_tests {
         disable(&db, "write_file").unwrap();
 
         let defs = to_tool_definitions(&db).unwrap();
-        assert_eq!(defs.len(), 27);
+        let expected = get_default_tools().iter().filter(|tool| tool.is_enabled).count();
+        assert_eq!(defs.len(), expected - 2);
         assert!(defs.iter().all(|d| d.function.name != "execute_terminal"));
     }
 

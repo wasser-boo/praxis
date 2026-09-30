@@ -41,7 +41,7 @@ pub async fn health_check(State(state): State<GatewayState>) -> Json<HealthRespo
 }
 
 pub async fn status(State(state): State<GatewayState>) -> Json<StatusResponse> {
-    let providers: Vec<String> = state.llm.provider_names();
+    let providers: Vec<String> = state.llm.get().provider_names();
     let default_provider = state.config.use_provider.clone();
 
     Json(StatusResponse {
@@ -51,6 +51,34 @@ pub async fn status(State(state): State<GatewayState>) -> Json<StatusResponse> {
         llm_providers: providers,
         default_provider,
     })
+}
+
+pub async fn stop(axum::extract::Path(user): axum::extract::Path<String>) -> Json<serde_json::Value> {
+    crate::gateway::agent_loop::stop_agent_loop(&user).await;
+    Json(serde_json::json!({"success":true}))
+}
+
+/// Authenticated SSE for local/TUI clients. Uses the same real-time bus as web chat.
+pub async fn events(
+    axum::extract::Path(user): axum::extract::Path<String>,
+) -> axum::response::Sse<impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    let rx = crate::dashboard::stream::get_or_create(&user).subscribe();
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let data = serde_json::to_string(&event).unwrap_or_default();
+                    return Some((Ok(axum::response::sse::Event::default().event(event.event).data(data)), rx));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    return Some((Ok(axum::response::sse::Event::default().event("stream_abort")
+                        .data("{\"event\":\"stream_abort\",\"data\":\"Stream receiver lagged; reload saved history\"}")), rx));
+                }
+                Err(_) => return None,
+            }
+        }
+    });
+    axum::response::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
 /// REST endpoint for web chat - same as WebSocket but via HTTP POST

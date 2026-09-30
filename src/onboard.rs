@@ -54,6 +54,7 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
                     || key.starts_with("OLLAMA_")
                     || key.starts_with("MINIMAX_")
                     || key.starts_with("MIMO_")
+                    || key.starts_with("OPENROUTER_")
                 {
                     if !env_lines
                         .iter()
@@ -90,6 +91,10 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
         let provider_choice = prompt_choice("Select provider", &["1", "2", "3", "4", "5", "6"], "1")?;
         select_provider(&provider_choice, &existing, &mut env_lines)?
     };
+    persist_provider_selection(&mut env_lines, &provider_name);
+    for (key, value) in &existing {
+        if key.starts_with("LLM_") { env_lines.push(format!("{key}={value}")); }
+    }
     println!();
 
     // Embedding Model (for RAG)
@@ -574,6 +579,8 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
             || line.starts_with("OLLAMA_")
             || line.starts_with("MINIMAX_")
             || line.starts_with("MIMO_")
+            || line.starts_with("OPENROUTER_")
+            || line.starts_with("LLM_")
             || line.starts_with("POML_CLI=")
         {
             content.push_str(line);
@@ -660,75 +667,16 @@ pub fn run_interactive_onboard() -> anyhow::Result<()> {
 
     std::fs::write(env_path, content)?;
 
-    println!("\nOnboarding complete! Run: ./praxis run");
-
     println!("Configuration saved to {}", env_path);
 
-    // Create directories
-    std::fs::create_dir_all("templates/roles")?;
-    std::fs::create_dir_all("templates/tasks")?;
-    std::fs::create_dir_all("contextlanguage")?;
     std::fs::create_dir_all("data")?;
-    std::fs::create_dir_all("skills")?;
     std::fs::create_dir_all("plugins")?;
-    std::fs::create_dir_all("static")?;
-    println!(
-        "Created directories: templates/roles/, templates/tasks/, contextlanguage/, data/, skills/, plugins/, static/"
-    );
-
-    // Create default templates
-    std::fs::write(
-        "templates/system.poml",
-        include_str!("../templates/system.poml"),
-    )?;
-    std::fs::write(
-        "templates/roles/senior_dev.poml",
-        include_str!("../templates/roles/senior_dev.poml"),
-    )?;
-    std::fs::write(
-        "templates/roles/technical_writer.poml",
-        include_str!("../templates/roles/technical_writer.poml"),
-    )?;
-    std::fs::write(
-        "templates/roles/researcher.poml",
-        include_str!("../templates/roles/researcher.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/plan.poml",
-        include_str!("../templates/tasks/plan.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/test.poml",
-        include_str!("../templates/tasks/test.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/review.poml",
-        include_str!("../templates/tasks/review.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/done.poml",
-        include_str!("../templates/tasks/done.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/code.poml",
-        include_str!("../templates/tasks/code.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/code_review.poml",
-        include_str!("../templates/tasks/code_review.poml"),
-    )?;
-    std::fs::write(
-        "templates/tasks/feedback.poml",
-        include_str!("../templates/tasks/feedback.poml"),
-    )?;
-    println!("Created default templates");
-
-    // Create static dashboard files
-    std::fs::write("static/index.html", include_str!("../static/index.html"))?;
-    std::fs::write("static/style.css", include_str!("../static/style.css"))?;
-    std::fs::write("static/app.js", include_str!("../static/app.js"))?;
-    std::fs::write("static/logo.svg", include_str!("../static/logo.svg"))?;
-    println!("Created dashboard files: static/index.html, static/style.css, static/app.js, static/logo.svg");
+    // One complete bundle for onboarding and repair, including all relative
+    // POML imports, canonical contexts/*.sm, native skills and bitmap branding.
+    // Preserve existing user customizations instead of overwriting prompts.
+    let assets = crate::assets::install(std::path::Path::new("."), false, false)?;
+    println!("Installed {} runtime assets; preserved {} existing files.", assets.created.len(), assets.preserved.len());
+    println!("For dashboard upgrades without reconfiguring: ./praxis repair-assets --update-dashboard");
 
     // Ask about MiniMax image plugin
     if provider_name == "minimax" || provider_name == "mimo" {
@@ -1010,6 +958,11 @@ fn get_existing(
         .unwrap_or_else(|| fallback.to_string())
 }
 
+fn persist_provider_selection(lines: &mut Vec<String>, provider: &str) {
+    lines.retain(|line| !line.starts_with("USE_PROVIDER="));
+    lines.push(format!("USE_PROVIDER={provider}"));
+}
+
 fn select_provider(
     choice: &str,
     existing: &std::collections::HashMap<String, String>,
@@ -1180,6 +1133,16 @@ fn generate_random_key(length: usize) -> String {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[test]
+    fn resilience_onboarding_persists_provider_exactly_once() {
+        for initial in [vec![], vec!["USE_PROVIDER=openai".into()]] {
+            let mut lines = initial;
+            persist_provider_selection(&mut lines, "ollama");
+            persist_provider_selection(&mut lines, "ollama");
+            assert_eq!(lines, vec!["USE_PROVIDER=ollama"]);
+        }
+    }
 
     #[test]
     fn test_generate_random_key() {

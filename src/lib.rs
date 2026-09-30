@@ -1,11 +1,15 @@
-pub mod cl;
+pub mod assets;
+pub mod sm;
+pub mod sse;
 pub mod config;
+pub mod comfyui;
 pub mod context_cmd;
 pub mod dashboard;
 pub mod db;
 pub mod discord;
 pub mod event_channel;
 pub mod gateway;
+pub mod gpu_router;
 pub mod onboard;
 pub mod plugins;
 pub mod skills;

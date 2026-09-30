@@ -1,5 +1,11 @@
 pub mod handler;
+pub mod comfyui_xtts;
+pub mod comfyui_qwen3;
+pub mod vosk_remote;
 pub mod wake_word;
+
+#[cfg(test)]
+mod elevenlabs_tests;
 
 // ── STT ──────────────────────────────────────────────────────────────────────
 
@@ -296,6 +302,7 @@ pub mod elevenlabs_stt {
     pub struct ElevenLabsSTT {
         api_key: String,
         client: Client,
+        base_url: String,
     }
 
     #[derive(Deserialize)]
@@ -303,6 +310,8 @@ pub mod elevenlabs_stt {
         text: Option<String>,
         #[serde(rename = "error")]
         error: Option<String>,
+        #[serde(default)]
+        language_confidence: Option<f64>,
     }
 
     impl ElevenLabsSTT {
@@ -310,6 +319,16 @@ pub mod elevenlabs_stt {
             Self {
                 api_key,
                 client: Client::new(),
+                base_url: "https://api.elevenlabs.io".to_string(),
+            }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn with_base_url(api_key: String, base_url: String) -> Self {
+            Self {
+                api_key,
+                base_url,
+                client: Client::builder().no_proxy().build().unwrap(),
             }
         }
 
@@ -326,7 +345,15 @@ pub mod elevenlabs_stt {
             tag_audio_events: bool,
             no_verbatim: bool,
         ) -> Result<String, STTError> {
-            let url = "https://api.elevenlabs.io/v1/speech-to-text";
+            if !self.is_ready() {
+                return Err(STTError::NotReady("ElevenLabs API key not set".to_string()));
+            }
+            if model.trim().is_empty() || audio_data.is_empty() {
+                return Err(STTError::TranscriptionFailed(
+                    "ElevenLabs STT requires a model ID and non-empty audio".to_string(),
+                ));
+            }
+            let url = format!("{}/v1/speech-to-text", self.base_url);
 
             let file_part = reqwest::multipart::Part::bytes(audio_data.to_vec())
                 .file_name("audio.wav")
@@ -352,6 +379,7 @@ pub mod elevenlabs_stt {
                 .post(url)
                 .header("xi-api-key", &self.api_key)
                 .multipart(form)
+                .timeout(std::time::Duration::from_secs(120))
                 .send()
                 .await
                 .map_err(|e| {
@@ -381,10 +409,17 @@ pub mod elevenlabs_stt {
             stt_response
                 .text
                 .ok_or_else(|| STTError::TranscriptionFailed("No text in response".to_string()))
+                .map(|text| {
+                    if let Some(c) = stt_response.language_confidence {
+                        crate::voice::store_stt_confidence(c);
+                        tracing::info!(confidence = c, "STT: language_confidence received");
+                    }
+                    text
+                })
         }
 
         pub fn is_ready(&self) -> bool {
-            !self.api_key.is_empty()
+            !self.api_key.trim().is_empty()
         }
         pub fn name(&self) -> &'static str {
             "elevenlabs_stt"
@@ -514,15 +549,40 @@ pub mod tts {
             api_key: String,
             voice_id: String,
             client: Client,
+            base_url: String,
         }
 
-        #[derive(Debug, Clone, Default)]
+        #[derive(Debug, Clone, serde::Serialize)]
         pub struct ElevenLabsVoiceSettings {
             pub stability: f32,
             pub similarity_boost: f32,
+            #[serde(skip_serializing_if = "Option::is_none")]
             pub style: Option<f32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             pub speed: Option<f32>,
+            #[serde(skip)]
             pub language: Option<String>,
+        }
+
+        #[derive(serde::Serialize)]
+        struct TtsRequest<'a> {
+            text: &'a str,
+            model_id: &'a str,
+            voice_settings: &'a ElevenLabsVoiceSettings,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            language_code: Option<&'a str>,
+        }
+
+        impl Default for ElevenLabsVoiceSettings {
+            fn default() -> Self {
+                Self {
+                    stability: 0.5,
+                    similarity_boost: 0.75,
+                    style: None,
+                    speed: None,
+                    language: None,
+                }
+            }
         }
 
         impl ElevenLabsTTS {
@@ -531,6 +591,17 @@ pub mod tts {
                     api_key,
                     voice_id,
                     client: Client::new(),
+                    base_url: "https://api.elevenlabs.io".to_string(),
+                }
+            }
+
+            #[cfg(test)]
+            pub(crate) fn with_base_url(api_key: String, voice_id: String, base_url: String) -> Self {
+                Self {
+                    api_key,
+                    voice_id,
+                    base_url,
+                    client: Client::builder().no_proxy().build().unwrap(),
                 }
             }
 
@@ -553,51 +624,55 @@ pub mod tts {
                 model: &str,
                 settings: &ElevenLabsVoiceSettings,
             ) -> Result<Vec<u8>, TTSError> {
-                let url = format!(
-                    "https://api.elevenlabs.io/v1/text-to-speech/{}/stream",
-                    self.voice_id
-                );
-
-                let stability = if settings.stability > 0.0 {
-                    settings.stability
-                } else {
-                    0.5
-                };
-                let similarity_boost = if settings.similarity_boost > 0.0 {
-                    settings.similarity_boost
-                } else {
-                    0.75
-                };
-
-                let mut voice_settings = serde_json::json!({
-                    "stability": stability,
-                    "similarity_boost": similarity_boost,
-                });
-                if let Some(style) = settings.style {
-                    voice_settings["style"] = serde_json::json!(style);
+                if !self.is_ready() {
+                    return Err(TTSError::NotReady(
+                        "ElevenLabs API key or voice ID not set".to_string(),
+                    ));
                 }
-                if let Some(speed) = settings.speed {
-                    voice_settings["speed"] = serde_json::json!(speed);
+                if text.trim().is_empty() || model.trim().is_empty() {
+                    return Err(TTSError::SynthesisFailed(
+                        "ElevenLabs TTS requires non-empty text and a model ID".to_string(),
+                    ));
                 }
-
-                let mut body = serde_json::json!({
-                    "text": text,
-                    "model_id": model,
-                    "voice_settings": voice_settings,
-                });
-                if let Some(ref lang) = settings.language {
-                    if !lang.is_empty() {
-                        body["language_code"] = serde_json::json!(lang);
+                for (name, value, min, max) in [
+                    ("stability", Some(settings.stability), 0.0, 1.0),
+                    ("similarity_boost", Some(settings.similarity_boost), 0.0, 1.0),
+                    ("style", settings.style, 0.0, 1.0),
+                    ("speed", settings.speed, 0.7, 1.2),
+                ] {
+                    if let Some(value) = value {
+                        if !value.is_finite() || !(min..=max).contains(&value) {
+                            return Err(TTSError::SynthesisFailed(format!(
+                                "ElevenLabs {name} must be between {min} and {max}",
+                            )));
+                        }
                     }
                 }
+                let url = format!(
+                    "{}/v1/text-to-speech/{}/stream",
+                    self.base_url,
+                    urlencoding::encode(&self.voice_id)
+                );
+
+                // Serialize f32 values directly, rather than widening through
+                // serde_json::Value (which can turn the upper limit 1.2 into
+                // 1.2000000476837158 and make the provider reject it).
+                let body = TtsRequest {
+                    text,
+                    model_id: model,
+                    voice_settings: settings,
+                    language_code: settings.language.as_deref().filter(|lang| !lang.is_empty()),
+                };
 
                 let response = self
                     .client
                     .post(&url)
                     .header("xi-api-key", &self.api_key)
                     .header("Content-Type", "application/json")
-                    .header("Accept", "audio/wav")
+                    .header("Accept", "audio/mpeg")
+                    .query(&[("output_format", "mp3_44100_128")])
                     .json(&body)
+                    .timeout(std::time::Duration::from_secs(120))
                     .send()
                     .await
                     .map_err(|e| {
@@ -616,11 +691,16 @@ pub mod tts {
                 let bytes = response.bytes().await.map_err(|e| {
                     TTSError::SynthesisFailed(format!("Failed to read audio bytes: {}", e))
                 })?;
+                if bytes.is_empty() {
+                    return Err(TTSError::SynthesisFailed(
+                        "ElevenLabs returned empty audio".to_string(),
+                    ));
+                }
                 Ok(bytes.to_vec())
             }
 
             pub fn is_ready(&self) -> bool {
-                !self.api_key.is_empty() && !self.voice_id.is_empty()
+                !self.api_key.trim().is_empty() && !self.voice_id.trim().is_empty()
             }
             pub fn name(&self) -> &'static str {
                 "elevenlabs"
@@ -1613,7 +1693,7 @@ pub fn downsample_48k_to_16k(samples: &[i16]) -> Vec<i16> {
 pub fn apply_noise_gate(samples: &[i16], threshold: i16) -> Vec<i16> {
     samples
         .iter()
-        .map(|&s| if s.abs() < threshold { 0 } else { s })
+        .map(|&s| if i32::from(s).abs() < i32::from(threshold) { 0 } else { s })
         .collect()
 }
 
@@ -1621,10 +1701,31 @@ pub struct STTConfig {
     pub engine: String,
     pub api_key: Option<String>,
     pub model_path: Option<String>,
+    pub vosk_url: Option<String>,
     pub elevenlabs_model: String,
     pub elevenlabs_language: Option<String>,
     pub elevenlabs_tag_audio_events: bool,
     pub elevenlabs_no_verbatim: bool,
+}
+
+/// Last STT language_confidence (0.0..1.0) from the most recent ElevenLabs
+/// transcription. None until the first transcription happened. Used by the
+/// message handler to flag low-confidence transcripts for clarification.
+static LAST_STT_CONFIDENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+static HAS_STT_CONFIDENCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn store_stt_confidence(confidence: f64) {
+    let bits = confidence.clamp(0.0, 1.0).to_bits();
+    LAST_STT_CONFIDENCE.store(bits, std::sync::atomic::Ordering::Relaxed);
+    HAS_STT_CONFIDENCE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn last_stt_confidence() -> Option<f64> {
+    if !HAS_STT_CONFIDENCE.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let bits = LAST_STT_CONFIDENCE.load(std::sync::atomic::Ordering::Relaxed);
+    Some(f64::from_bits(bits))
 }
 
 pub async fn transcribe_audio(
@@ -1653,12 +1754,23 @@ pub async fn transcribe_audio(
             .await
         }
         "vosk" => {
-            let model_path = config.model_path.as_deref().ok_or_else(|| {
-                stt::STTError::NotReady("Vosk model path not configured".to_string())
-            })?;
-            let stt = VoskSTT::new(Some(model_path.to_string()));
-            let pcm_data = wav_to_pcm(wav_data)?;
-            stt.transcribe(&pcm_data).await
+            // Vosk does not provide ElevenLabs language_confidence; do not reuse
+            // a stale confidence value from a previous provider invocation.
+            HAS_STT_CONFIDENCE.store(false, std::sync::atomic::Ordering::Relaxed);
+            let remote_url = config.vosk_url.as_ref().filter(|url| !url.is_empty()).cloned()
+                .or_else(|| std::env::var("VOSK_SERVER_URL").ok().filter(|url| !url.is_empty()));
+            if let Some(url) = remote_url {
+                let remote = vosk_remote::VoskRemote::from_url(&url)
+                    .map_err(|error| stt::STTError::NotReady(format!("Vosk remote: {error:#}")))?;
+                remote.transcribe(wav_data, None).await
+            } else {
+                let model_path = config.model_path.as_deref().ok_or_else(|| {
+                    stt::STTError::NotReady("Vosk model path not configured; alternatively set voice_vosk_url for remote Vosk".to_string())
+                })?;
+                let stt = VoskSTT::new(Some(model_path.to_string()));
+                let pcm_data = wav_to_pcm(wav_data)?;
+                stt.transcribe(&pcm_data).await
+            }
         }
         "whisper" => {
             let model_path = config.model_path.as_deref().ok_or_else(|| {
@@ -1888,6 +2000,7 @@ mod voice_tests {
             engine: engine.to_string(),
             api_key: None,
             model_path: None,
+            vosk_url: None,
             elevenlabs_model: "scribe_v2".to_string(),
             elevenlabs_language: None,
             elevenlabs_tag_audio_events: false,

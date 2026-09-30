@@ -20,13 +20,15 @@
 //!   from the parent context so they inherit settings but start with
 //!   an empty message log.
 //! - The agent loop is invoked over HTTP to the local gateway. The
-//!   TUI then polls the messages table for new rows (~250 ms) and
-//!   re-renders. We don't hook into the SSE stream because that would
-//!   require the JWT-protected dashboard endpoint; polling the DB is
-//!   simpler, fully offline, and plenty fast for a TUI.
+//!   TUI subscribes automatically to authenticated gateway SSE for text,
+//!   reasoning and tool-call fragments. SQLite polling reconciles durable
+//!   results and provides history/reconnect recovery.
 
 mod app;
+mod streaming;
+mod remote;
 mod sessions;
 mod ui;
+mod tool_result;
 
 pub use app::run as run_chat;

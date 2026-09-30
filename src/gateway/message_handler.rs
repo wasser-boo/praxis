@@ -1,5 +1,6 @@
 use crate::gateway::llm::provider::{ChatMessage, ChatRequest};
 use crate::gateway::GatewayState;
+use crate::tools::registry::build_tool_definitions_for_user;
 use crate::voice::tts;
 
 pub async fn handle_message(
@@ -8,7 +9,44 @@ pub async fn handle_message(
     content: &str,
     channel_id: Option<&str>,
 ) -> anyhow::Result<String> {
-    let ctx = state.db.load_context(user_id)?;
+    let _task = crate::gateway::task_control::begin(user_id)?;
+    handle_message_inner(state, user_id, content, channel_id).await
+}
+
+pub(crate) async fn handle_message_inner(
+    state: &GatewayState,
+    user_id: &str,
+    content: &str,
+    channel_id: Option<&str>,
+) -> anyhow::Result<String> {
+    // A prior agent_complete must not stop this independent task after one tool.
+    crate::gateway::prompt::reset_task_completion(&state.db, user_id)?;
+    // Route before deciding the path and before either prompt is rendered.
+    let ctx = crate::gateway::prompt::prepare_runtime(state, user_id, content, None, channel_id)?;
+
+    // GPU-Router-Prewarm (pgpu §12.4): LLM-Slot VOR dem Turn wecken (await —
+    //Wake + State-Check sind <1 s). Nachts (20:00-Sleep = auto_rent aus)
+    // ist force-wake der einzige Weg hoch; X-Router-Wait allein würde sofort
+    // mit 503 auto_rent_off abgewiesen. Danach hält X-Router-Wait die LLM-
+    // Anfrage selbst bis healthy (Restart ~1-2 min) — die Nachricht WARTET
+    // also auf die geladene Box und wird danach beantwortet.
+    if crate::gpu_router::configured() {
+        let _ = crate::gpu_router::ensure_awake(crate::gpu_router::SLOT_LLM).await;
+    }
+    // Media-Slot früh wecken — die Box wärmt, während das LLM noch
+    // generiert, statt beim Sprechen auf einen kalten Slot (503) zu laufen.
+    // Nur wenn die Antwort in DIESEM Kanal wirklich gesprochen wird — sonst
+    // mietet ein Web-Chat ohne web_chat_tts eine Media-Box für nichts.
+    // No-op ohne GPU_ROUTER_URL; ensure_awake dedupliziert (30 s).
+    if reply_tts_enabled(&ctx.settings, channel_id)
+        && matches!(
+            ctx.settings.voice_tts_type.as_str(),
+            "comfyui_qwen3" | "comfyui_xtts"
+        )
+    {
+        crate::gpu_router::ensure_awake_background(crate::gpu_router::SLOT_MEDIA);
+    }
+
     let max_turns = ctx.settings.max_llm_turns.unwrap_or(1);
 
     // Use agent loop when max_turns > 1
@@ -17,61 +55,24 @@ pub async fn handle_message(
             .await;
     }
 
-    // Legacy single-pass path (max_turns == 1)
-    let mut ctx = ctx;
-    let plugin_defaults = state.plugins.context_defaults();
-    if !plugin_defaults.is_empty() {
-        if ctx.custom_data.is_null() {
-            ctx.custom_data = serde_json::json!({});
-        }
-        if let Some(obj) = ctx.custom_data.as_object_mut() {
-            for (key, value) in &plugin_defaults {
-                obj.entry(key.clone()).or_insert_with(|| value.clone());
-            }
-        }
-    }
-
-    // Inject the only two runtime values that downstream code reads from
-    // `ctx.custom_data` (see agent_loop.rs for full rationale):
-    //   - `user_template`: name of the POML user-message template
-    //   - `channel_id`: default Discord channel for tools like `ask_questions`
-    {
-        if ctx.custom_data.is_null() {
-            ctx.custom_data = serde_json::json!({});
-        }
-        if let Some(obj) = ctx.custom_data.as_object_mut() {
-            let user_template = obj
-                .get("user_template")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!("user"));
-            obj.insert("user_template".to_string(), user_template);
-
-            // Default channel_id for Discord tools (can be overwritten via CL).
-            // Prefer channel_id from the incoming message, fall back to settings.
-            if !obj.contains_key("channel_id") {
-                let ch = channel_id
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| ctx.settings.feedback_channel_id.as_deref())
-                    .unwrap_or("");
-                if !ch.is_empty() {
-                    obj.insert("channel_id".to_string(), serde_json::json!(ch));
-                }
-            }
-        }
-    }
-
-    let _ = state.db.save_context(&ctx);
-
-    state.db.add_message(
-        user_id,
-        &crate::db::messages::Message::user(content.to_string()),
-    )?;
-
-    let system_prompt = build_system_prompt(state, &ctx).await;
+    // One user-facing turn can require several tool-only LLM responses. Keep
+    // this chat path bounded without mistaking a tool response for completion.
+    // Snapshot the budget: a tool cannot grow its own budget during this task.
+    let tool_limit = ctx.settings.max_tool_calls.unwrap_or(5).clamp(0, 128) as usize;
+    let mut tool_calls_used = 0usize;
+    let mut current_tool_ids = std::collections::HashSet::new();
+    let mut finalizing = tool_limit == 0;
+    // Persist raw input, then route BEFORE either current-request template.
+    state.db.add_message(user_id, &crate::db::messages::Message::user(content.to_string()))?;
+    crate::gateway::compaction::before_request(state, user_id).await?;
+    let mut ctx = crate::gateway::decision_routing::prepare(state, user_id, content, None, channel_id).await?;
+    let rendered_user = crate::gateway::prompt::render_user(state, &ctx, content).await?;
+    let system_prompt = crate::gateway::prompt::render_system(state, &ctx, content).await?;
 
     let mut messages = Vec::new();
     messages.push(ChatMessage {
-        role: "system".to_string(),
+        reasoning_content: None,
+role: "system".to_string(),
         content: Some(system_prompt),
         content_parts: None,
         tool_calls: None,
@@ -79,7 +80,7 @@ pub async fn handle_message(
         tool_name: None,
     });
 
-    let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
+    let token_budget = ctx.settings.history_token_limit.unwrap_or(crate::db::messages::DEFAULT_HISTORY_TOKENS);
     let (history, _tokens) = state
         .db
         .get_messages_with_token_budget(user_id, token_budget)?;
@@ -96,6 +97,7 @@ pub async fn handle_message(
                 .collect()
         });
         messages.push(ChatMessage {
+    reasoning_content: None,
             role: msg.role.clone(),
             content: if msg.content.is_empty() {
                 None
@@ -109,33 +111,57 @@ pub async fn handle_message(
         });
     }
 
-    let mut tool_defs = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
-    tool_defs.extend(state.plugins.tool_definitions());
+    // Render only the CURRENT user turn; stored history stays raw.
+    if let Some(last) = messages.last_mut() {
+        if last.role == "user" {
+            last.content = Some(rendered_user);
+        }
+    }
+
+    let tool_defs = build_tool_definitions_for_user(&ctx.settings, Some(&state.plugins.tool_definitions()), Some(&state.db), user_id);
 
     // Clone tool names and definitions for validation before moving tool_defs into request
-    let tool_names: Vec<String> = tool_defs.iter().map(|t| t.function.name.clone()).collect();
-    let tools_for_validation = tool_defs.clone();
+    let mut tool_names: Vec<String> = tool_defs.iter().map(|t| t.function.name.clone()).collect();
+    let mut tools_for_validation = tool_defs.clone();
 
     let request = ChatRequest {
         messages,
-        tools: if tool_defs.is_empty() {
+        tools: if finalizing || tool_defs.is_empty() {
             None
         } else {
             Some(tool_defs)
         },
         temperature: Some(0.7),
-        max_tokens: Some(4096),
+        max_tokens: Some(state.llm.get().task_output_tokens()),
         model: ctx.settings.model.clone(),
         vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
         vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
+        thinking: crate::gateway::llm::provider::ThinkingMode::from_setting(&ctx.settings.thinking_mode),
     };
 
-    let response = state
-        .llm
-        .streaming_chat(request, ctx.settings.provider.as_deref(), user_id)
+    let provider = if ctx.settings.use_freerouter {
+        Some("free_router")
+    } else {
+        ctx.settings.provider.as_deref()
+    };
+
+    let mut response = state
+        .llm.get()
+        .streaming_chat(request, provider, user_id)
         .await?;
 
-    if let Some(tool_calls) = &response.tool_calls {
+    // Track cumulative usage across tool-call continuations.
+    let mut cumulative_prompt_tokens: u32 = 0;
+    let mut cumulative_completion_tokens: u32 = 0;
+    let mut cumulative_total_tokens: u32 = 0;
+    if let Some(ref usage) = response.usage {
+        cumulative_prompt_tokens = cumulative_prompt_tokens.saturating_add(usage.prompt_tokens);
+        cumulative_completion_tokens = cumulative_completion_tokens.saturating_add(usage.completion_tokens);
+        cumulative_total_tokens = cumulative_total_tokens.saturating_add(usage.total_tokens);
+    }
+
+    while let Some(tool_calls) = &response.tool_calls {
+        current_tool_ids.extend(tool_calls.iter().map(|call| call.id.clone()));
         // Persist the assistant message with tool_calls
         let db_tool_calls: Vec<crate::db::messages::ToolCallData> = tool_calls
             .iter()
@@ -157,8 +183,28 @@ pub async fn handle_message(
 
         let mut results = Vec::new();
         for tc in tool_calls {
+            if crate::gateway::task_control::cancellation(user_id).is_some_and(|token| token.is_cancelled()) {
+                let mut msg = crate::db::messages::Message::tool("Error: Task cancelled; tool not executed".into(), tc.id.clone());
+                msg.tool_name = Some(tc.function.name.clone());
+                state.db.add_message(user_id, &msg)?;
+                continue;
+            }
+            if tool_calls_used >= tool_limit {
+                let mut msg = crate::db::messages::Message::tool(
+                    "Error: Maximum tool-call limit reached; tool not executed".into(),
+                    tc.id.clone(),
+                );
+                msg.tool_name = Some(tc.function.name.clone());
+                state.db.add_message(user_id, &msg)?;
+                continue;
+            }
+            // Invalid calls also consume budget; otherwise malformed/unknown
+            // calls could keep a recovery loop running indefinitely.
+            tool_calls_used += 1;
             // Validate tool exists before executing
-            if !tool_names.contains(&tc.function.name) {
+            if !tool_names.contains(&tc.function.name)
+                || !crate::tools::discovery::enabled(&state.db, &state.plugins, &tc.function.name)
+            {
                 let result = format!("Error: Unknown tool '{}'. Check the tool name and try again.", tc.function.name);
                 tracing::warn!(user_id = %user_id, tool = %tc.function.name, "Unknown tool called");
                 
@@ -205,14 +251,15 @@ pub async fn handle_message(
                 }
             }
 
+            let stored_result = crate::gateway::tool_results::prepare_for_call(&state.db, user_id, tc, &final_result)?;
             let msg = if let Some(parts) = image_content_parts {
                 crate::db::messages::Message::tool_with_image(
-                    final_result.clone(),
+                    stored_result.clone(),
                     tc.id.clone(),
                     parts,
                 )
             } else {
-                crate::db::messages::Message::tool(final_result.clone(), tc.id.clone())
+                crate::db::messages::Message::tool(stored_result, tc.id.clone())
             };
             // Set tool_name for Ollama compatibility
             let mut msg = msg;
@@ -221,10 +268,24 @@ pub async fn handle_message(
             results.push((tc.id.clone(), final_result));
         }
 
+        if crate::gateway::task_control::cancellation(user_id).is_some_and(|token| token.is_cancelled()) {
+            return Err(crate::gateway::llm::error::ProviderError::new(
+                crate::gateway::llm::error::ErrorKind::Cancelled,
+            ).into());
+        }
+        if finalizing {
+            anyhow::bail!("Maximum tool-call limit reached ({tool_limit}); provider requested more tools instead of a final answer. Tool results are saved; the task was not silently completed.");
+        }
+
+        // Context tools must affect the very next LLM request, not be overwritten
+        // by the pre-tool snapshot at the end of this handler.
+        crate::gateway::compaction::before_request(state, user_id).await?;
+        ctx = crate::gateway::decision_routing::prepare(state, user_id, content, None, channel_id).await?;
         let mut followup_messages = Vec::new();
         followup_messages.push(ChatMessage {
-            role: "system".to_string(),
-            content: Some(build_system_prompt(state, &ctx).await),
+            reasoning_content: None,
+role: "system".to_string(),
+            content: Some(crate::gateway::prompt::render_system(state, &ctx, content).await?),
             content_parts: None,
             tool_calls: None,
             tool_call_id: None,
@@ -232,20 +293,20 @@ pub async fn handle_message(
         });
         let (history, _tokens) = state
             .db
-            .get_messages_with_token_budget(user_id, token_budget)?;
+            .get_messages_with_token_budget(user_id, ctx.settings.history_token_limit.unwrap_or(crate::db::messages::DEFAULT_HISTORY_TOKENS))?;
 
-        // Only include image data for the last 2 messages with content_parts
-        let mut image_msg_indices: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
-        let mut found = 0;
-        for (i, msg) in history.iter().enumerate().rev() {
-            if msg.content_parts.as_ref().map_or(false, |p| !p.is_empty()) {
-                image_msg_indices.insert(i);
-                found += 1;
-                if found >= 2 {
-                    break;
-                }
-            }
+        let image_msg_indices = crate::gateway::prompt::history_image_indices(
+            &history, &current_tool_ids, state.llm.get().history_image_messages(),
+        );
+        if history.iter().enumerate().any(|(i, m)|
+            m.content_parts.as_ref().is_some_and(|p| !p.is_empty()) && !image_msg_indices.contains(&i)
+        ) {
+            followup_messages.push(ChatMessage {
+    reasoning_content: None,
+                role: "system".into(),
+                content: Some(crate::gateway::prompt::OMITTED_HISTORY_IMAGES_NOTICE.into()),
+                content_parts: None, tool_calls: None, tool_call_id: None, tool_name: None,
+            });
         }
 
         for (msg_idx, msg) in history.iter().enumerate() {
@@ -261,6 +322,7 @@ pub async fn handle_message(
                     .collect()
             });
             followup_messages.push(ChatMessage {
+    reasoning_content: None,
                 role: msg.role.clone(),
                 content: if msg.content.is_empty() {
                     None
@@ -283,59 +345,78 @@ pub async fn handle_message(
             });
         }
 
+        // Keep tools available after use_skill/read_file/etc. Refresh definitions
+        // as well as context, so newly disabled tools cannot run next round.
+        let tool_defs = build_tool_definitions_for_user(&ctx.settings, Some(&state.plugins.tool_definitions()), Some(&state.db), user_id);
+        tool_names = tool_defs.iter().map(|t| t.function.name.clone()).collect();
+        tools_for_validation = tool_defs.clone();
+        finalizing = tool_calls_used >= tool_limit;
+        if finalizing {
+            followup_messages.push(ChatMessage {
+    reasoning_content: None,
+                role: "system".into(),
+                content: Some("The tool-call budget for this request is exhausted. No more tools may run. Give an honest final status using the saved tool results, explicitly stating any unfinished work. Do not claim unexecuted actions succeeded.".into()),
+                content_parts: None,
+                tool_calls: None,
+                tool_call_id: None,
+                tool_name: None,
+            });
+        }
         let followup_request = ChatRequest {
             messages: followup_messages,
-            tools: None,
+            tools: if finalizing || tool_defs.is_empty() { None } else { Some(tool_defs) },
             temperature: Some(0.7),
-            max_tokens: Some(4096),
+            max_tokens: Some(state.llm.get().task_output_tokens()),
             model: ctx.settings.model.clone(),
             vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
             vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
+            thinking: crate::gateway::llm::provider::ThinkingMode::from_setting(&ctx.settings.thinking_mode),
         };
 
-        let followup_response = state
-            .llm
+        response = state
+            .llm.get()
             .streaming_chat(followup_request, ctx.settings.provider.as_deref(), user_id)
             .await?;
-        let reply = followup_response.content.unwrap_or_default();
-        state.db.add_message(
-            user_id,
-            &crate::db::messages::Message::assistant(reply.clone()),
-        )?;
-
-        let mut updated_ctx = ctx;
-        state.db.increment_turn(&mut updated_ctx);
-        state.db.save_context(&updated_ctx)?;
-
-        if updated_ctx.settings.use_tts {
-            spawn_tts(
-                reply.clone(),
-                &updated_ctx.settings,
-                &state.secrets,
-                user_id,
-            );
+        if let Some(ref usage) = response.usage {
+            cumulative_prompt_tokens = cumulative_prompt_tokens.saturating_add(usage.prompt_tokens);
+            cumulative_completion_tokens = cumulative_completion_tokens.saturating_add(usage.completion_tokens);
+            cumulative_total_tokens = cumulative_total_tokens.saturating_add(usage.total_tokens);
         }
-
-        return Ok(reply);
     }
 
     let reply = response.content.unwrap_or_default();
 
-    state.db.add_message(
-        user_id,
-        &crate::db::messages::Message::assistant(reply.clone()),
-    )?;
+    let mut msg = crate::db::messages::Message::assistant(reply.clone());
+    if cumulative_total_tokens > 0 {
+        msg.prompt_tokens = Some(cumulative_prompt_tokens);
+        msg.completion_tokens = Some(cumulative_completion_tokens);
+        msg.total_tokens = Some(cumulative_total_tokens);
+    }
+    let message_id = state.db.add_message(user_id, &msg)?;
+    crate::dashboard::stream::assistant_saved(user_id, message_id, &reply);
+    // Emit usage event for TUI/dashboard token display.
+    if cumulative_total_tokens > 0 {
+        let usage_data = serde_json::json!({
+            "prompt_tokens": cumulative_prompt_tokens,
+            "completion_tokens": cumulative_completion_tokens,
+            "total_tokens": cumulative_total_tokens,
+        });
+        crate::dashboard::stream::send(user_id, "usage", &usage_data.to_string());
+    }
 
-    let mut updated_ctx = ctx;
+    let mut updated_ctx = state.db.load_context(user_id)?;
     state.db.increment_turn(&mut updated_ctx);
     state.db.save_context(&updated_ctx)?;
 
-    if updated_ctx.settings.use_tts {
+    if reply_tts_enabled(&updated_ctx.settings, channel_id) {
         spawn_tts(
             reply.clone(),
             &updated_ctx.settings,
             &state.secrets,
             user_id,
+            &state.db,
+            Some(message_id),
+            channel_id,
         );
     }
 
@@ -357,68 +438,109 @@ async fn handle_message_agent_loop(
     ctx: &crate::db::contexts::Context,
     max_turns: i32,
 ) -> anyhow::Result<String> {
-    let feedback_modes = &ctx.settings.feedback_mode;
-    let feedback_channel = ctx
-        .settings
-        .feedback_channel_id
-        .clone()
-        .or_else(|| channel_id.map(|s| s.to_string()));
     let user_id_owned = user_id.to_string();
     let secrets = state.secrets.clone();
-    let settings = ctx.settings.clone();
 
-    // Inject channel_id into custom_data so tools can use it
+    // Inject channel_id into custom_data so tools can use it.
+    // Always overwrite with the CURRENT channel so replies/tools follow the user
+    // (previously it was written once and never updated, so later messages from
+    // other channels kept the stale value and outputs landed in random channels).
+    // Voice input keeps the last real text channel for text tools and records the
+    // voice channel separately under voice_channel_id.
     let mut ctx = ctx.clone();
     if ctx.custom_data.is_null() {
         ctx.custom_data = serde_json::json!({});
     }
     if let Some(obj) = ctx.custom_data.as_object_mut() {
-        if !obj.contains_key("channel_id") {
-            let ch = channel_id
+        let is_voice = channel_id.map_or(false, |ch| ch.starts_with("voice:"));
+        let text_channel: Option<String> = if is_voice {
+            // STT/voice input: text tools should target the last text channel the
+            // user actually wrote in; fall back to a non-voice feedback channel.
+            obj.get("user_channel_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    ctx.settings
+                        .feedback_channel_id
+                        .clone()
+                        .filter(|s| !s.starts_with("voice:"))
+                })
+        } else {
+            channel_id
                 .filter(|s| !s.is_empty())
-                .or_else(|| ctx.settings.feedback_channel_id.as_deref())
-                .unwrap_or("");
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    ctx.settings
+                        .feedback_channel_id
+                        .clone()
+                        .filter(|s| !s.starts_with("voice:"))
+                })
+        };
+        if let Some(ch) = text_channel {
             if !ch.is_empty() {
+                obj.insert("user_channel_id".to_string(), serde_json::json!(ch));
                 obj.insert("channel_id".to_string(), serde_json::json!(ch));
             }
         }
+        if is_voice {
+            if let Some(ch) = channel_id {
+                obj.insert("voice_channel_id".to_string(), serde_json::json!(ch));
+            }
+        }
+        // STT language confidence for the transcript-check rule (see voice::last_stt_confidence)
+        if let Some(c) = crate::voice::last_stt_confidence() {
+            let threshold = ctx.settings.stt_low_confidence_threshold;
+            obj.insert("stt_confidence".to_string(), serde_json::json!(c));
+            if c < threshold {
+                obj.insert("stt_low_confidence".to_string(), serde_json::json!(true));
+            } else {
+                obj.remove("stt_low_confidence");
+            }
+        }
     }
-    let _ = state.db.save_context(&ctx);
+    state.db.save_context(&ctx)?;
 
     let config = crate::gateway::agent_loop::AgentLoopConfig {
         max_turns,
         max_tool_calls: ctx.settings.max_tool_calls.unwrap_or(5),
         tags_enabled: ctx.settings.tags_enabled,
-        cl_file: ctx.settings.cl_file.clone().or(ctx.cl_file.clone()),
-        feedback_enabled: !feedback_modes.is_empty(),
+        sm_file: ctx.settings.sm_file.clone().or(ctx.sm_file.clone()),
+        feedback_enabled: ctx.settings.feedback_enabled,
         message_on_toolcalling: ctx.settings.message_on_toolcalling,
         tool_history_limit: ctx.settings.tool_history_limit,
     };
 
     let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    let use_tts = ctx.settings.use_tts;
-    let is_voice_input = channel_id.map_or(false, |ch| ch.starts_with("voice:"));
-    let tts_for_feedback = use_tts || is_voice_input;
-
     // Spawn feedback routing task (always for web stream)
     let is_web = channel_id.map_or(true, |ch| ch == "web" || ch.is_empty());
-    let feedback_modes = feedback_modes.clone();
     let uid = user_id_owned.clone();
-    let ch = feedback_channel.clone();
-    let tts_settings = settings.clone();
-    let tts_secrets = secrets.clone();
+    let session_id = ctx.session_id.clone();
+    let feedback_key = format!("{uid}:::{session_id}");
+    let tts_secrets = secrets;
+    let tts_db = state.db.clone();
+    let tts_channel_id = channel_id.map(str::to_owned);
 
     tokio::spawn(async move {
         while let Some(msg) = feedback_rx.recv().await {
             if is_web {
                 crate::dashboard::stream::send(&uid, "feedback", &msg);
             }
+            // A context command/tool can disable speech during the agent loop.
+            let Ok(current_ctx) = tts_db.load_context(&uid) else { continue };
+            if current_ctx.session_id != session_id { continue; }
+            let tts_settings = &current_ctx.settings;
+            if !super::feedback::LIMITER.allow(&feedback_key, tts_settings, std::time::Instant::now()) { continue; }
+            let ch = tts_settings.feedback_channel_id.as_ref().or(tts_channel_id.as_ref());
+            let tts_for_feedback = tts_settings.use_tts
+                || tts_channel_id.as_deref().is_some_and(|ch| ch.starts_with("voice:"));
             let mut handled = false;
-            for mode in &feedback_modes {
+            for mode in &tts_settings.feedback_mode {
                 match mode.as_str() {
                     "tts" => {
-                        spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid);
+                        // Explicit feedback TTS may override Discord use_tts,
+                        // but spawn_tts never overrides the web OFF setting.
+                        spawn_tts(msg.clone(), tts_settings, &tts_secrets, &uid, &tts_db, None, tts_channel_id.as_deref());
                         handled = true;
                     }
                     "dm" => {
@@ -447,12 +569,12 @@ async fn handle_message_agent_loop(
                 }
             }
             if !handled && tts_for_feedback {
-                spawn_tts(msg.clone(), &tts_settings, &tts_secrets, &uid);
+                spawn_tts(msg.clone(), tts_settings, &tts_secrets, &uid, &tts_db, None, tts_channel_id.as_deref());
             }
         }
     });
 
-    let result = crate::gateway::agent_loop::run_agent_loop(
+    let result = crate::gateway::agent_loop::run_agent_loop_in_task(
         state,
         user_id,
         content,
@@ -467,117 +589,20 @@ async fn handle_message_agent_loop(
     state.db.increment_turn(&mut updated_ctx);
     state.db.save_context(&updated_ctx)?;
 
-    // Final response TTS: always speak if use_tts is on, or if input came from voice
-    let is_voice_input = channel_id.map_or(false, |ch| ch.starts_with("voice:"));
-    if updated_ctx.settings.use_tts || is_voice_input {
+    // Web speech has its own permission; Discord use_tts cannot enable it.
+    if reply_tts_enabled(&updated_ctx.settings, channel_id) {
         spawn_tts(
             reply.clone(),
             &updated_ctx.settings,
             &state.secrets,
             user_id,
+            &state.db,
+            result.response_message_id,
+            channel_id,
         );
     }
 
     Ok(reply)
-}
-
-async fn build_system_prompt(state: &GatewayState, ctx: &crate::db::contexts::Context) -> String {
-    let template_name = ctx.settings.system_template.as_deref().unwrap_or("system");
-    let template_path = format!("templates/{}.poml", template_name);
-
-    // Load skills for context
-    let mut skills_registry = crate::skills::SkillRegistry::new();
-    let _ = skills_registry.load_from_dir(std::path::Path::new("skills"));
-    let skills = skills_registry.to_context_array();
-
-    // Load memory
-    let memory = crate::db::memory::load_memory(&state.db, &ctx.user_id);
-
-    // Calculate uptime
-    let uptime_secs = state.start_time.elapsed().as_secs();
-    let uptime = format_uptime(uptime_secs);
-
-    // Get paired users
-    let paired_users = state.db.list_all_pairings().unwrap_or_default();
-    let paired_count = paired_users.len();
-    let paired_list: Vec<serde_json::Value> = paired_users
-        .iter()
-        .map(|p| {
-            serde_json::json!({
-                "user_id": p.user_id,
-                "discord_user_id": p.discord_user_id,
-                "paired_at": p.paired_at,
-            })
-        })
-        .collect();
-
-    let context = serde_json::json!({
-        "username": ctx.username.as_deref().unwrap_or("User"),
-        "mode": ctx.mode,
-        "turn": ctx.turn,
-        "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
-        "skills": skills,
-        "uptime": uptime,
-        "uptime_secs": uptime_secs,
-        "paired_users_count": paired_count,
-        "paired_users": paired_list,
-        "path": std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/".to_string()),
-        "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-        "memory": serde_json::json!({
-            "facts": memory.learned_facts,
-            "topics": memory.last_topics,
-            "preferences": memory.user_preferences,
-            "variables": memory.custom_variables,
-        }),
-        "custom_data": if ctx.custom_data.is_null() {
-            serde_json::json!({})
-        } else {
-            ctx.custom_data.clone()
-        },
-        "used_tools_history_size": ctx.settings.tool_history_limit,
-        "cl_data": if ctx.cl_data.is_null() {
-            serde_json::json!({})
-        } else {
-            ctx.cl_data.clone()
-        },
-    });
-
-    match crate::gateway::poml::render(&template_path, &context).await {
-        Ok(rendered) => {
-            tracing::debug!(target: "message_handler", "Rendered system prompt (first 2000 chars): {}", crate::util::truncate_chars(&rendered, 2000));
-            rendered
-        },
-        Err(e) => {
-            tracing::warn!("Failed to render POML template: {}, using fallback", e);
-            format!(
-                "You are Praxis, an AI agent assistant. Current mode: {}. User: {}. Turn: {}. Uptime: {}. Paired users: {}.",
-                ctx.mode,
-                ctx.username.as_deref().unwrap_or("unknown"),
-                ctx.turn,
-                uptime,
-                paired_count,
-            )
-        }
-    }
-}
-
-fn format_uptime(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else if secs < 86400 {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-    } else {
-        format!(
-            "{}d {}h {}m",
-            secs / 86400,
-            (secs % 86400) / 3600,
-            (secs % 3600) / 60
-        )
-    }
 }
 
 async fn execute_tool_call(
@@ -586,44 +611,49 @@ async fn execute_tool_call(
     tc: &crate::gateway::llm::provider::ToolCall,
     plugins: &crate::plugins::PluginRegistry,
 ) -> String {
-    tracing::info!(tool = %tc.function.name, args = %tc.function.arguments, "execute_tool_call: dispatching");
+    tracing::info!(tool = %tc.function.name, args_bytes = tc.function.arguments.len(), "execute_tool_call: dispatching");
 
     let args: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
         Ok(v) => v,
         Err(e) => return format!("Error parsing arguments: {}", e),
     };
 
+    let args = match crate::tools::tool_output::execution_args(&args) {
+        Ok(args) => args,
+        Err(error) => return format!("Error: {error}; tool not executed"),
+    };
     let ctx_data = db
         .load_context(user_id)
         .ok()
         .map(|ctx| ctx.custom_data)
         .filter(|v| !v.is_null());
 
-    let plugin_secret_keys = plugins.collect_secrets();
     let all_secrets = crate::db::secrets::get_secrets();
-    let plugin_secrets: std::collections::HashMap<String, String> = plugin_secret_keys
-        .iter()
-        .filter_map(|k| all_secrets.custom.get(k).map(|v| (k.clone(), v.clone())))
-        .collect();
+    let plugin_secrets = plugins.secrets_for_tool(&tc.function.name, &all_secrets);
 
     match tc.function.name.as_str() {
+        "read_tool_result" => crate::tools::tool_output::run(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "search_tools" => crate::tools::discovery::search(db, plugins, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_profile_create" => crate::tools::memory::profile_create(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_profile_load" => crate::tools::memory::profile_load(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_profile_list" => crate::tools::memory::profile_list(db, user_id)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_get" => crate::tools::memory::get(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_set" => crate::tools::memory::set(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "search_skills" => crate::tools::search_skills::run(db, &args).await
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "use_skill" => crate::tools::use_skill::run(db, &args).await
+            .unwrap_or_else(|e| format!("Error: {}", e)),
         "execute_terminal" => {
             let command = args["command"].as_str().unwrap_or("");
             match crate::tools::execute_terminal::execute_terminal(command, None).await {
-                Ok(result) => {
-                    if result.exit_code == 0 {
-                        if result.stdout.is_empty() {
-                            "Command executed successfully (no output)".to_string()
-                        } else {
-                            result.stdout
-                        }
-                    } else {
-                        format!(
-                            "Exit code: {}\nStdout: {}\nStderr: {}",
-                            result.exit_code, result.stdout, result.stderr
-                        )
-                    }
-                }
+                Ok(result) => result.render(),
                 Err(e) => format!("Error: {}", e),
             }
         }
@@ -652,20 +682,7 @@ async fn execute_tool_call(
         }
         "read_file" => {
             let path = args["path"].as_str().unwrap_or("");
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    if content.len() > 10000 {
-                        format!(
-                            "{}...\n\n[File truncated - {} bytes total]",
-                            crate::util::truncate_chars(&content, 10000),
-                            content.len()
-                        )
-                    } else {
-                        content
-                    }
-                }
-                Err(e) => format!("Error reading file: {}", e),
-            }
+            crate::tools::read_file::run(path).await.unwrap_or_else(|e| format!("Error reading file: {e}"))
         }
         "get_context" => match db.load_context(user_id) {
             Ok(ctx) => serde_json::to_string_pretty(&ctx)
@@ -678,14 +695,14 @@ async fn execute_tool_call(
                 .get("value")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            match db.merge_context(user_id, serde_json::json!({key: value})) {
+            match db.merge_context_from_agent(user_id, serde_json::json!({key: value})) {
                 Ok(_) => format!("Context key '{}' set", key),
                 Err(e) => format!("Error: {}", e),
             }
         }
         "delete_context" => {
             let key = args["key"].as_str().unwrap_or("");
-            match db.merge_context(user_id, serde_json::json!({key: null})) {
+            match db.merge_context_from_agent(user_id, serde_json::json!({key: null})) {
                 Ok(_) => format!("Context key '{}' deleted", key),
                 Err(e) => format!("Error: {}", e),
             }
@@ -826,25 +843,24 @@ async fn execute_tool_call(
         }
         "learn_fact" => {
             let fact = args["fact"].as_str().unwrap_or("");
-            match db.add_memory(user_id, fact, Some("fact")) {
+            match crate::db::memory_profiles::learn_fact(db, user_id, fact) {
                 Ok(_) => format!("Learned: {}", fact),
                 Err(e) => format!("Error: {}", e),
             }
         }
         "learn_preference" => {
             let key = args["key"].as_str().unwrap_or("");
-            let value = args["value"].as_str().unwrap_or("");
-            match db.merge_context(
-                user_id,
-                serde_json::json!({"custom_data": {format!("pref_{}", key): value}}),
-            ) {
+            let value = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
+            match crate::db::memory_profiles::update_memory(db, user_id, |memory| {
+                crate::db::memory::update_preference(memory, key, &value);
+            }) {
                 Ok(_) => format!("Preference '{}' = '{}'", key, value),
                 Err(e) => format!("Error: {}", e),
             }
         }
         "learn_topic" => {
             let topic = args["topic"].as_str().unwrap_or("");
-            match db.add_memory(user_id, topic, Some("topic")) {
+            match crate::db::memory_profiles::learn_topic(db, user_id, topic) {
                 Ok(_) => format!("Topic tracked: {}", topic),
                 Err(e) => format!("Error: {}", e),
             }
@@ -987,42 +1003,8 @@ async fn execute_tool_call(
                 }
             }
         }
-        "update_template" => {
-            let name = args["name"].as_str().unwrap_or("");
-            let content = args["content"].as_str().unwrap_or("");
-            if name.is_empty() || content.is_empty() {
-                return "Error: name and content are required.".to_string();
-            }
-            let file_path = format!("templates/{}.poml", name);
-            if let Some(parent) = std::path::Path::new(&file_path).parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let ctx = db.load_context(user_id).unwrap_or_default();
-            let test_context = serde_json::json!({
-                "user_id": user_id,
-                "mode": ctx.mode,
-                "turn": 0,
-                "user_message": "Validation test",
-                "user_prompt": "Validation test",
-                "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            });
-            if let Err(e) = std::fs::write(&file_path, content) {
-                return format!("Error writing template file: {}", e);
-            }
-            match crate::gateway::poml::render(&file_path, &test_context).await {
-                Ok(rendered) if !rendered.trim().is_empty() => {
-                    let _ = db.save_template(name, content, None, false);
-                    let preview = crate::util::truncate_chars_ascii(&rendered, 500);
-                    format!("Template '{}' updated and validated. POML renders successfully. Preview: {}", name, preview)
-                }
-                Ok(_) => {
-                    format!("Template '{}' saved but POML render returned empty output.", name)
-                }
-                Err(e) => {
-                    format!("POML validation failed: {}. Template saved but may not render correctly.", e)
-                }
-            }
-        }
+        "update_template" => crate::tools::update_template::run(db, &args).await
+            .unwrap_or_else(|e| format!("Error: {}", e)),
         _ => match plugins
             .execute_tool(
                 &tc.function.name,
@@ -1033,8 +1015,16 @@ async fn execute_tool_call(
             .await
         {
             Ok(result) => result,
-            Err(e) => format!("Unknown tool: {} ({})", tc.function.name, e),
+            Err(e) => format!("Plugin tool {} failed: {}", tc.function.name, e),
         },
+    }
+}
+
+fn reply_tts_enabled(settings: &crate::db::contexts::ContextSettings, channel_id: Option<&str>) -> bool {
+    if channel_id == Some("web") {
+        settings.web_chat_tts
+    } else {
+        settings.use_tts || channel_id.is_some_and(|ch| ch.starts_with("voice:"))
     }
 }
 
@@ -1043,8 +1033,35 @@ fn spawn_tts(
     settings: &crate::db::contexts::ContextSettings,
     secrets: &crate::db::secrets::Secrets,
     user_id: &str,
+    db: &crate::db::Database,
+    message_id: Option<i64>,
+    channel_id: Option<&str>,
 ) {
+    // Tool-only turns, empty tag output and whitespace are not speech. Return
+    // before spawning a task or constructing/contacting any TTS provider.
+    if text.trim().is_empty() {
+        return;
+    }
+    let is_web = channel_id == Some("web");
+    // Also guard explicit feedback and stale settings snapshots before making
+    // a provider call. A failed context lookup must not enable web synthesis.
+    if is_web && !db.load_context(user_id).is_ok_and(|ctx| ctx.settings.web_chat_tts) {
+        return;
+    }
     let tts_type = settings.voice_tts_type.clone();
+    // Use the caller's settings snapshot (including workflow overrides), with
+    // compatibility for earlier custom_data configurations and environment defaults.
+    // Never reinterpret other providers' voice IDs/local clone paths.
+    let comfyui_config = (tts_type == "comfyui_xtts").then(|| {
+        db.load_context(user_id).and_then(|ctx| {
+            crate::comfyui::config::ComfyUiConfig::from_settings(settings, Some(&ctx.custom_data))
+        })
+    });
+    let comfyui_qwen3_config = (tts_type == "comfyui_qwen3").then(|| {
+        db.load_context(user_id).and_then(|ctx| {
+            crate::comfyui::qwen3::Qwen3TtsConfig::from_settings(settings, Some(&ctx.custom_data))
+        })
+    });
     let rvc_on = settings.rvc_on;
     let rvc_server = settings.rvc_server.clone();
     let rvc_model_path = settings.rvc_model_path.clone();
@@ -1078,10 +1095,15 @@ fn spawn_tts(
     let qwen_voice_clone_prompt = settings.qwen_voice_clone_prompt.clone();
     let audio_output_path = settings.voice_audio_output_path.clone();
     let user_id = user_id.to_string();
+    let tts_db = db.clone();
 
     tracing::trace!(user_id = %user_id, tts_type = %tts_type, "TTS: Spawning task");
 
     tokio::task::spawn(async move {
+        // The task may not have been scheduled until after an OFF edit.
+        if is_web && !tts_db.load_context(&user_id).is_ok_and(|ctx| ctx.settings.web_chat_tts) {
+            return;
+        }
         let audio_bytes = match tts_type.as_str() {
             "windows_sapi" => {
                 let tts_engine = tts::windows_sapi::WindowsSAPI::new();
@@ -1149,6 +1171,44 @@ fn spawn_tts(
                     }
                 }
             }
+            "comfyui_xtts" => {
+                let config = match comfyui_config {
+                    Some(Ok(config)) => config,
+                    Some(Err(error)) => {
+                        tracing::warn!("TTS FAILED: comfyui_xtts configuration: {error}");
+                        return;
+                    }
+                    None => return,
+                };
+                // Reply synthesis intentionally outlives its generating task,
+                // just like the existing TTS backends. TaskGuard drop on normal
+                // completion must not cancel the final spoken reply.
+                match crate::voice::comfyui_xtts::speak(&config, &text, None).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        tracing::warn!("TTS FAILED: comfyui_xtts: {error:#}");
+                        return;
+                    }
+                }
+            }
+            "comfyui_qwen3" => {
+                let config = match comfyui_qwen3_config {
+                    Some(Ok(config)) => config,
+                    Some(Err(error)) => {
+                        tracing::warn!("TTS FAILED: comfyui_qwen3 configuration: {error}");
+                        return;
+                    }
+                    None => return,
+                };
+                // One combined WAV; reuse delivery below, with no provider fallback.
+                match crate::voice::comfyui_qwen3::speak(&config, &text, None).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        tracing::warn!("TTS FAILED: comfyui_qwen3: {error:#}");
+                        return;
+                    }
+                }
+            }
             "qwen_tts" => {
                 let server_url = qwen_tts_server.unwrap_or_default();
                 if server_url.is_empty() {
@@ -1195,6 +1255,14 @@ fn spawn_tts(
 
         tracing::trace!(user_id = %user_id, "TTS: Audio received ({} bytes)", audio_bytes.len());
 
+        // Cost ledger: record ElevenLabs character usage per user.
+        if tts_type == "elevenlabs" {
+            let chars = text.chars().count();
+            if let Err(e) = crate::db::memory::record_media_spend(&tts_db, &user_id, chars) {
+                tracing::warn!("media_spend record failed: {}", e);
+            }
+        }
+
         if let Some(ref path) = audio_output_path {
             let folder = tts::ensure_audio_folder(path, "generated_tts");
             let _ = tts::save_audio_file(
@@ -1233,9 +1301,88 @@ fn spawn_tts(
             let _ = tts::save_audio_file(&final_audio, folder.to_str().unwrap_or(path), "03_final");
         }
 
-        crate::event_channel::broadcast_voice_tts(&user_id, final_audio);
+        if final_audio.is_empty() {
+            tracing::warn!(user_id = %user_id, "TTS returned empty audio");
+            return;
+        }
+
+        // Persist first: SSE is only a notification, not the sole copy of the
+        // audio. History/reconnect can recover it even with zero subscribers.
+        let mime = tts_audio_mime(&final_audio);
+        let stored = match message_id {
+            Some(id) => match tts_db.save_message_audio(&user_id, id, mime, &final_audio) {
+                Ok(saved) => saved,
+                Err(e) => {
+                    tracing::warn!(user_id = %user_id, "Saving reply audio failed: {e}");
+                    false
+                }
+            },
+            None => false, // Transient feedback has no persisted reply row.
+        };
+        // Never resurrect a deleted reply (or a changed storage session) as an
+        // anonymous audio clip. Inline fallback is only for transient feedback.
+        // Synthesis can finish after the user disables web TTS. Keep the paid-
+        // for bytes available for manual replay, but do not announce/autoplay.
+        let web_chat_tts = tts_db.load_context(&user_id)
+            .is_ok_and(|ctx| ctx.settings.web_chat_tts);
+        if web_chat_tts && (stored || message_id.is_none())
+            && crate::dashboard::stream::has_subscriber(&user_id)
+        {
+            let payload = if stored {
+                serde_json::json!({ "message_id": message_id, "mime": mime })
+            } else {
+                use base64::Engine;
+                serde_json::json!({
+                    "audio": format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&final_audio)),
+                    "mime": mime,
+                })
+            };
+            crate::dashboard::stream::send(&user_id, "chat_tts", &payload.to_string());
+        } else if stored {
+            tracing::info!(user_id = %user_id, message_id, "Reply audio saved for dashboard replay");
+        }
+
+        if !is_web || web_chat_tts {
+            crate::event_channel::broadcast_voice_tts(&user_id, final_audio);
+        }
     });
 }
+
+fn tts_audio_mime(audio: &[u8]) -> &'static str {
+    if audio.starts_with(b"RIFF") && audio.get(8..12) == Some(b"WAVE") {
+        "audio/wav"
+    } else if audio.starts_with(b"OggS") {
+        "audio/ogg"
+    } else if audio.starts_with(b"fLaC") {
+        "audio/flac"
+    } else {
+        "audio/mpeg"
+    }
+}
+
+#[cfg(test)]
+#[path = "skill_dispatch_tests.rs"]
+mod skill_dispatch_tests;
+
+#[cfg(test)]
+#[path = "backend_dispatch_tests.rs"]
+mod backend_dispatch_tests;
+
+#[cfg(test)]
+#[path = "message_tool_loop_tests.rs"]
+mod message_tool_loop_tests;
+
+#[cfg(test)]
+#[path = "local_model_live_tests.rs"]
+mod local_model_live_tests;
+
+#[cfg(test)]
+#[path = "message_audio_tests.rs"]
+mod message_audio_tests;
+
+#[cfg(test)]
+#[path = "comfyui_tts_tests.rs"]
+mod comfyui_tts_tests;
 
 #[cfg(test)]
 mod gateway_tests {

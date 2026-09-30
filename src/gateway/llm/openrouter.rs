@@ -14,7 +14,7 @@ impl OpenRouterProvider {
             api_key,
             model,
             base_url,
-            client: reqwest::Client::new(),
+            client: super::http::client(),
         }
     }
 }
@@ -79,13 +79,24 @@ impl LLMProvider for OpenRouterProvider {
             messages.push(msg);
         }
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
             "tools": request.tools,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
         });
+        // Extended reasoning: OpenRouter normalizes `reasoning.exclude` (hide
+        // the trace) and `reasoning.enabled` for capable models.
+        match request.thinking {
+            Some(t) if t.level().is_none() => {
+                body["reasoning"] = serde_json::json!({ "exclude": true, "enabled": false });
+            }
+            Some(t) => {
+                body["reasoning"] = serde_json::json!({ "enabled": true, "effort": t.level() });
+            }
+            None => {}
+        }
 
         let resp = self
             .client
@@ -95,15 +106,9 @@ impl LLMProvider for OpenRouterProvider {
             .header("X-Title", "Praxis")
             .json(&body)
             .send()
-            .await?;
+            .await.map_err(super::error::ProviderError::from_reqwest)?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("OpenRouter API error {}: {}", status, text);
-        }
-
-        let data: serde_json::Value = resp.json().await?;
+        let data = super::http::json(resp).await?;
         let choice = &data["choices"][0];
         let message = &choice["message"];
 
@@ -128,14 +133,11 @@ impl LLMProvider for OpenRouterProvider {
         });
 
         Ok(ChatResponse {
+            reasoning_content: None,
             content,
             tool_calls,
             finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),
-            usage: data["usage"].as_object().map(|u| super::provider::Usage {
-                prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
-                total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-            }),
+            usage: Usage::openai(&data["usage"]),
         })
     }
 

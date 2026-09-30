@@ -17,7 +17,7 @@ impl MiniMaxProvider {
             model,
             base_url,
             api_mode,
-            client: reqwest::Client::new(),
+            client: super::http::client(),
         }
     }
 }
@@ -117,15 +117,9 @@ impl MiniMaxProvider {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
             .send()
-            .await?;
+            .await.map_err(super::error::ProviderError::from_reqwest)?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("MiniMax API error {}: {}", status, text);
-        }
-
-        let data: serde_json::Value = resp.json().await?;
+        let data = super::http::json(resp).await?;
         let choice = &data["choices"][0];
         let message = &choice["message"];
 
@@ -133,14 +127,11 @@ impl MiniMaxProvider {
         let tool_calls = parse_openai_tool_calls(message);
 
         Ok(ChatResponse {
+            reasoning_content: None,
             content,
             tool_calls,
             finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),
-            usage: data["usage"].as_object().map(|u| Usage {
-                prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
-                total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-            }),
+            usage: Usage::openai(&data["usage"]),
         })
     }
 
@@ -151,7 +142,7 @@ impl MiniMaxProvider {
             super::anthropic::build_anthropic_messages(&request.messages);
 
         let mut body = serde_json::json!({
-            "model": self.model,
+            "model": request.model.as_deref().unwrap_or(&self.model),
             "messages": messages,
             "max_tokens": request.max_tokens.unwrap_or(4096),
         });
@@ -171,15 +162,9 @@ impl MiniMaxProvider {
             .header("anthropic-version", "2023-06-01")
             .json(&body)
             .send()
-            .await?;
+            .await.map_err(super::error::ProviderError::from_reqwest)?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("MiniMax Anthropic API error {}: {}", status, text);
-        }
-
-        let data: serde_json::Value = resp.json().await?;
+        let data = super::http::json(resp).await?;
         super::anthropic::parse_anthropic_response(&data)
     }
 }

@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "praxis")]
@@ -28,10 +28,32 @@ enum Cli {
         #[arg(long)]
         interactive: bool,
     },
+    /// Restore missing bundled assets without reading/changing configuration or databases
+    RepairAssets {
+        /// Installation working directory (the directory used by praxis run)
+        #[arg(long, default_value = ".")]
+        directory: std::path::PathBuf,
+        /// Also update bundled dashboard files, backing up changed files first
+        #[arg(long)]
+        update_dashboard: bool,
+        /// Overwrite ALL existing bundled assets (not just dashboard), use with caution
+        #[arg(long)]
+        overwrite: bool,
+    },
     /// Manage the Praxis system service
     Service {
         #[command(subcommand)]
         action: ServiceAction,
+    },
+    /// Manage the offline skill metadata index (no secrets, providers or services)
+    Skill {
+        #[arg(long, default_value = ".", global = true)]
+        directory: std::path::PathBuf,
+        /// Index storage directory (default: DIRECTORY/data); match DATA_DIR for runtime
+        #[arg(long, global = true)]
+        data_dir: Option<std::path::PathBuf>,
+        #[command(subcommand)]
+        action: SkillAction,
     },
     /// Manage plugins
     Plugin {
@@ -66,7 +88,14 @@ enum Cli {
     /// Open the terminal chat UI. Connects to a running `praxis run` instance
     /// to send messages, but reads history directly from the local database
     /// so previous conversations are visible immediately on launch.
-    Chat,
+    Chat {
+        /// Connect to a remote Praxis gateway (e.g. http://host:3537)
+        #[arg(long)]
+        gateway_url: Option<String>,
+        /// Gateway API key (or set PRAXIS_GATEWAY_KEY to avoid shell history)
+        #[arg(long)]
+        gateway_key: Option<String>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -85,6 +114,28 @@ enum ServiceAction {
         /// Number of lines to show
         #[arg(long, short = 'n', default_value = "100")]
         lines: usize,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum SkillAction {
+    /// Rebuild the metadata index, or refresh only one folder relative to skills/
+    Index {
+        #[arg(long)]
+        folder: Option<String>,
+    },
+    /// Search metadata as a human operator (includes hidden and user-only skills)
+    Search {
+        query: String,
+        #[arg(long, default_value = "5")]
+        limit: usize,
+    },
+    /// Browse a bounded page; pass the returned next_after to continue
+    List {
+        #[arg(long, default_value = "")]
+        after: String,
+        #[arg(long, default_value = "10")]
+        limit: usize,
     },
 }
 
@@ -239,8 +290,18 @@ enum DiskAction {
     },
 }
 
+fn initialize_tls_provider() {
+    // Dependencies enable both ring and aws-lc-rs, making Rustls autodetection
+    // ambiguous. Select the backend declared in Cargo.toml before creating any
+    // TLS clients or servers. Err only means a provider is already installed;
+    // leave that existing process-wide choice intact.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 #[tokio::main]
 async fn main() {
+    initialize_tls_provider();
+
     if let Err(e) = run().await {
         eprintln!("Error: {:#}", e);
         std::process::exit(1);
@@ -258,12 +319,59 @@ fn load_dotenv() {
             }
         }
     }
+    pin_install_root();
+}
+
+/// Praxis reads templates/, contexts/, plugins/ and skills/ relative to its
+/// installation root. Resolve that root once and make it the process working
+/// directory so `~/praxis/praxis` started from any cwd (or a service) uses
+/// `~/praxis/templates`, never the directory the shell happened to be in.
+/// Precedence: ROOT_DIR, then the cwd if it holds templates/, then the
+/// executable's directory if it does, otherwise the cwd unchanged.
+fn pin_install_root() {
+    let root = praxis::config::resolve_install_root(
+        std::env::var_os("ROOT_DIR").map(PathBuf::from),
+        std::env::current_dir().ok(),
+        std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)),
+    );
+    let Some(root) = root else { return };
+    if std::env::set_current_dir(&root).is_ok() {
+        std::env::set_var("ROOT_DIR", &root);
+    } else {
+        eprintln!("Warning: cannot use installation root {}", root.display());
+    }
 }
 
 async fn run() -> anyhow::Result<()> {
-    load_dotenv();
-
     let cli = Cli::parse();
+    // Offline repair must not load .env, unlock secrets, initialize a database
+    // or start services. It only touches the explicit public-asset allow-list.
+    if let Cli::RepairAssets { directory, update_dashboard, overwrite } = &cli {
+        let report = praxis::assets::install(directory, *update_dashboard, *overwrite)?;
+        println!("Assets in {}: {} created, {} preserved, {} updated.", directory.display(), report.created.len(), report.preserved.len(), report.updated.len());
+        if let Some(backup) = &report.backup_dir { println!("Previous files backed up to: {}", backup.display()); }
+        println!("Configuration, secrets, databases and service state were not changed.");
+        return Ok(());
+    }
+    if let Cli::Skill { directory, data_dir, action } = &cli {
+        let data = data_dir.clone().unwrap_or_else(|| directory.join("data"));
+        let mut index = praxis::skills::SkillIndex::open(&data, &directory.join("skills"))?;
+        let result = match action {
+            SkillAction::Index { folder: Some(folder) } => serde_json::to_value(index.refresh(folder)?)?,
+            SkillAction::Index { folder: None } => serde_json::to_value(index.rebuild()?)?,
+            SkillAction::Search { query, limit } => {
+                index.ensure_indexed()?;
+                serde_json::to_value(index.search(query, *limit, true)?)?
+            }
+            SkillAction::List { after, limit } => {
+                index.ensure_indexed()?;
+                serde_json::to_value(index.browse(after, *limit, true)?)?
+            }
+        };
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    load_dotenv();
 
     // Service and Plugin commands don't need logging setup
     if let Cli::Service { action } = &cli {
@@ -276,7 +384,7 @@ async fn run() -> anyhow::Result<()> {
     // The TUI takes over stdout (alternate screen) so we mustn't write
     // tracing logs there. Initialise logging with file-only output and
     // jump straight to the chat module.
-    if matches!(cli, Cli::Chat) {
+    if let Cli::Chat { gateway_url, gateway_key } = &cli {
         let log_dir = std::env::var("LOG_DIR").unwrap_or_else(|_| "./logs".to_string());
         let _ = std::fs::create_dir_all(&log_dir);
         let file_appender = tracing_appender::rolling::daily(&log_dir, "praxis-tui.log");
@@ -294,7 +402,7 @@ async fn run() -> anyhow::Result<()> {
             .try_init();
         // Keep the guard alive for the duration of the run so logs flush.
         let _keep = _guard;
-        return praxis::tui::run_chat().await;
+        return praxis::tui::run_chat(gateway_url.clone(), gateway_key.clone()).await;
     }
 
     // Set up logging with file rotation
@@ -339,9 +447,11 @@ async fn run() -> anyhow::Result<()> {
             no_isos,
         } => return handle_backup(output, no_disks, no_isos).await,
         Cli::Restore { file, yes } => return handle_restore(&file, yes).await,
-        Cli::Chat => unreachable!(),
+        Cli::Chat { .. } => unreachable!(),
+        Cli::RepairAssets { .. } => unreachable!(),
         Cli::Service { .. } => unreachable!(),
         Cli::Plugin { .. } => unreachable!(),
+        Cli::Skill { .. } => unreachable!(),
     }
 }
 
@@ -350,14 +460,55 @@ async fn run_services(
     enable_discord: bool,
     enable_dashboard: bool,
 ) -> anyhow::Result<()> {
-    // Check if we need master key for encrypted secrets
+    // Master-Key-Zustellung. Reihenfolge = Expositionsrisiko aufsteigend:
+    //   1. MASTER_KEY_FILE (Container-Standard: Root-Entrypoint kopiert den
+    //      Key auf ein tmpfs-File 0400, Praxis liest+LÖSCHT es — der Key ist
+    //      nie in argv/env, und die Datei existiert nur im Millisekunden-
+    //      Fenster des Starts, bevor der Agent überhaupt Befehle ausführen
+    //      kann. `sh -c env` und /proc/<pid>/environ bleiben sauber.)
+    //   2. MASTER_KEY-Env (einfach, aber vom Agenten lesbar — nur für
+    //      Umgebungen ohne Agent-Shell-Zugang)
+    //   3. --password argv (nur interaktiv/legacy; sichtbar in /proc/cmdline)
+    // Nach dem Lesen werden die Env-Variablen entfernt, damit kind-Prozesse
+    // (Agent-Terminal) sie nicht erben.
+    let delivered_master_key = || -> Option<String> {
+        let path = std::env::var("MASTER_KEY_FILE").ok()?;
+        std::env::remove_var("MASTER_KEY_FILE");
+        let key = std::fs::read_to_string(&path).ok()?.trim().to_string();
+        if key.is_empty() {
+            return None;
+        }
+        // Einmal-Zustellung: Datei löschen. Bei ro-Mounts nur loggen —
+        // dann mindestens mode 0400 + tmpfs sicherstellen (Deployment).
+        if let Err(e) = std::fs::remove_file(&path) {
+            tracing::debug!(%e, "MASTER_KEY_FILE nicht löschbar (ro-Mount?) — Agent-Schutz auf VM/mode beruht");
+        }
+        Some(key)
+    };
+    let env_master_key = || -> Option<String> {
+        let key = std::env::var("MASTER_KEY").ok()?;
+        std::env::remove_var("MASTER_KEY");
+        Some(key)
+    };
+
     let master_password = if praxis::db::secrets::has_secrets() {
         let stored_hash = std::env::var("PRAXIS_MASTER_KEY_HASH").ok();
 
-        let password = if let Some(pass) = cli_password.or_else(|| std::env::var("MASTER_KEY").ok())
-        {
+        let password = if let Some(pass) = cli_password {
+            pass
+        } else if let Some(pass) = delivered_master_key().or_else(env_master_key) {
             pass
         } else {
+            // Container-/Daemon-Betrieb ohne TTY: klare, handlungsfähige
+            // Meldung statt eines Prompts, der im Container hängt bzw.
+            // kryptisch abstirbt („alles per Env“, VPS-Deploy).
+            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                anyhow::bail!(
+                    "Encrypted secrets (secrets.enc2) vorhanden, aber kein MASTER_KEY geliefert. \
+                     Für Container-Betrieb MASTER_KEY_FILE setzen (Compose: secrets + Root-Entrypoint) \
+                     und neu starten."
+                );
+            }
             rpassword::prompt_password("Enter MASTER_KEY to unlock secrets: ")
                 .map_err(|e| anyhow::anyhow!("Failed to read password: {}", e))?
         };
@@ -375,6 +526,17 @@ async fn run_services(
         }
 
         Some(password)
+    } else if let Some(password) = delivered_master_key().or_else(env_master_key) {
+        // Erststart ohne Store, aber mit geliefertem Master-Key: leeren
+        // verschlüsselten Store anlegen — headless, ohne Onboarding-Prompt.
+        // Die eigentlichen Secrets (Discord-Token, Provider-Keys) trägt man
+        // danach über das Dashboard (Settings) ein; sie landen verschlüsselt
+        // im Store und sind für die Agent-Shell nie lesbar.
+        praxis::db::secrets::save_secrets(&praxis::db::secrets::Secrets::default(), &password)?;
+        tracing::info!(
+            "Erststart: leerer verschlüsselter Secret-Store angelegt — Secrets über das Dashboard (Settings) befüllen"
+        );
+        Some(password)
     } else {
         None
     };
@@ -389,6 +551,9 @@ async fn run_services(
         tracing::warn!("Failed to init default tools: {}", e);
     }
 
+    // Ensure the delegations table exists before the first delegate_task call.
+    praxis::gateway::delegation::ensure_delegations_table(&db);
+
     // Sync templates from disk to database
     praxis::dashboard::routes::sync_templates_from_disk(&db);
 
@@ -400,6 +565,7 @@ async fn run_services(
             discord_bot_token: std::env::var("DISCORD_BOT_TOKEN").ok(),
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            openrouter_api_key: std::env::var("OPENROUTER_API_KEY").ok(),
             ollama_api_key: std::env::var("OLLAMA_API_KEY").ok(),
             llamacpp_api_key: std::env::var("LLAMACPP_API_KEY").ok(),
             minimax_api_key: std::env::var("MINIMAX_API_KEY").ok(),
@@ -415,7 +581,7 @@ async fn run_services(
     let plugins_dir = std::env::var("PLUGINS_DIR").unwrap_or_else(|_| "./plugins".to_string());
     let plugin_registry = praxis::plugins::load_all_plugins(std::path::Path::new(&plugins_dir));
     for key in plugin_registry.collect_secrets() {
-        if !secrets.custom.contains_key(&key) {
+        if !secrets.custom.contains_key(&key) && secrets.plugin_secret(&key).is_none() {
             tracing::info!(key = %key, "Creating placeholder secret for plugin");
             secrets.custom.insert(key, "CHANGE_ME".to_string());
         }
@@ -423,12 +589,23 @@ async fn run_services(
 
     // Initialize global secrets
     praxis::db::secrets::init_secrets(secrets.clone());
+    if let Some(password) = master_password.as_deref() {
+        praxis::db::secrets::retain_master_password(password);
+    }
+
+    // Do not leave a second, unprotected password allocation alive in this
+    // long-running function after optional retention has been decided.
+    if let Some(mut password) = master_password {
+        zeroize::Zeroize::zeroize(&mut password);
+    }
 
     // Build config, overriding sensitive fields from secrets if available
     let mut config = praxis::config::Config::from_env();
     config.apply_secrets(&secrets);
     config.ensure_generated();
     config.validate()?;
+    // Fail before starting VMs/Discord when the selected provider is missing.
+    praxis::gateway::llm::LLMRouter::new(&config, &secrets).validate_configuration()?;
 
     // Enable VM tools if VM=true in config
     if config.vm_enabled {
@@ -1215,6 +1392,7 @@ async fn handle_backup(
     }
 
     // Context language files
+    // Preserve obsolete installations in backups; new workflows use contexts/.
     if std::path::Path::new("contextlanguage").exists() {
         includes.push("contextlanguage".to_string());
     }
@@ -1383,6 +1561,46 @@ async fn handle_restore(file: &str, yes: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tls_provider_initialization_for_clients_and_servers() {
+        initialize_tls_provider();
+
+        // Construct TLS configurations only: no sockets, credentials or API calls.
+        let _client = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        let _server = rustls::ServerConfig::builder().with_no_client_auth();
+        reqwest::Client::builder()
+            .use_rustls_tls()
+            .build()
+            .expect("HTTPS client construction should not panic with Discord voice enabled");
+    }
+
+    #[test]
+    fn test_tls_provider_initialization_is_idempotent() {
+        initialize_tls_provider();
+        let original = rustls::crypto::CryptoProvider::get_default()
+            .expect("startup must select a TLS provider")
+            .clone();
+
+        initialize_tls_provider();
+        let current = rustls::crypto::CryptoProvider::get_default().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&original, current));
+    }
+
+    #[test]
+    fn test_cli_parsing_repair_assets() {
+        let cli = Cli::try_parse_from(["praxis", "repair-assets", "--directory", "/synthetic/install", "--update-dashboard"]).unwrap();
+        match cli {
+            Cli::RepairAssets { directory, update_dashboard, overwrite } => {
+                assert_eq!(directory, std::path::PathBuf::from("/synthetic/install"));
+                assert!(update_dashboard);
+            }
+            _ => panic!("Expected RepairAssets"),
+        }
+        assert!(matches!(Cli::try_parse_from(["praxis", "repair-assets"]).unwrap(), Cli::RepairAssets { update_dashboard: false, .. }));
+    }
 
     #[test]
     fn test_cli_parsing_run() {

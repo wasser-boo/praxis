@@ -30,6 +30,9 @@ pub struct ToolUpdate {
 
 #[derive(Deserialize)]
 pub struct MemoryUpdate {
+    pub profile: Option<String>,
+    pub reason: Option<String>,
+    pub user_preferences: Option<std::collections::HashMap<String, serde_json::Value>>,
     pub custom_variables: Option<std::collections::HashMap<String, serde_json::Value>>,
     pub learned_facts: Option<Vec<String>>,
     pub last_topics: Option<Vec<String>>,
@@ -38,6 +41,12 @@ pub struct MemoryUpdate {
 #[derive(Serialize)]
 pub struct MemoryInfo {
     pub user_id: String,
+    pub profile: String,
+    pub active_profile: String,
+    pub profile_exists: bool,
+    pub profiles: Vec<String>,
+    pub shared: HashMap<String, serde_json::Value>,
+    pub user_preferences: std::collections::HashMap<String, serde_json::Value>,
     pub custom_variables: std::collections::HashMap<String, serde_json::Value>,
     pub learned_facts: Vec<String>,
     pub last_topics: Vec<String>,
@@ -47,6 +56,7 @@ pub struct MemoryInfo {
 pub struct TemplateUpdate {
     pub content: String,
     pub user_id: Option<String>,
+    pub user_prompt: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -65,6 +75,8 @@ pub struct TemplateSaveResult {
 
 #[derive(Serialize)]
 pub struct SecretsInfo {
+    /// Write-only auth.json import; never expose token suffixes from JSON.
+    pub codex_auth: String,
     pub discord_bot_token: String,
     pub openai_api_key: String,
     pub anthropic_api_key: String,
@@ -81,6 +93,8 @@ pub struct SecretsInfo {
 
 #[derive(Deserialize)]
 pub struct SecretsUpdate {
+    /// CLI auth.json or normalized CodexAuth JSON. Empty removes, *** preserves.
+    pub codex_auth: Option<String>,
     pub discord_bot_token: Option<String>,
     pub openai_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
@@ -160,12 +174,22 @@ fn sync_templates_dir(db: &crate::db::Database, dir: &std::path::Path, prefix: &
 }
 
 pub fn routes(db: crate::db::Database) -> Router {
-    let secrets = crate::db::secrets::get_secrets();
+    let secrets_src = crate::db::secrets::get_secrets();
     let config = crate::config::Config::from_env();
+    // Transparenz: Der Store ÜBERSCHREIBT die Env-Werte (Feature: Passwort-
+    // Rotation ohne Redeploy) — aber ein versehentlich ins Secrets-Formular
+    // geschriebener Wert führt sonst zu einem Rätsel-Login (21.09. live
+    // passiert). Beim Start deutlich loggen:
+    if secrets_src.dashboard_admin_password.is_some() {
+        tracing::warn!("Dashboard-Passwort kommt aus dem Secret-Store (überschreibt DASHBOARD_ADMIN_PASSWORD aus der Env)");
+    }
+    if secrets_src.gateway_api_key.is_some() {
+        tracing::warn!("Gateway-API-Key kommt aus dem Secret-Store (überschreibt GATEWAY_API_KEY aus der Env)");
+    }
     let state = Arc::new(DashboardState {
         db,
-        gateway_api_key: secrets.gateway_api_key.unwrap_or(config.gateway_api_key),
-        admin_password: secrets
+        gateway_api_key: secrets_src.gateway_api_key.unwrap_or(config.gateway_api_key),
+        admin_password: secrets_src
             .dashboard_admin_password
             .unwrap_or(config.dashboard_admin_password),
     });
@@ -173,18 +197,28 @@ pub fn routes(db: crate::db::Database) -> Router {
     // Protected API routes with auth middleware
     let protected = Router::new()
         .route("/contexts", axum::routing::get(list_contexts))
+        .route("/chat-sessions", axum::routing::get(list_chat_sessions))
         .route("/contexts/:user_id", axum::routing::get(get_context))
         .route("/contexts/:user_id", axum::routing::put(update_context))
         .route("/contexts/:user_id", axum::routing::delete(delete_context))
         .route("/contexts/:user_id/fork", axum::routing::post(fork_context_route))
         .route("/messages/:user_id", axum::routing::get(get_messages))
         .route("/messages/:user_id", axum::routing::delete(clear_messages))
+        .route("/messages/:user_id/clear-chat", axum::routing::post(clear_chat_view))
+        .route("/messages/:user_id/compact", axum::routing::post(compact_messages))
+        .route("/skills", axum::routing::get(list_skills))
+        .route("/router-state", axum::routing::get(router_state))
+        .route("/delegations/:user_id", axum::routing::get(list_delegations_route))
+        .route("/decision-profiles", axum::routing::get(super::decision_profiles::list))
+        .route("/decision-profiles/:name", axum::routing::get(super::decision_profiles::get).put(super::decision_profiles::save))
+        .route("/decision-probe", axum::routing::post(super::decision_profiles::probe))
         .route("/templates", axum::routing::get(list_templates))
         .route("/templates", axum::routing::post(create_template))
         .route("/templates/:name", axum::routing::get(get_template))
         .route("/templates/:name", axum::routing::put(update_template))
         .route("/templates/:name", axum::routing::delete(delete_template))
         .route("/tools", axum::routing::get(list_tools))
+        .route("/tools/all", axum::routing::get(list_all_tools))
         .route("/tools/:name", axum::routing::put(update_tool))
         .route("/memory/:user_id", axum::routing::get(get_memory))
         .route("/memory/:user_id", axum::routing::put(update_memory))
@@ -223,23 +257,44 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/agent/begin", axum::routing::post(begin_agent))
         .route("/agent/status/:user_id", axum::routing::get(get_agent_status))
         .route("/agent/stop/:user_id", axum::routing::post(stop_agent))
-        .route("/cl/:user_id", axum::routing::get(get_cl_info))
+        .route("/sm/:user_id", axum::routing::get(get_sm_info))
+        .route("/cl/:user_id", axum::routing::get(get_sm_info)) // legacy route alias
         .route("/chat/send", axum::routing::post(chat_query))
+        .route("/chat/audio/:user_id/:message_id", axum::routing::get(get_chat_audio))
         .route("/context/exec", axum::routing::post(context_exec))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             dashboard_auth_middleware,
         ));
 
-    // Static file service
+    // Static file service. A small middleware adds Cache-Control: no-store to
+    // UI files (app.js/index) so browser caches (Brave is aggressive) never
+    // keep stale UI code after an update.
     let static_service = tower_http::services::ServeDir::new("static");
+
+    // Authenticated routes that the commit notes flagged as unprotected.
+    let protected_extra = Router::new()
+        .route("/stt", axum::routing::post(dashboard_stt))
+        .route("/profiles", axum::routing::get(list_profiles))
+        .route("/profiles", axum::routing::post(save_profile))
+        .route("/profiles/:name/apply/:user_id", axum::routing::post(apply_profile))
+        .route("/profiles/:name", axum::routing::delete(delete_profile))
+        .route("/media", axum::routing::get(list_media))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            dashboard_auth_middleware,
+        ));
 
     Router::new()
         .route("/", axum::routing::get(index))
         .route("/logo.svg", axum::routing::get(logo_svg))
+        .route_service("/logo.png", tower_http::services::ServeFile::new("static/logo.png"))
+        .route_service("/favicon.ico", tower_http::services::ServeFile::new("static/favicon.ico"))
+        .route_service("/apple-touch-icon.png", tower_http::services::ServeFile::new("static/apple-touch-icon.png"))
         .route("/api/status", axum::routing::get(status))
         .route("/api/auth/login", axum::routing::post(login_handler))
         .route("/api/chat/stream/:user_id", axum::routing::get(chat_stream_auth))
+        .route("/api/chat/stream/:user_id/tts", axum::routing::get(chat_stream_tts_only))
         .route("/api/vm/vnc/ws", axum::routing::get(vnc_ws_proxy))
         .route("/websockify", axum::routing::get(vnc_ws_proxy_noauth))
         .route("/vnc", axum::routing::get(vnc_viewer_page))
@@ -248,9 +303,25 @@ pub fn routes(db: crate::db::Database) -> Router {
         .route("/api/screenshots/*path", axum::routing::get(get_screenshot))
         .route("/api/upload-avatar", axum::routing::post(upload_avatar))
         .route("/api/upload-file", axum::routing::post(upload_chat_file))
+        .nest("/api", protected_extra)
         .nest_service("/static", static_service)
+        .layer(middleware::from_fn(static_no_cache_middleware))
         .nest("/api", protected)
         .with_state(state.clone())
+}
+
+/// Serve static UI files with Cache-Control: no-store so browser caches
+/// (Brave caches aggressively) never keep stale app.js/index after updates.
+async fn static_no_cache_middleware(
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let mut res = next.run(req).await;
+    res.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store, must-revalidate"),
+    );
+    res
 }
 
 async fn dashboard_auth_middleware(
@@ -316,8 +387,17 @@ async fn login_handler(
     Ok(Json(DashboardLoginResponse { token }))
 }
 
-async fn index() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../../static/index.html"))
+async fn index() -> axum::response::Response {
+    // The dashboard HTML embeds the app.js URL with a version query. Always
+    // serve it with no-store so browsers pick up UI updates immediately
+    // instead of keeping a stale cached page (Brave caches aggressively).
+    (
+        [
+            (axum::http::header::CACHE_CONTROL, "no-store, must-revalidate"),
+        ],
+        axum::response::Html(include_str!("../../static/index.html")),
+    )
+        .into_response()
 }
 
 async fn logo_svg() -> impl axum::response::IntoResponse {
@@ -337,7 +417,97 @@ async fn status(State(_state): State<Arc<DashboardState>>) -> Json<serde_json::V
     }))
 }
 
+/// GPU-Router-State als Proxy (Badge im Overview): Slot-States + Budget
+/// („heute X $"). Auth läuft über die Dashboard-Session — der Router-Token
+/// bleibt serverseitig in gpu_router (nie im Browser).
+async fn router_state() -> Json<serde_json::Value> {
+    match crate::gpu_router::state().await {
+        Some(s) => Json(serde_json::to_value(&s).unwrap_or_else(|_| serde_json::json!({"configured": false}))),
+        None => Json(serde_json::json!({"configured": false})),
+    }
+}
+
 // ── Contexts ─────────────────────────────────────────────────────────────────
+
+/// All chat sessions known to the server, independent of the browser's
+/// localStorage cache. The dashboard previously rendered only the sessions it
+/// happened to have cached, so chats created in another browser or on another
+/// device (and Discord-paired histories) stayed invisible until manually
+/// reconstructed. Context rows are authoritative; message stats and a preview
+/// are resolved from the messages table, where forked sessions store rows
+/// under `user_id:::session_id` while the session itself is `user_id`.
+async fn list_chat_sessions(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let conn = state.db.conn();
+    let mut stmt = conn
+        .prepare(
+            "SELECT user_id, updated_at FROM contexts ORDER BY updated_at DESC LIMIT 500",
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    drop(stmt);
+
+    let mut sessions = Vec::new();
+    for (user_id, updated_at) in rows {
+        let username: Option<String> = conn
+            .query_row(
+                "SELECT data FROM contexts WHERE user_id = ?1 LIMIT 1",
+                rusqlite::params![user_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|data| {
+                serde_json::from_str::<crate::db::contexts::Context>(&data).ok()
+            })
+            .and_then(|ctx| ctx.username.filter(|u| !u.trim().is_empty()));
+        // Messages live under the session key or its forked `:::` sub-keys.
+        let prefix = format!("{user_id}:::");
+        let message_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE user_id = ?1 OR substr(user_id, 1, length(?2)) = ?2",
+                rusqlite::params![user_id, prefix],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let preview: Option<String> = conn
+            .query_row(
+                "SELECT content FROM messages WHERE user_id = ?1 AND role = 'user' AND content <> '' ORDER BY id ASC LIMIT 1",
+                rusqlite::params![user_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .or_else(|| {
+                conn.query_row(
+                    "SELECT content FROM messages WHERE substr(user_id, 1, length(?1)) = ?1 AND role = 'user' AND content <> '' ORDER BY id ASC LIMIT 1",
+                    rusqlite::params![prefix],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            })
+            .map(|text| {
+                let flat: String = text.trim().chars().take(120).collect();
+                flat
+            });
+        let title: Option<String> = conn.query_row(
+            "SELECT json_extract(data, '$.custom_data.session_title') FROM contexts WHERE user_id=?1",
+            rusqlite::params![user_id], |row| row.get(0),
+        ).ok().flatten();
+        sessions.push(serde_json::json!({
+            "user_id": user_id,
+            "session_title": title,
+            "username": username,
+            "updated_at": updated_at,
+            "message_count": message_count,
+            "preview": preview,
+        }));
+    }
+    Ok(Json(serde_json::json!({ "sessions": sessions })))
+}
 
 async fn list_contexts(
     State(state): State<Arc<DashboardState>>,
@@ -352,15 +522,17 @@ async fn list_contexts(
             let user_id: String = row.get(0)?;
             let data: String = row.get(1)?;
             let updated_at: String = row.get(2)?;
+            let mut data: serde_json::Value = serde_json::from_str(&data).map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?;
+            crate::db::contexts::normalize_legacy_keys(&mut data);
             Ok(serde_json::json!({
                 "user_id": user_id,
-                "data": serde_json::from_str::<serde_json::Value>(&data).unwrap_or_default(),
+                "data": data,
                 "updated_at": updated_at,
             }))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_default();
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "contexts": contexts })))
 }
@@ -369,22 +541,8 @@ async fn get_context(
     State(state): State<Arc<DashboardState>>,
     Path(user_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let ctx = state
-        .db
-        .load_context(&user_id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(serde_json::json!({
-        "user_id": ctx.user_id,
-        "turn": ctx.turn,
-        "mode": ctx.mode,
-        "username": ctx.username,
-        "cl_file": ctx.cl_file,
-        "active_state": ctx.active_state,
-        "active_templates": ctx.active_templates,
-        "settings": ctx.settings,
-        "custom_data": ctx.custom_data,
-        "cl_data": ctx.cl_data,
-    })))
+    let ctx = state.db.load_context(&user_id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::to_value(ctx).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?))
 }
 
 async fn update_context(
@@ -392,22 +550,8 @@ async fn update_context(
     Path(user_id): Path<String>,
     Json(update): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let ctx = state
-        .db
-        .merge_context(&user_id, update)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(serde_json::json!({
-        "user_id": ctx.user_id,
-        "turn": ctx.turn,
-        "mode": ctx.mode,
-        "username": ctx.username,
-        "cl_file": ctx.cl_file,
-        "active_state": ctx.active_state,
-        "active_templates": ctx.active_templates,
-        "settings": ctx.settings,
-        "custom_data": ctx.custom_data,
-        "cl_data": ctx.cl_data,
-    })))
+    let ctx = state.db.merge_context(&user_id, update).map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(Json(serde_json::to_value(ctx).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?))
 }
 
 async fn delete_context(
@@ -487,22 +631,43 @@ async fn context_exec(
 async fn get_messages(
     State(state): State<Arc<DashboardState>>,
     Path(user_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let budget = 500000usize;
-    tracing::debug!(user_id = %user_id, "[MESSAGES] fetching messages");
-    match state.db.get_messages_with_token_budget(&user_id, budget) {
+    let chat_only = params.get("chat_only").map(|v| v == "1" || v == "true").unwrap_or(false);
+    tracing::debug!(user_id = %user_id, chat_only, "[MESSAGES] fetching messages");
+    let result = if chat_only {
+        // Chat view: hide rows up to the clear marker (kept in Messages tab).
+        let marker = state
+            .db
+            .load_context(&user_id)
+            .ok()
+            .and_then(|ctx| {
+                ctx.custom_data
+                    .get("chat_cleared_message_id")
+                    .and_then(|v| v.as_i64())
+            })
+            .unwrap_or(0);
+        state.db.get_chat_messages_after(&user_id, budget, marker)
+    } else {
+        state.db.get_chat_messages_with_token_budget(&user_id, budget)
+    };
+    match result {
         Ok((messages, total_tokens)) => {
             let msgs: Vec<serde_json::Value> = messages
                 .iter()
-                .enumerate()
-                .map(|(idx, m)| {
+                .map(|m| {
                     let mut val = serde_json::json!({
-                        "id": idx,
+                        "id": m.id,
+                        "audio_mime": m.audio_mime,
                         "role": m.role,
                         "content": m.content,
                         "tool_call_id": m.tool_call_id,
                         "tool_name": m.tool_name,
                     });
+                    if let Some(meta) = m.discord_meta.as_ref() {
+                        val["discord_meta"] = meta.clone();
+                    }
                     if let Some(ref tool_calls) = m.tool_calls {
                         val["tool_calls"] = serde_json::json!(tool_calls
                             .iter()
@@ -528,6 +693,20 @@ async fn get_messages(
     }
 }
 
+/// Authenticated, on-demand replay. Never embed credentials or audio blobs in history.
+async fn get_chat_audio(
+    State(state): State<Arc<DashboardState>>,
+    Path((user_id, message_id)): Path<(String, i64)>,
+) -> Result<axum::response::Response, StatusCode> {
+    let (mime, audio) = state.db.get_message_audio(&user_id, message_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(([
+        (axum::http::header::CONTENT_TYPE, mime),
+        (axum::http::header::CACHE_CONTROL, "private, no-store".to_string()),
+    ], audio).into_response())
+}
+
 async fn clear_messages(
     State(state): State<Arc<DashboardState>>,
     Path(user_id): Path<String>,
@@ -537,6 +716,91 @@ async fn clear_messages(
         Ok(()) => Ok(Json(serde_json::json!({ "success": true }))),
         Err(e) => {
             tracing::error!(user_id = %user_id, error = %e, "[MESSAGES] clear failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Chat-only clear: hides everything up to the newest message id from the
+/// CHAT view (custom_data.chat_cleared_message_id marker) without deleting
+/// any rows. The Messages tab keeps showing the full history; new messages
+/// (and new Discord mirrors) appear in the chat again after the marker.
+async fn clear_chat_view(
+    State(state): State<Arc<DashboardState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let max_id = state
+        .db
+        .max_message_id(&user_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = state.db.merge_context(
+        &user_id,
+        serde_json::json!({ "custom_data": { "chat_cleared_message_id": max_id } }),
+    );
+    tracing::info!(user_id = %user_id, marker = max_id, "[MESSAGES] chat view cleared (rows kept)");
+    Ok(Json(serde_json::json!({ "success": true, "cleared_before_id": max_id })))
+}
+
+/// Manual compaction (dashboard /compact): generate a summary, then replace
+/// the message history with the recent kept rows. Same logic as the
+/// WebSocket /compact command.
+async fn compact_messages(
+    State(state): State<Arc<DashboardState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let gw = crate::gateway::state_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    tracing::info!(user_id = %user_id, "[MESSAGES] compacting history");
+    match crate::gateway::ws_handler::compact_history(gw, &user_id).await {
+        Ok(summary) => Ok(Json(serde_json::json!({
+            "success": true,
+            "summary": summary,
+        }))),
+        Err(e) => {
+            tracing::error!(user_id = %user_id, error = %e, "[MESSAGES] compact failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// List registered skills (dashboard /skill with no argument).
+async fn list_skills(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let mut registry = crate::skills::SkillRegistry::new();
+    let dir = std::path::Path::new("skills");
+    if dir.exists() {
+        registry
+            .load_from_dir(dir)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    let skills: Vec<serde_json::Value> = registry
+        .list()
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "description": s.description,
+                "user_only": s.user_only,
+            })
+        })
+        .collect();
+    let active = state
+        .db
+        .load_context("default")
+        .ok()
+        .and_then(|c| c.settings.active_skill.clone());
+    Ok(Json(serde_json::json!({ "skills": skills, "active_skill": active })))
+}
+
+/// Delegation records for a user (dashboard /delegations).
+async fn list_delegations_route(
+    State(state): State<Arc<DashboardState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match crate::gateway::delegation::list_delegations(&state.db, &user_id) {
+        Ok(list) => Ok(Json(serde_json::json!({ "delegations": list }))),
+        Err(e) => {
+            tracing::error!(user_id = %user_id, error = %e, "[DELEGATIONS] list failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -590,124 +854,24 @@ async fn update_template(
     Path(name): Path<String>,
     Json(update): Json<TemplateUpdate>,
 ) -> Result<Json<TemplateSaveResult>, StatusCode> {
-    // Write template to file so POML can render it
-    let file_path = format!("templates/{}.poml", name);
-    if let Some(parent) = std::path::Path::new(&file_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::write(&file_path, &update.content) {
-        return Ok(Json(TemplateSaveResult {
-            success: false,
-            error: Some(format!("Failed to write template file: {}", e)),
-            rendered_preview: None,
-        }));
-    }
-
-    // Save to DB
-    let _ = state.db.save_template(&name, &update.content, None, false);
-
-    // Load user context for preview
-    let (user_id, ctx) = if let Some(uid) = update.user_id.filter(|s| !s.is_empty()) {
-        let ctx = state.db.load_context(&uid).unwrap_or_default();
-        (uid, ctx)
-    } else {
-        (String::new(), crate::db::contexts::Context::default())
-    };
-
-    let mut skills_registry = crate::skills::SkillRegistry::new();
-    let _ = skills_registry.load_from_dir(std::path::Path::new("skills"));
-    let memory = crate::db::memory::load_memory(&state.db, &user_id);
-
-    let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
-    let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
-    let (messages, tokens_used) = state
-        .db
-        .get_messages_with_token_budget(&user_id, usize::MAX)
-        .unwrap_or((vec![], 0));
-    let message_count = messages.len();
-    let tokens_pct = if token_budget > 0 {
-        (tokens_used as f64 / token_budget as f64 * 100.0).min(100.0)
-    } else {
-        0.0
-    };
-    let compaction_pct = if compaction_limit > 0 {
-        (tokens_used as f64 / compaction_limit as f64 * 100.0).min(100.0)
-    } else {
-        0.0
-    };
-
-    let effective_path = if ctx.settings.path.is_empty() {
-        std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/".to_string())
-    } else {
-        ctx.settings.path.clone()
-    };
-
-    let context = serde_json::json!({
-        "user_id": ctx.user_id,
-        "username": ctx.username.as_deref().unwrap_or("User"),
-        "mode": ctx.mode,
-        "turn": ctx.turn,
-        "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
-        "skills": skills_registry.to_context_array(),
-        "uptime": "0m",
-        "uptime_secs": 0,
-        "paired_users_count": 0,
-        "paired_users": [],
-        "path": effective_path,
-        "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-        "memory": serde_json::json!({
-            "facts": memory.learned_facts,
-            "topics": memory.last_topics,
-            "preferences": memory.user_preferences,
-            "variables": memory.custom_variables,
-        }),
-        "custom_data": if ctx.custom_data.is_null() {
-            serde_json::json!({})
-        } else {
-            ctx.custom_data.clone()
-        },
-        "used_tools_history_size": ctx.settings.tool_history_limit,
-        "cl_data": if ctx.cl_data.is_null() {
-            serde_json::json!({})
-        } else {
-            ctx.cl_data.clone()
-        },
-        "user_message": if user_id.is_empty() {
-            "Preview message".to_string()
-        } else {
-            state.db.get_messages(&user_id, 1).ok()
-                .and_then(|msgs| msgs.first().map(|m| m.content.clone()))
-                .unwrap_or_else(|| "Preview message".to_string())
-        },
-        "user_prompt": if user_id.is_empty() {
-            "Preview message".to_string()
-        } else {
-            state.db.get_messages(&user_id, 1).ok()
-                .and_then(|msgs| msgs.first().map(|m| m.content.clone()))
-                .unwrap_or_else(|| "Preview message".to_string())
-        },
-        "user_template": ctx.custom_data.get("user_template").cloned().unwrap_or(serde_json::json!("user")),
-        "conversation_text": "user: Preview message",
-        "tokens_used": tokens_used,
-        "tokens_limit": token_budget,
-        "tokens_percentage": format!("{:.1}", tokens_pct),
-        "compaction_token_limit": compaction_limit,
-        "compaction_percentage": format!("{:.1}", compaction_pct),
-        "message_count": message_count,
-    });
-
-    match crate::gateway::poml::render(&file_path, &context).await {
-        Ok(rendered) => Ok(Json(TemplateSaveResult {
-            success: true,
-            error: None,
-            rendered_preview: Some(rendered),
-        })),
+    let result = async {
+        let mut ctx = if let Some(uid) = update.user_id.as_deref().filter(|s| !s.is_empty()) {
+            state.db.load_context(uid)?
+        } else { crate::db::contexts::Context::default() };
+        let input = crate::gateway::prompt::preview_input(&state.db, &ctx, update.user_prompt.as_deref())?;
+        let plugins_dir = std::env::var("PLUGINS_DIR").unwrap_or_else(|_| "./plugins".into());
+        let plugins = crate::plugins::load_all_plugins(std::path::Path::new(&plugins_dir));
+        crate::gateway::prompt::route_context(std::path::Path::new("."), &mut ctx, &input, &plugins, None)?;
+        let context = crate::gateway::prompt::build_context(&state.db, &ctx, &input, &plugins, 0, std::path::Path::new(".")).await?;
+        crate::tools::update_template::save_validated(std::path::Path::new("templates"), &name, &update.content, &context).await
+    }.await;
+    match result {
+        Ok(rendered) => {
+            let error = state.db.save_template(&name, &update.content, None, false).err().map(|e| format!("Validated template saved to disk, but database update failed: {e}"));
+            Ok(Json(TemplateSaveResult { success: true, error, rendered_preview: Some(rendered) }))
+        }
         Err(e) => Ok(Json(TemplateSaveResult {
-            success: true,
-            error: Some(format!("Template saved but preview failed: {}", e)),
-            rendered_preview: None,
+            success: false, error: Some(format!("Template was not saved: {e}")), rendered_preview: None,
         })),
     }
 }
@@ -758,6 +922,44 @@ async fn list_tools(
     Ok(Json(serde_json::json!({ "tools": tools })))
 }
 
+async fn list_all_tools(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Built-in tools from registry
+    let builtin: Vec<_> = crate::tools::registry::all_tool_meta()
+        .iter()
+        .map(|m| serde_json::json!({
+            "name": m.name,
+            "description": m.description,
+            "category": format!("{:?}", m.category),
+            "parameters": m.params_schema,
+            "source": "builtin",
+            "default_enabled": m.default_enabled,
+            "is_enabled": crate::db::tools::get(&state.db, m.name).map(|t| t.is_enabled).unwrap_or(m.default_enabled),
+        }))
+        .collect();
+    
+    // Plugin tools
+    let plugins_dir = std::env::var("PLUGINS_DIR").unwrap_or_else(|_| "./plugins".into());
+    let plugins = crate::plugins::load_all_plugins(std::path::Path::new(&plugins_dir));
+    let plugin_tools: Vec<_> = plugins
+        .enabled_tools()
+        .iter()
+        .map(|t| serde_json::json!({
+            "name": t.name,
+            "description": t.description,
+            "category": "Plugin",
+            "parameters": t.parameters,
+            "source": "plugin",
+            "default_enabled": true,
+            "is_enabled": crate::db::tools::get_plugin_tool_enabled(&state.db, &t.name),
+        }))
+        .collect();
+    
+    let all = [builtin, plugin_tools].concat();
+    Ok(Json(serde_json::json!({ "tools": all, "total": all.len() })))
+}
+
 async fn update_tool(
     State(state): State<Arc<DashboardState>>,
     Path(name): Path<String>,
@@ -770,16 +972,43 @@ async fn update_tool(
 
 // ── Memory ───────────────────────────────────────────────────────────────────
 
+#[derive(Deserialize, Default)]
+struct MemoryQuery {
+    profile: Option<String>,
+}
+
 async fn get_memory(
     State(state): State<Arc<DashboardState>>,
     Path(user_id): Path<String>,
+    Query(query): Query<MemoryQuery>,
 ) -> Result<Json<MemoryInfo>, StatusCode> {
-    let memory = crate::db::memory::load_memory(&state.db, &user_id);
+    use crate::db::memory_profiles as profiles;
+    let ctx = state
+        .db
+        .load_context(&user_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut view =
+        profiles::snapshot(&state.db, &ctx).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let active_profile = view.profile.clone();
+    if let Some(name) = query.profile {
+        profiles::validate_name(&name).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let memory = profiles::read_named(&state.db, &user_id, &name)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        view.profile = name;
+        view.exists = memory.is_some();
+        view.memory = memory.unwrap_or_default();
+    }
     Ok(Json(MemoryInfo {
         user_id,
-        custom_variables: memory.custom_variables,
-        learned_facts: memory.learned_facts,
-        last_topics: memory.last_topics,
+        active_profile,
+        profile: view.profile,
+        profile_exists: view.exists,
+        profiles: view.profiles,
+        shared: view.shared,
+        user_preferences: view.memory.user_preferences,
+        custom_variables: view.memory.custom_variables,
+        learned_facts: view.memory.learned_facts,
+        last_topics: view.memory.last_topics,
     }))
 }
 
@@ -788,20 +1017,50 @@ async fn update_memory(
     Path(user_id): Path<String>,
     Json(update): Json<MemoryUpdate>,
 ) -> Result<String, StatusCode> {
-    let mut memory = crate::db::memory::load_memory(&state.db, &user_id);
-
-    if let Some(vars) = update.custom_variables {
-        memory.custom_variables = vars;
+    use crate::db::memory_profiles as profiles;
+    let profile = match update.profile {
+        Some(name) => name,
+        None => {
+            let ctx = state
+                .db
+                .load_context(&user_id)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            profiles::snapshot(&state.db, &ctx)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .profile
+        }
+    };
+    profiles::validate_name(&profile).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if profile == profiles::SHARED
+        && !update
+            .reason
+            .as_deref()
+            .is_some_and(|r| !r.trim().is_empty() && r.len() <= 512)
+    {
+        return Err(StatusCode::BAD_REQUEST);
     }
-    if let Some(facts) = update.learned_facts {
-        memory.learned_facts = facts;
+    if profiles::read_named(&state.db, &user_id, &profile)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
     }
-    if let Some(topics) = update.last_topics {
-        memory.last_topics = topics;
-    }
-
-    crate::db::memory::save_memory(&state.db, &user_id, &memory)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    profiles::update_named(&state.db, &user_id, &profile, |memory| {
+        if let Some(vars) = update.custom_variables {
+            memory.custom_variables = vars;
+        }
+        if let Some(facts) = update.learned_facts {
+            memory.learned_facts = facts;
+        }
+        if let Some(topics) = update.last_topics {
+            memory.last_topics = topics;
+        }
+        if let Some(preferences) = update.user_preferences {
+            memory.user_preferences = preferences;
+        }
+        Ok(())
+    })
+    .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok("Memory updated".to_string())
 }
 
@@ -812,9 +1071,11 @@ async fn get_secrets() -> Result<Json<SecretsInfo>, StatusCode> {
     let custom_masked: std::collections::HashMap<String, String> = secrets
         .custom
         .iter()
+        .filter(|(k, _)| k.as_str() != crate::gateway::llm::codex::SECRET_KEY)
         .map(|(k, v)| (k.clone(), crate::db::secrets::mask_secret(&Some(v.clone()))))
         .collect();
     Ok(Json(SecretsInfo {
+        codex_auth: if crate::gateway::llm::codex::CodexAuth::from_secrets(&secrets).is_some() { "***".into() } else { String::new() },
         discord_bot_token: crate::db::secrets::mask_secret(&secrets.discord_bot_token),
         openai_api_key: crate::db::secrets::mask_secret(&secrets.openai_api_key),
         anthropic_api_key: crate::db::secrets::mask_secret(&secrets.anthropic_api_key),
@@ -833,6 +1094,12 @@ async fn get_secrets() -> Result<Json<SecretsInfo>, StatusCode> {
 
 async fn update_secrets(Json(update): Json<SecretsUpdate>) -> Result<String, StatusCode> {
     let mut secrets = crate::db::secrets::get_secrets();
+    if let Some(auth) = update.codex_auth.as_deref() {
+        apply_codex_secret(&mut secrets, auth).map_err(|_| StatusCode::BAD_REQUEST)?;
+    }
+    // Felder, die wegen Leer-Werten übersprungen wurden (Selbst-Zugangs-
+    // daten dürfen nie mit "" in den Store — sonst Login/Gateway-401).
+    let mut skipped: Vec<&str> = Vec::new();
 
     if let Some(v) = update.discord_bot_token {
         secrets.discord_bot_token = Some(v);
@@ -859,10 +1126,21 @@ async fn update_secrets(Json(update): Json<SecretsUpdate>) -> Result<String, Sta
         secrets.elevenlabs_api_key = Some(v);
     }
     if let Some(v) = update.gateway_api_key {
-        secrets.gateway_api_key = Some(v);
+        // Selbst-Zugangsdaten: Leere Werte würden Login/Gateway still mit ""
+        // in den Store schreiben (Store > Env) → Lockout/401 bis Store-Reset.
+        // Leere = überspringen (Nichts senden = unverändert).
+        if v.trim().is_empty() {
+            skipped.push("gateway_api_key");
+        } else {
+            secrets.gateway_api_key = Some(v);
+        }
     }
     if let Some(v) = update.dashboard_admin_password {
-        secrets.dashboard_admin_password = Some(v);
+        if v.trim().is_empty() {
+            skipped.push("dashboard_admin_password");
+        } else {
+            secrets.dashboard_admin_password = Some(v);
+        }
     }
 
     for (k, v) in update.custom {
@@ -873,16 +1151,86 @@ async fn update_secrets(Json(update): Json<SecretsUpdate>) -> Result<String, Sta
         }
     }
 
+    let skipped_note = if skipped.is_empty() {
+        String::new()
+    } else {
+        format!(" (leere Werte ignoriert: {})", skipped.join(", "))
+    };
+
     // Persist to enc2 if master password provided
     if let Some(ref password) = update.master_password {
+        // Trim wie beim Start (MASTER_KEY_FILE wird beim Lesen getrimmt):
+        // Copy-Paste-Zeilenümbrüche dürfen kein Re-Keying auslösen.
+        let password = password.trim();
+        // Guard: Bei vorhandenem Store MUSS das Feld den AKTUELLEN Master-Key
+        // öffnen (echter Decrypt-Test). Ohne Check verschlüsselt save_secrets
+        // den Store still mit einem evtl. falschen Wert NEU → nächster Start
+        // „Invalid MASTER_KEY (hash mismatch)" (21.09. live passiert: Secret
+        // im Dashboard geändert, Restart brickte).
+        if crate::db::secrets::has_secrets() && !crate::db::enc2::verify_password(password) {
+            return Ok("Falsches Master-Passwort — NICHTS gespeichert, Store unverändert. (Feld = exakter Inhalt von vps/master_key)".to_string());
+        }
         if let Err(_e) = crate::db::secrets::save_secrets(&secrets, password) {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
-        crate::db::secrets::init_secrets(secrets);
-        Ok("Secrets saved and encrypted.".to_string())
+        crate::db::secrets::init_secrets(secrets.clone());
+        reload_llm_router(&secrets);
+        Ok(format!("Secrets saved and encrypted.{}", skipped_note))
     } else {
-        crate::db::secrets::init_secrets(secrets);
-        Ok("Secrets updated in memory. Provide master_password to persist to disk.".to_string())
+        crate::db::secrets::init_secrets(secrets.clone());
+        reload_llm_router(&secrets);
+        Ok(format!(
+            "Secrets updated in memory. Provide master_password to persist to disk.{}",
+            skipped_note
+        ))
+    }
+}
+
+/// Provider keys changed in the dashboard take effect without a restart.
+fn reload_llm_router(secrets: &crate::db::secrets::Secrets) {
+    if let Some(state) = crate::gateway::state_ref() {
+        let config = crate::gateway::providers::effective_config(&state.config, secrets);
+        state.llm.swap(crate::gateway::llm::LLMRouter::new(&config, secrets));
+    }
+}
+
+fn apply_codex_secret(secrets: &mut crate::db::secrets::Secrets, value: &str) -> anyhow::Result<()> {
+    use crate::gateway::llm::codex::{CodexAuth, SECRET_KEY};
+    if value.starts_with("***") { return Ok(()); }
+    if value.trim().is_empty() {
+        secrets.custom.remove(SECRET_KEY);
+    } else {
+        CodexAuth::from_json(value)?.store(secrets);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod codex_secret_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dashboard_codex_auth_is_validated_normalized_and_masked() {
+        use crate::gateway::llm::codex::{CodexAuth, SECRET_KEY};
+        let _lock = crate::db::secrets::test_lock();
+        let original = crate::db::secrets::get_secrets();
+        let mut secrets = crate::db::secrets::Secrets::default();
+        apply_codex_secret(&mut secrets, r#"{"tokens":{"access_token":"private-access","refresh_token":"private-refresh"}}"#).unwrap();
+        assert!(CodexAuth::from_secrets(&secrets).is_some());
+        let saved = secrets.custom[SECRET_KEY].clone();
+        for invalid in ["invalid", "{}", r#"{"tokens":{"access_token":"bad token"}}"#] {
+            assert!(apply_codex_secret(&mut secrets, invalid).is_err());
+            assert_eq!(secrets.custom[SECRET_KEY], saved);
+        }
+        apply_codex_secret(&mut secrets, "***").unwrap();
+        assert_eq!(secrets.custom[SECRET_KEY], saved);
+        crate::db::secrets::init_secrets(secrets.clone());
+        let info = serde_json::to_value(get_secrets().await.unwrap().0).unwrap();
+        assert_eq!(info["codex_auth"], "***");
+        assert!(!info.to_string().contains("private"));
+        apply_codex_secret(&mut secrets, "").unwrap();
+        assert!(CodexAuth::from_secrets(&secrets).is_none());
+        crate::db::secrets::init_secrets(original);
     }
 }
 
@@ -997,11 +1345,11 @@ async fn delete_pending_pairing(
 async fn list_sm_files(
     State(state): State<Arc<DashboardState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let _ = state; // Workflows use the same canonical root as runtime routing.
     let sm_dir = std::path::Path::new("contexts");
-    let data_sm_dir = std::path::PathBuf::from(&state.db.data_dir).join("contexts");
     let mut files = Vec::new();
 
-    for dir in [&sm_dir, &data_sm_dir.as_path()] {
+    for dir in [sm_dir] {
         if dir.exists() {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
@@ -1040,14 +1388,9 @@ async fn get_sm_file(
     State(state): State<Arc<DashboardState>>,
     Path(name): Path<String>,
 ) -> Result<String, StatusCode> {
-    let path = std::path::Path::new("contexts").join(&name);
-    if path.exists() {
-        return std::fs::read_to_string(&path).map_err(|_| StatusCode::NOT_FOUND);
-    }
-    let data_path = std::path::PathBuf::from(&state.db.data_dir)
-        .join("contexts")
-        .join(&name);
-    std::fs::read_to_string(&data_path).map_err(|_| StatusCode::NOT_FOUND)
+    let _ = state;
+    let path = crate::sm::resolve_file_in(std::path::Path::new("contexts"), &name).map_err(|_| StatusCode::NOT_FOUND)?;
+    std::fs::read_to_string(path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn save_sm_file(
@@ -1055,15 +1398,8 @@ async fn save_sm_file(
     Path(name): Path<String>,
     Json(update): Json<SmFileUpdate>,
 ) -> Result<String, StatusCode> {
-    let sm_dir = std::path::PathBuf::from(&state.db.data_dir).join("contexts");
-    std::fs::create_dir_all(&sm_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let path = sm_dir.join(&name);
-
-    if let Err(e) = crate::cl::parse(&update.content) {
-        return Ok(format!("SM Error: {}", e));
-    }
-
-    std::fs::write(&path, &update.content).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = state;
+    crate::sm::save_file_in(std::path::Path::new("contexts"), &name, &update.content).map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok("SM file saved".to_string())
 }
 
@@ -1381,7 +1717,7 @@ async fn begin_agent(
         });
         let _ = client
             .post(url)
-            .header("x-api-key", &gateway_key)
+            .bearer_auth(&gateway_key)
             .json(&body)
             .send()
             .await;
@@ -1553,6 +1889,198 @@ async fn get_screenshot(
     Ok(([(axum::http::header::CONTENT_TYPE, ct)], data))
 }
 
+/// Dashboard chat speech-to-text: accepts a browser MediaRecorder blob
+/// (webm/ogg/wav), transcribes it with the user's configured STT engine
+/// (ElevenLabs scribe by default) and returns the text.
+async fn dashboard_stt(
+    State(state): State<Arc<DashboardState>>,
+    Query(params): Query<HashMap<String, String>>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let user_id = params
+        .get("user_id")
+        .cloned()
+        .unwrap_or_else(|| "default".to_string());
+    // Accept both multipart form uploads (browser MediaRecorder) and raw
+    // bodies (curl tests). The dashboard mic sends multipart with an 'audio'
+    // field; a raw body is used as fallback.
+    let body: Vec<u8> = {
+        let mut collected: Vec<u8> = Vec::new();
+        // Find the audio field (accept any field name; first non-empty wins).
+        loop {
+            match multipart.next_field().await {
+                Ok(Some(mut field)) => {
+                    let mut data = Vec::new();
+                    while let Ok(Some(chunk)) = field.chunk().await {
+                        data.extend_from_slice(&chunk);
+                    }
+                    if !data.is_empty() {
+                        collected = data;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        collected
+    };
+    if body.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let ctx = state.db.load_context(&user_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let secrets = crate::db::secrets::get_secrets();
+    let api_key = secrets
+        .elevenlabs_api_key
+        .clone()
+        .unwrap_or_default();
+    if ctx.settings.voice_stt_type == "elevenlabs" && api_key.is_empty() {
+        return Ok(Json(serde_json::json!({"error": "ElevenLabs API key not configured"})));
+    }
+    let stt_config = crate::voice::STTConfig {
+        engine: ctx.settings.voice_stt_type.clone(),
+        api_key: (!api_key.is_empty()).then_some(api_key),
+        model_path: if ctx.settings.voice_stt_type == "vosk" {
+            ctx.settings.voice_vosk_model_path.clone()
+        } else {
+            ctx.settings.voice_whisper_model_path.clone()
+        },
+        vosk_url: ctx.settings.voice_vosk_url.clone(),
+        elevenlabs_model: ctx.settings.elevenlabs_stt_model.clone(),
+        elevenlabs_language: ctx.settings.elevenlabs_stt_language.clone(),
+        elevenlabs_tag_audio_events: ctx.settings.elevenlabs_stt_tag_audio_events,
+        elevenlabs_no_verbatim: ctx.settings.elevenlabs_stt_no_verbatim,
+    };
+    let stt_threshold = ctx.settings.stt_low_confidence_threshold;
+    match crate::voice::transcribe_audio(&body, &stt_config).await {
+        Ok(text) => Ok(Json(serde_json::json!({
+            "text": text,
+            "confidence": crate::voice::last_stt_confidence(),
+            "low_confidence": crate::voice::last_stt_confidence().map_or(false, |c| c < stt_threshold),
+            "threshold": stt_threshold,
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+    }
+}
+
+/// Context profiles: named, complete context snapshots ("Marvin-Default", ...)
+/// stored in the DB so a fresh user can be configured with one click.
+/// Stored in table `context_profiles (name, data, created_at)`.
+async fn list_profiles(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let conn = state.db.conn();
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS context_profiles (
+            name TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    );
+    let mut stmt = conn
+        .prepare("SELECT name, created_at FROM context_profiles ORDER BY created_at")
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+            ))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let profiles: Vec<_> = rows
+        .filter_map(|row| {
+            let (name, created_at) = match row {
+                Ok((n, c)) => (n, c),
+                Err(_) => return None,
+            };
+            Some(serde_json::json!({
+                "name": name,
+                "created_at": created_at,
+            }))
+        })
+        .collect();
+    Ok(Json(serde_json::json!({"profiles": profiles})))
+}
+
+async fn save_profile(
+    State(state): State<Arc<DashboardState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let name = req["name"].as_str().unwrap_or("").trim().to_string();
+    let source_user = req["source_user_id"].as_str().unwrap_or("default");
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let ctx = state
+        .db
+        .load_context(source_user)
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    // Strip volatile fields: keep settings + custom_data + sm_file choice.
+    let snapshot = serde_json::json!({
+        "settings": ctx.settings,
+        "custom_data": ctx.custom_data,
+        "sm_file": ctx.sm_file,
+    });
+    let conn = state.db.conn();
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS context_profiles (
+            name TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    );
+    conn.execute(
+        "INSERT INTO context_profiles (name, data, created_at) VALUES (?1, ?2, datetime('now'))
+         ON CONFLICT(name) DO UPDATE SET data = ?2, created_at = datetime('now')",
+        rusqlite::params![name, snapshot.to_string()],
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"success": true, "name": name})))
+}
+
+async fn apply_profile(
+    State(state): State<Arc<DashboardState>>,
+    Path((name, user_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Read the profile snapshot in its own lock scope, then drop the guard
+    // BEFORE merge_context takes the lock again (avoids self-deadlock).
+    let update = {
+        let conn = state.db.conn();
+        let data: String = conn
+            .query_row(
+                "SELECT data FROM context_profiles WHERE name = ?1",
+                rusqlite::params![name],
+                |row| row.get(0),
+            )
+            .map_err(|_| StatusCode::NOT_FOUND)?;
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        serde_json::json!({
+            "settings": snapshot.get("settings").cloned().unwrap_or_default(),
+            "custom_data": snapshot.get("custom_data").cloned().unwrap_or_default(),
+            "sm_file": snapshot.get("sm_file").cloned().unwrap_or_default(),
+        })
+    }; // MutexGuard dropped here
+    let ctx = state
+        .db
+        .merge_context(&user_id, update)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(Json(serde_json::to_value(ctx).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?))
+}
+
+async fn delete_profile(
+    State(state): State<Arc<DashboardState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let conn = state.db.conn();
+    conn.execute(
+        "DELETE FROM context_profiles WHERE name = ?1",
+        rusqlite::params![name],
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"success": true})))
+}
+
 async fn chat_query(
     State(state): State<Arc<DashboardState>>,
     Json(req): Json<serde_json::Value>,
@@ -1595,7 +2123,7 @@ async fn chat_query(
             let body = serde_json::json!({"user_id": uid, "message": msg});
             let _ = client
                 .post("http://127.0.0.1:3537/v1/chat")
-                .header("x-api-key", &gateway_key)
+                .bearer_auth(&gateway_key)
                 .json(&body)
                 .send()
                 .await;
@@ -1672,15 +2200,70 @@ async fn chat_stream_auth(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-async fn get_cl_info(
+/// TTS-only side channel for the dashboard chat: forwards `chat_tts` and
+/// `chat_tts_settings` events from the given user's stream. Used by the frontend to also hear
+/// TTS generated for a different session (e.g. Discord traffic on the paired
+/// user_id) while another chat session is active. All other events are
+/// dropped here so the main stream stays the single source for chat content.
+async fn chat_stream_tts_only(
+    Path(user_id): Path<String>,
+    State(state): State<Arc<DashboardState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Sse<impl futures_util::stream::Stream<Item = Result<Event, std::convert::Infallible>>>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str());
+    let valid = token.map_or(false, |t| {
+        let jwt = jsonwebtoken::decode::<crate::gateway::auth::Claims>(
+            t,
+            &jsonwebtoken::DecodingKey::from_secret(state.gateway_api_key.as_bytes()),
+            &jsonwebtoken::Validation::default(),
+        );
+        jwt.is_ok() || t == state.gateway_api_key
+    });
+    if !valid {
+        tracing::warn!(user_id = %user_id, "[SSE-TTS] auth failed");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    tracing::info!(user_id = %user_id, "[SSE-TTS] connection opened");
+    let rx = crate::dashboard::stream::get_or_create(&user_id).subscribe();
+    let uid = user_id.clone();
+    let stream = futures_util::stream::unfold(rx, move |mut r| {
+        let uid = uid.clone();
+        async move {
+            loop {
+                match r.recv().await {
+                    Ok(ev) => {
+                        if !matches!(ev.event.as_str(), "chat_tts" | "chat_tts_settings") {
+                            continue; // Never mirror chat/context contents here.
+                        }
+                        tracing::debug!(user_id = %uid, event = %ev.event, "[SSE-TTS] forwarding audio event");
+                        let data = serde_json::to_string(&ev).unwrap_or_default();
+                        let event = Event::default().event(ev.event).data(data);
+                        return Some((Ok(event), r));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(user_id = %uid, skipped = n, "[SSE-TTS] receiver lagged");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::info!(user_id = %uid, "[SSE-TTS] channel closed, ending stream");
+                        return None;
+                    }
+                }
+            }
+        }
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+async fn get_sm_info(
     State(state): State<Arc<DashboardState>>,
     Path(user_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let ctx = state.db.load_context(&user_id).unwrap_or_default();
+    let ctx = state.db.load_context(&user_id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let templates: Vec<String> = ctx.active_templates.clone();
-    let sm_data = if ctx.cl_data.is_object() {
+    let sm_data = if ctx.sm_data.is_object() {
         let mut flat = serde_json::Map::new();
-        for (k, v) in ctx.cl_data.as_object().unwrap() {
+        for (k, v) in ctx.sm_data.as_object().unwrap() {
             if !v.is_null() {
                 flat.insert(k.clone(), v.clone());
             }
@@ -1690,7 +2273,9 @@ async fn get_cl_info(
         serde_json::json!({})
     };
     Ok(Json(serde_json::json!({
-        "cl_file": ctx.cl_file,
+        "sm_file": crate::gateway::prompt::workflow_name(&ctx),
+        "system_template": ctx.settings.system_template.as_deref().unwrap_or("standard"),
+        "active_skill": ctx.settings.active_skill,
         "active_state": ctx.active_state,
         "active_templates": templates,
         "sm_data": sm_data,
@@ -2078,6 +2663,10 @@ async fn handle_vnc_proxy(
 }
 
 #[cfg(test)]
+#[path = "audio_tests.rs"]
+mod audio_tests;
+
+#[cfg(test)]
 mod dashboard_tests {
     use super::*;
     use tempfile::TempDir;
@@ -2111,6 +2700,153 @@ mod dashboard_tests {
         assert!(update.is_enabled);
     }
 
+    #[tokio::test]
+    async fn backend_memory_api_roundtrip_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(DashboardState { db: crate::db::Database::new(dir.path()).unwrap(), gateway_api_key: String::new(), admin_password: String::new() });
+        let update: MemoryUpdate = serde_json::from_value(serde_json::json!({"learned_facts":["one", "one"], "user_preferences":{"brief":true}, "custom_variables":{"n":3}})).unwrap();
+        update_memory(State(state.clone()), Path("alice".into()), Json(update))
+            .await
+            .unwrap();
+        let memory = get_memory(
+            State(state.clone()),
+            Path("alice".into()),
+            Query(MemoryQuery::default()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(memory.learned_facts, vec!["one"]);
+        assert_eq!(memory.user_preferences["brief"], true);
+        assert_eq!(memory.custom_variables["n"], 3);
+        let clear: MemoryUpdate =
+            serde_json::from_value(serde_json::json!({"learned_facts":[], "user_preferences":{}}))
+                .unwrap();
+        update_memory(State(state.clone()), Path("alice".into()), Json(clear))
+            .await
+            .unwrap();
+        let memory = get_memory(
+            State(state.clone()),
+            Path("alice".into()),
+            Query(MemoryQuery::default()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(memory.learned_facts.is_empty());
+        assert!(memory.user_preferences.is_empty());
+        assert_eq!(memory.custom_variables["n"], 3);
+        assert!(get_memory(
+            State(state),
+            Path("bob".into()),
+            Query(MemoryQuery::default())
+        )
+        .await
+        .unwrap()
+        .0
+        .custom_variables
+        .is_empty());
+    }
+
+    #[tokio::test]
+    async fn backend_memory_api_profiles_do_not_change_selection_or_other_buckets() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(DashboardState {
+            db: crate::db::Database::new(dir.path()).unwrap(),
+            gateway_api_key: String::new(),
+            admin_password: String::new(),
+        });
+        crate::db::memory_profiles::create_profile(&state.db, "alice", "language_instructor")
+            .unwrap();
+        let update: MemoryUpdate = serde_json::from_value(
+            serde_json::json!({"profile":"language_instructor", "custom_variables":{"xp":2}}),
+        )
+        .unwrap();
+        update_memory(State(state.clone()), Path("alice".into()), Json(update))
+            .await
+            .unwrap();
+        let selected = get_memory(
+            State(state.clone()),
+            Path("alice".into()),
+            Query(MemoryQuery::default()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(selected.profile, "standard");
+        assert!(selected.custom_variables.is_empty());
+        let lesson = get_memory(
+            State(state.clone()),
+            Path("alice".into()),
+            Query(MemoryQuery {
+                profile: Some("language_instructor".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(lesson.custom_variables["xp"], 2);
+        assert_eq!(lesson.active_profile, "standard");
+        for body in [
+            serde_json::json!({"profile":"shared", "custom_variables":{"name":"Alex"}}),
+            serde_json::json!({"profile":"shared", "reason":"Explicit synthetic permission", "custom_variables":{"xp":2}}),
+        ] {
+            let bad: MemoryUpdate = serde_json::from_value(body).unwrap();
+            assert_eq!(
+                update_memory(State(state.clone()), Path("alice".into()), Json(bad))
+                    .await
+                    .unwrap_err(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let shared: MemoryUpdate = serde_json::from_value(serde_json::json!({"profile":"shared", "reason":"Explicit synthetic permission", "custom_variables":{"name":"Alex"}})).unwrap();
+        update_memory(State(state.clone()), Path("alice".into()), Json(shared))
+            .await
+            .unwrap();
+        assert_eq!(
+            get_memory(
+                State(state),
+                Path("alice".into()),
+                Query(MemoryQuery::default())
+            )
+            .await
+            .unwrap()
+            .0
+            .shared["name"],
+            "Alex"
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_context_api_lists_only_canonical_sm_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(DashboardState { db: crate::db::Database::new(dir.path()).unwrap(), gateway_api_key: String::new(), admin_password: String::new() });
+        let old = serde_json::json!({"user_id":"alice", "cl_file":"legacy", "settings":{"cl_file":"selected"}}).to_string();
+        state.db.conn().execute("INSERT INTO contexts (user_id, data) VALUES ('alice', ?1)", [old]).unwrap();
+        let value = get_context(State(state.clone()), Path("alice".into())).await.unwrap().0;
+        assert_eq!(value["sm_file"], "legacy");
+        assert!(value.get("cl_file").is_none());
+        let listed = list_contexts(State(state)).await.unwrap().0;
+        let settings = &listed["contexts"][0]["data"]["settings"];
+        assert_eq!(settings["sm_file"], "selected");
+        assert!(settings.get("cl_file").is_none());
+    }
+
+    #[tokio::test]
+    async fn backend_sm_status_distinguishes_system_selection_from_template_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(DashboardState { db: crate::db::Database::new(dir.path()).unwrap(), gateway_api_key: String::new(), admin_password: String::new() });
+        let mut ctx = state.db.load_context("alice").unwrap();
+        ctx.settings.system_template = Some("language_instructor".into());
+        ctx.settings.active_skill = Some("poml_templates".into());
+        state.db.save_context(&ctx).unwrap();
+        let status = get_sm_info(State(state), Path("alice".into())).await.unwrap().0;
+        assert_eq!(status["system_template"], "language_instructor");
+        assert_eq!(status["active_skill"], "poml_templates");
+        assert_eq!(status["active_templates"], serde_json::json!([]));
+        assert_eq!(status["sm_file"], "standard");
+    }
+
     #[test]
     fn test_memory_update_deserialize() {
         let json = r#"{"learned_facts": ["fact1", "fact2"]}"#;
@@ -2138,4 +2874,42 @@ mod dashboard_tests {
         let update: SmFileUpdate = serde_json::from_str(json).unwrap();
         assert!(update.content.contains("state test"));
     }
+}
+
+/// Media asset index: lists files in data/uploads with size and mtime,
+/// newest first. Backed by the filesystem, no separate index file needed.
+async fn list_media(
+    State(_state): State<Arc<DashboardState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+    let uploads = format!("{}/uploads", data_dir);
+    let filter = params.get("q").map(|q| q.to_lowercase()).unwrap_or_default();
+    let mut files: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&uploads) {
+        for entry in entries_flat(entries) {
+            let path = entry.path();
+            if !path.is_file() { continue; }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !filter.is_empty() && !name.to_lowercase().contains(&filter) { continue; }
+            let meta = entry.metadata().ok();
+            files.push(serde_json::json!({
+                "name": name,
+                "url": format!("/api/files/{}", name),
+                "size": meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                "modified": meta.and_then(|m| m.modified().ok())
+                    .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+            }));
+        }
+    }
+    files.sort_by(|a, b| {
+        let am = a["modified"].as_str().unwrap_or("");
+        let bm = b["modified"].as_str().unwrap_or("");
+        bm.cmp(am)
+    });
+    Ok(Json(serde_json::json!({ "files": files, "count": files.len() })))
+}
+
+fn entries_flat(rd: std::fs::ReadDir) -> Vec<std::fs::DirEntry> {
+    rd.filter_map(|e| e.ok()).collect()
 }

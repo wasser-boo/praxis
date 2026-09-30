@@ -7,7 +7,7 @@ The context engine manages per-user state that drives template rendering, workfl
 - **Context** - stored in SQLite, persists across turns
 - **set_context** - LLM tool for updating context variables
 - **POML templates** - rendered with context variables injected
-- **CL system** - state machine for workflow automation
+- **SM system** - state machine for workflow automation
 - **RAG system** - document ingestion and retrieval with neural embeddings
 - **File handling** - Discord attachment download with VM shared folder support
 
@@ -21,21 +21,21 @@ struct Context {
     turn: i32,
     mode: String,              // "agent" or "chat"
     user_name: Option<String>,
-    cl_file: Option<String>,   // Path to CL workflow file
+    cl_file: Option<String>,   // Path to SM workflow file
     active_state: Option<String>,
     active_templates: Vec<String>,
     settings: ContextSettings,
     custom_data: Value,        // Arbitrary user data (device, style, etc.)
-    cl_data: Value,            // Workflow-specific data (application, screen, etc.)
+    sm_data: Value,            // Workflow-specific data (application, screen, etc.)
 }
 ```
 
-### custom_data vs cl_data
+### custom_data vs sm_data
 
 | Field | Purpose | Merge Behavior |
 |-------|---------|----------------|
 | `custom_data` | General user preferences (device, style, theme) | Deep merge via dot-notation |
-| `cl_data` | Workflow/application context (application, screen, step) | Deep merge via dot-notation |
+| `sm_data` | Workflow/application context (application, screen, step) | Deep merge via dot-notation |
 
 Both fields support **dot-notation** for nested updates without overwriting existing data.
 
@@ -74,10 +74,10 @@ This sets `custom_data.device = "main"` and `custom_data.style = "analytical"` w
 
 **Deeply nested:**
 ```
-set_context(key="cl_data.app.settings.theme", value="dark")
+set_context(key="sm_data.app.settings.theme", value="dark")
 ```
 
-This creates: `cl_data.app.settings.theme = "dark"`
+This creates: `sm_data.app.settings.theme = "dark"`
 
 ### How Dot-Notation Works
 
@@ -87,7 +87,7 @@ When a key contains dots (e.g., `custom_data.device`):
 3. If intermediate object doesn't exist, creates it
 4. Sets `device` at the final level
 
-This means you can set individual keys within `custom_data` or `cl_data` without overwriting the entire object.
+This means you can set individual keys within `custom_data` or `sm_data` without overwriting the entire object.
 
 ---
 
@@ -99,7 +99,7 @@ POML templates are rendered with context variables injected. The template can ac
 - `{{mode}}` - Current mode
 - `{{turn}}` - Turn counter
 - `{{custom_data}}` - Full custom_data object
-- `{{cl_data}}` - Full cl_data object
+- `{{sm_data}}` - Full sm_data object
 - `{{memory}}` - Learned facts, topics, preferences
 
 ### Accessing Nested Values
@@ -108,22 +108,22 @@ In POML templates, you can access nested values:
 
 ```xml
 <p>Device: {{custom_data.device}}</p>
-<p>Application: {{cl_data.application}}</p>
+<p>Application: {{sm_data.application}}</p>
 ```
 
 Or with conditional sections:
 
 ```xml
-<section if="cl_data.application == 'fdisk'">
+<section if="sm_data.application == 'fdisk'">
   <p>You are working with fdisk. Here's how it works...</p>
 </section>
 ```
 
 ---
 
-## Driving Templates with cl_data
+## Driving Templates with sm_data
 
-The pattern: set `cl_data` variables, then let POML templates render content based on those variables.
+The pattern: set `sm_data` variables, then let POML templates render content based on those variables.
 
 ### Example: Application-Specific Knowledge
 
@@ -132,11 +132,11 @@ The pattern: set `cl_data` variables, then let POML templates render content bas
 <poml speaker="system">
   <task>
     <p>MANDATORY: Before calling agent_next, you MUST first call 
-    <code>set_context</code> with key="cl_data.application" and value="fdisk".</p>
+    <code>set_context</code> with key="sm_data.application" and value="fdisk".</p>
     <p>Then call <code>agent_next</code> to continue.</p>
   </task>
 
-  <section if="cl_data.application == 'fdisk'">
+  <section if="sm_data.application == 'fdisk'">
     <p>You are working with fdisk. Key commands:</p>
     <list>
       <item>fdisk -l: List partitions</item>
@@ -147,7 +147,7 @@ The pattern: set `cl_data` variables, then let POML templates render content bas
     </list>
   </section>
 
-  <section if="cl_data.application == 'parted'">
+  <section if="sm_data.application == 'parted'">
     <p>You are working with parted. Key commands:</p>
     <list>
       <item>parted /dev/sda: Open disk</item>
@@ -160,7 +160,7 @@ The pattern: set `cl_data` variables, then let POML templates render content bas
 
 **LLM call flow:**
 1. LLM reads template, sees instruction
-2. Calls `set_context(key="cl_data.application", value="fdisk")`
+2. Calls `set_context(key="sm_data.application", value="fdisk")`
 3. Calls `agent_next`
 4. Next turn: template renders with fdisk-specific content
 
@@ -169,21 +169,21 @@ The pattern: set `cl_data` variables, then let POML templates render content bas
 **Template with screen-based sections:**
 ```xml
 <poml>
-  <section if="cl_data.screen == 'boot'">
+  <section if="sm_data.screen == 'boot'">
     <p>Boot screen: Select installation type</p>
   </section>
   
-  <section if="cl_data.screen == 'disk'">
+  <section if="sm_data.screen == 'disk'">
     <p>Disk partitioning: Use fdisk or parted</p>
   </section>
   
-  <section if="cl_data.screen == 'filesystem'">
+  <section if="sm_data.screen == 'filesystem'">
     <p>Create filesystems: mkfs.ext4, mkswap</p>
   </section>
   
   <task>
     After completing this screen, call:
-    set_context(key="cl_data.screen", value="next_screen_name")
+    set_context(key="sm_data.screen", value="next_screen_name")
     Then call agent_next.
   </task>
 </poml>
@@ -297,7 +297,7 @@ POML's `<Document>` component can read PDF, DOCX, and TXT files directly:
 
 ## Knowledge Getter Pattern
 
-Create a template that automatically retrieves and injects RAG knowledge based on `cl_data`.
+Create a template that automatically retrieves and injects RAG knowledge based on `sm_data`.
 
 ### Template: knowledge.poml
 
@@ -306,7 +306,7 @@ Create a template that automatically retrieves and injects RAG knowledge based o
   <task>
     You are a knowledge assistant. Use the retrieved context to answer questions.
     
-    <p>Current application context: {{cl_data.application}}</p>
+    <p>Current application context: {{sm_data.application}}</p>
     <p>Retrieved knowledge:</p>
     <p>{{rag_context}}</p>
   </task>
@@ -318,8 +318,8 @@ Create a template that automatically retrieves and injects RAG knowledge based o
 In `build_system_prompt()`, add RAG retrieval:
 
 ```rust
-// After setting cl_data
-if let Some(app) = ctx.cl_data.get("application").and_then(|v| v.as_str()) {
+// After setting sm_data
+if let Some(app) = ctx.sm_data.get("application").and_then(|v| v.as_str()) {
     // Search for application-specific knowledge
     let results = vector_search(&db, &ctx.user_id, app, 5).await?;
     let rag_context: Vec<String> = results.iter()
@@ -333,45 +333,45 @@ This automatically retrieves relevant documents based on the application context
 
 ---
 
-## CL System Integration
+## SM System Integration
 
-The CL (Context Language) system can automatically set `cl_data` variables based on state transitions.
+The SM (Statemachine) system can automatically set `sm_data` variables based on state transitions.
 
-### CL File Example
+### SM File Example
 
 ```cl
 _default:
-  cl_data.screen = "boot"
+  sm_data.screen = "boot"
 
 state boot:
-  cl_data.screen = "boot"
+  sm_data.screen = "boot"
   system_template = "workflow/boot"
 
   -> disk : when custom_data.device == "main"
 
 state disk:
-  cl_data.screen = "disk"
+  sm_data.screen = "disk"
   system_template = "workflow/disk"
 
-  -> filesystem : when cl_data.disk_done == "true"
+  -> filesystem : when sm_data.disk_done == "true"
 
 state filesystem:
-  cl_data.screen = "filesystem"
+  sm_data.screen = "filesystem"
   system_template = "workflow/filesystem"
 ```
 
-### How CL Uses cl_data
+### How SM Uses sm_data
 
 In `agent_control.rs`, when `agent_next` is called:
-1. Loads CL file
-2. Evaluates transitions based on `cl_data` and `custom_data`
-3. Applies new state variables (including `cl_data` updates)
+1. Loads SM file
+2. Evaluates transitions based on `sm_data` and `custom_data`
+3. Applies new state variables (including `sm_data` updates)
 4. Saves context
 
-This means you can use `cl_data` in CL transition conditions:
+This means you can use `sm_data` in SM transition conditions:
 
 ```cl
--> next_state : when cl_data.application == "fdisk" && cl_data.step == "done"
+-> next_state : when sm_data.application == "fdisk" && sm_data.step == "done"
 ```
 
 ---
@@ -385,22 +385,22 @@ This means you can use `cl_data` in CL transition conditions:
 <poml>
   <task>
     <p>You are helping with disk partitioning using fdisk.</p>
-    <p>Current step: {{cl_data.step}}</p>
+    <p>Current step: {{sm_data.step}}</p>
   </task>
   
-  <section if="cl_data.step == 'select_disk'">
+  <section if="sm_data.step == 'select_disk'">
     <p>Select a disk to partition. Run: fdisk -l</p>
-    <p>After selecting, call set_context(key="cl_data.step", value="partition")</p>
+    <p>After selecting, call set_context(key="sm_data.step", value="partition")</p>
   </section>
   
-  <section if="cl_data.step == 'partition'">
+  <section if="sm_data.step == 'partition'">
     <p>Create partitions using fdisk commands.</p>
-    <p>After done, call set_context(key="cl_data.step", value="format")</p>
+    <p>After done, call set_context(key="sm_data.step", value="format")</p>
   </section>
   
-  <section if="cl_data.step == 'format'">
+  <section if="sm_data.step == 'format'">
     <p>Format partitions with mkfs.</p>
-    <p>After done, call set_context(key="cl_data.step", value="done")</p>
+    <p>After done, call set_context(key="sm_data.step", value="done")</p>
   </section>
   
   <task>
@@ -415,19 +415,19 @@ This means you can use `cl_data` in CL transition conditions:
 User: Help me partition /dev/sda
 
 LLM: I'll help you partition /dev/sda. Let me set up the workflow.
-     [calls set_context(key="cl_data.application", value="fdisk")]
-     [calls set_context(key="cl_data.step", value="select_disk")]
+     [calls set_context(key="sm_data.application", value="fdisk")]
+     [calls set_context(key="sm_data.step", value="select_disk")]
      [calls set_context(key="system_template", value="fdisk")]
      [calls agent_next]
 
-[Next turn: template renders with cl_data.step == "select_disk"]
+[Next turn: template renders with sm_data.step == "select_disk"]
 
 LLM: Let me list the available disks.
      [runs: fdisk -l]
-     [calls set_context(key="cl_data.step", value="partition")]
+     [calls set_context(key="sm_data.step", value="partition")]
      [calls agent_next]
 
-[Next turn: template renders with cl_data.step == "partition"]
+[Next turn: template renders with sm_data.step == "partition"]
 ...
 ```
 
@@ -485,12 +485,12 @@ LLM: [calls rag_search(query="create partition fdisk")]
 ## Summary
 
 1. **Use dot-notation** with `set_context` to set individual keys without overwriting
-2. **Use `cl_data`** for workflow-specific data that drives template selection
+2. **Use `sm_data`** for workflow-specific data that drives template selection
 3. **Use `custom_data`** for general user preferences
-4. **Create POML templates** with `<section if="cl_data.x == 'y'">` for conditional content
+4. **Create POML templates** with `<section if="sm_data.x == 'y'">` for conditional content
 5. **Use `rag_search`** to search knowledge base from templates
 6. **Use `rag_ingest`** to add documents to knowledge base
-7. **Use CL system** for automated state transitions based on context variables
+7. **Use SM system** for automated state transitions based on context variables
 8. **Configure embeddings** via `EMBEDDING_PROVIDER` env var for better search quality
 9. **Discord attachments** are auto-downloaded to shared/downloads/ for VM access
 10. **Use POML `<Document>`** to read PDF, DOCX, and TXT files directly in templates

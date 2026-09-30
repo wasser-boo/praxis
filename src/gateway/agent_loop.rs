@@ -1,6 +1,7 @@
-use crate::cl;
+use crate::sm;
 use crate::gateway::llm::provider::{ChatMessage, ChatRequest, ToolCall};
 use crate::gateway::GatewayState;
+use crate::tools::registry::build_tool_definitions_for_user;
 use crate::tags::{self, TagExecution};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -8,10 +9,6 @@ use tokio::sync::RwLock;
 
 /// Global registry of active agent loops and their user input senders
 static ACTIVE_LOOPS: once_cell::sync::Lazy<Arc<RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
-
-/// Global registry of stop signals for agent loops
-static STOP_SIGNALS: once_cell::sync::Lazy<Arc<RwLock<HashMap<String, bool>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 /// Get a sender for injecting user input into an active agent loop
@@ -22,17 +19,14 @@ pub async fn get_user_input_sender(user_id: &str) -> Option<tokio::sync::mpsc::U
 
 /// Stop an active agent loop
 pub async fn stop_agent_loop(user_id: &str) {
-    let mut signals = STOP_SIGNALS.write().await;
-    signals.insert(user_id.to_string(), true);
-    
+    crate::gateway::task_control::cancel(user_id);
     let mut loops = ACTIVE_LOOPS.write().await;
     loops.remove(user_id);
 }
 
 /// Check if a stop signal has been sent
 async fn should_stop(user_id: &str) -> bool {
-    let signals = STOP_SIGNALS.read().await;
-    signals.get(user_id).copied().unwrap_or(false)
+    crate::gateway::task_control::cancellation(user_id).is_some_and(|token| token.is_cancelled())
 }
 
 /// Register an active agent loop sender
@@ -50,17 +44,22 @@ async fn unregister_active_loop(user_id: &str) {
 #[derive(Debug)]
 pub struct AgentLoopResult {
     pub response: String,
+    pub response_message_id: Option<i64>,
     pub turns_used: i32,
     pub tag_execution: Option<TagExecution>,
     pub completed: bool,
     pub advanced: bool,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+    pub generation_ms: u64,
 }
 
 pub struct AgentLoopConfig {
     pub max_turns: i32,
     pub max_tool_calls: i32,
     pub tags_enabled: bool,
-    pub cl_file: Option<String>,
+    pub sm_file: Option<String>,
     pub feedback_enabled: bool,
     pub message_on_toolcalling: bool,
     pub tool_history_limit: usize,
@@ -72,7 +71,7 @@ impl Default for AgentLoopConfig {
             max_turns: 10,
             max_tool_calls: 5,
             tags_enabled: true,
-            cl_file: None,
+            sm_file: None,
             feedback_enabled: false,
             message_on_toolcalling: false,
             tool_history_limit: 50,
@@ -119,11 +118,59 @@ pub async fn run_agent_loop(
     config: AgentLoopConfig,
     feedback_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> anyhow::Result<AgentLoopResult> {
+    let _task = crate::gateway::task_control::begin(user_id)?;
+    crate::gateway::prompt::reset_task_completion(&state.db, user_id)?;
+    run_agent_loop_in_task(state, user_id, user_message_input, config, feedback_tx).await
+}
+
+/// The message handler already owns the per-user task guard.
+pub(crate) async fn run_agent_loop_in_task(
+    state: &GatewayState,
+    user_id: &str,
+    user_message_input: &str,
+    config: AgentLoopConfig,
+    feedback_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> anyhow::Result<AgentLoopResult> {
+    let result = run_agent_loop_inner(state, user_id, user_message_input, config, feedback_tx).await;
+    // Strict rendering/DB errors must not leave a ghost active loop behind.
+    unregister_active_loop(user_id).await;
+    if let Ok(reply) = &result {
+        if let Some(id) = reply.response_message_id {
+            crate::dashboard::stream::assistant_saved(user_id, id, &reply.response);
+            // Emit usage event for TUI/dashboard token display.
+            if reply.total_tokens > 0 {
+                let usage_data = serde_json::json!({
+                    "prompt_tokens": reply.prompt_tokens,
+                    "completion_tokens": reply.completion_tokens,
+                    "total_tokens": reply.total_tokens,
+                    "generation_ms": reply.generation_ms,
+                    "tokens_per_sec": if reply.generation_ms > 0 {
+                        (reply.completion_tokens as f64 / (reply.generation_ms as f64 / 1000.0)).round()
+                    } else { 0.0 },
+                });
+                crate::dashboard::stream::send(user_id, "usage", &usage_data.to_string());
+            }
+        }
+    }
+    crate::dashboard::stream::send(user_id, "agent_stop", "{}");
+    result
+}
+async fn run_agent_loop_inner(
+    state: &GatewayState,
+    user_id: &str,
+    user_message_input: &str,
+    config: AgentLoopConfig,
+    feedback_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> anyhow::Result<AgentLoopResult> {
     let mut turn = 0;
     let mut completed = false;
     let mut advanced = false;
     let mut last_tag_execution = None;
     let mut user_message = user_message_input.to_string();
+    let mut final_response: Option<String> = None;
+    let mut final_message_id = None;
+    let mut turn_limit_reached = false;
+    let mut current_tool_ids = std::collections::HashSet::new();
 
     // Create user input channel and register sender globally
     let mut user_input = UserInputChannel::new();
@@ -133,80 +180,28 @@ pub async fn run_agent_loop(
     // frontend can render a visually distinct "loop running" banner.
     crate::dashboard::stream::send(user_id, "agent_start", "{}");
 
-    // Load context
     let mut ctx = state.db.load_context(user_id)?;
-
-    // Merge plugin context defaults into custom_data
-    let plugin_defaults = state.plugins.context_defaults();
-    if !plugin_defaults.is_empty() {
-        if ctx.custom_data.is_null() {
-            ctx.custom_data = serde_json::json!({});
-        }
-        if let Some(obj) = ctx.custom_data.as_object_mut() {
-            for (key, value) in &plugin_defaults {
-                obj.entry(key.clone()).or_insert_with(|| value.clone());
-            }
-        }
+    // Immutable per-task ceilings: tool-written settings and injected input
+    // cannot refill a running task. Changes apply to the next task.
+    let turn_limit = ctx.settings.max_llm_turns.unwrap_or(config.max_turns).clamp(1, 128);
+    let tool_limit = ctx.settings.max_tool_calls.unwrap_or(config.max_tool_calls).clamp(0, 128) as usize;
+    let mut tool_calls_used = 0usize;
+    // Accumulate token usage and generation timing across all LLM turns.
+    let mut cumulative_prompt_tokens: u32 = 0;
+    let mut cumulative_completion_tokens: u32 = 0;
+    let mut cumulative_total_tokens: u32 = 0;
+    let mut cumulative_generation_ms: u64 = 0;
+    // Config supplies only an initial default. Subsequent tool changes/clears
+    // are loaded from DB, never shadowed by a frozen loop configuration.
+    if ctx.settings.sm_file.is_none() && ctx.sm_file.is_none() {
+        ctx.sm_file = config.sm_file.clone();
     }
-
-    // Inject the only two runtime values that downstream code actually reads
-    // from `ctx.custom_data`:
-    //   - `user_template`: name of the POML user-message template
-    //   - `channel_id`: default Discord channel for tools like `ask_questions`
-    //
-    // Everything else (user_prompt, path, time, memory, tools, tokens_*, vm_*,
-    // installation_disks, running_vms, message_count, ...) used to be injected
-    // here too, but those values are either:
-    //   1. re-built fresh by `build_system_prompt` at the top level of the
-    //      template context, OR
-    //   2. read directly from settings / disk / DB by the consumer, OR
-    //   3. dead — never read by any template or code path.
-    // Injecting them here was pure noise that cluttered the persisted context.
-    {
-        if ctx.custom_data.is_null() {
-            ctx.custom_data = serde_json::json!({});
-        }
-        if let Some(obj) = ctx.custom_data.as_object_mut() {
-            let user_template = obj
-                .get("user_template")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!("user"));
-            obj.insert("user_template".to_string(), user_template);
-
-            // Default channel_id for Discord tools (can be overwritten via CL).
-            if !obj.contains_key("channel_id") {
-                let fallback_ch = ctx.settings.feedback_channel_id.clone().unwrap_or_default();
-                if !fallback_ch.is_empty() {
-                    obj.insert("channel_id".to_string(), serde_json::json!(fallback_ch));
-                }
-            }
-        }
-    }
-
-    // Apply user template
-    let user_template_name = ctx
-        .custom_data
-        .get("user_template")
-        .and_then(|v| v.as_str())
-        .unwrap_or("user");
-    let user_template_path = format!("templates/{}.poml", user_template_name);
-    tracing::info!(user_id = %ctx.user_id, user_template = %user_template_name, "Using user template");
-    let rendered_user_message = if std::path::Path::new(&user_template_path).exists() {
-        let tmpl_ctx = serde_json::json!({
-            "user_prompt": user_message,
-            "custom_data": ctx.custom_data,
-        });
-        crate::gateway::poml::render(&user_template_path, &tmpl_ctx)
-            .await
-            .unwrap_or_else(|_| user_message.to_string())
-    } else {
-        user_message.to_string()
-    };
-
-    // Store user message
+    crate::gateway::prompt::route_context(std::path::Path::new(&state.config.root_dir), &mut ctx, &user_message, &state.plugins, None)?;
+    state.db.save_context(&ctx)?;
+    // Store the RAW user input; render_user runs per request (raw-storing policy).
     state.db.add_message(
         user_id,
-        &crate::db::messages::Message::user(rendered_user_message),
+        &crate::db::messages::Message::user(user_message.clone()),
     )?;
 
     loop {
@@ -221,74 +216,49 @@ pub async fn run_agent_loop(
         if !injected.is_empty() {
             tracing::info!(user_id = %user_id, injected_count = injected.len(), "Injecting {} user messages into conversation", injected.len());
             for msg in &injected {
-                state.db.add_message(
-                    user_id,
-                    &crate::db::messages::Message::user(msg.clone()),
-                )?;
+                crate::gateway::prompt::append_injected_message(state, user_id, msg).await?;
             }
-            // Use last injected message, reset turn for more turns
+            // New input updates the task, but does not refill its finite budget.
             user_message = injected.last().cloned().unwrap_or(user_message);
-            turn = 0;
             continue;
         }
 
-        if turn >= config.max_turns {
+        if turn >= turn_limit {
             tracing::warn!(user_id = %user_id, turn = turn, "Max turns reached");
+            turn_limit_reached = true;
             break;
         }
 
         turn += 1;
         ctx.turn = turn;
 
-        // Reload context from DB to pick up changes from set_context
-        // (e.g. screen transitions that change the system_template)
-        if let Ok(fresh_ctx) = state.db.load_context(user_id) {
-            ctx = fresh_ctx;
-            ctx.turn = turn;
-        }
-
-        // Apply CL workflow (auto rules only, transitions are on agent_next)
-        if let Some(ref cl_path) = config.cl_file {
-            match cl::load_file(cl_path) {
-                Ok(cl) => {
-                    let mut ctx_val = serde_json::to_value(&ctx)?;
-                    let old_template = ctx_val.pointer("/settings/system_template").and_then(|v| v.as_str()).unwrap_or("system").to_string();
-                    let _secret_changes = cl::apply_to_context(&cl, &mut ctx_val);
-                    let new_template = ctx_val.pointer("/settings/system_template").and_then(|v| v.as_str()).unwrap_or("system").to_string();
-                    let current_state = ctx_val.get("active_state").and_then(|v| v.as_str()).unwrap_or("");
-                    tracing::info!(cl_path = %cl_path, active_state = %current_state, old_template = %old_template, new_template = %new_template, "CL workflow applied");
-                    if let Ok(updated_ctx) = serde_json::from_value::<crate::db::contexts::Context>(ctx_val)
-                    {
-                        ctx = updated_ctx;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(cl_path = %cl_path, error = %e, "Failed to load CL file");
-                }
-            }
-        }
-
-        let _ = state.db.save_context(&ctx);
-
-        // Build messages - always use current user_message
-        let system_prompt = build_system_prompt(state, &ctx, &user_message).await;
+        // Compact BEFORE sending a request, never after it already overflowed.
+        crate::gateway::compaction::before_request(state, user_id).await?;
+        // Refresh after tools and injected inputs; route BEFORE rendering.
+        ctx = crate::gateway::decision_routing::prepare(state, user_id, &user_message, Some(turn), None).await?;
+        let system_prompt = crate::gateway::prompt::render_system(state, &ctx, &user_message).await?;
         let mut messages = vec![ChatMessage {
-            role: "system".to_string(),
-            content: Some(system_prompt),
+            reasoning_content: None,
+role: "system".to_string(),
+            content: Some(system_prompt.clone()),
             content_parts: None,
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
         }];
 
-        // Add compaction summary if available
-        if ctx.settings.compaction_enabled && !ctx.settings.compaction_summary.is_empty() {
+        // Announce system-prompt changes so the model re-reads its instructions
+        // (template updates via SM files or manual switches would otherwise go
+        // unnoticed until the user points them out). Text-based so the notice
+        // includes a diff of WHICH lines changed.
+        if let Some(notice) =
+            crate::gateway::prompt_change::take_prompt_change_notice_text(user_id, &system_prompt)
+        {
+            tracing::info!(user_id = %user_id, "System prompt changed; injecting change notice");
             messages.push(ChatMessage {
+    reasoning_content: None,
                 role: "system".to_string(),
-                content: Some(format!(
-                    "Previous conversation summary: {}",
-                    ctx.settings.compaction_summary
-                )),
+                content: Some(notice),
                 content_parts: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -304,6 +274,7 @@ pub async fn run_agent_loop(
         {
             if let Some(data_url) = crate::tools::vm_tools::screenshot_to_data_url(ss_path) {
                 messages.push(ChatMessage {
+    reasoning_content: None,
                     role: "user".to_string(),
                     content: Some(
                         "[Current VM screenshot — this is what is on screen right now]".to_string(),
@@ -323,29 +294,37 @@ pub async fn run_agent_loop(
             }
         }
 
-        let token_budget = ctx.settings.history_token_limit.unwrap_or(500000);
+        let token_budget = ctx.settings.history_token_limit.unwrap_or(crate::db::messages::DEFAULT_HISTORY_TOKENS);
         let (history, _history_tokens) = state
             .db
             .get_messages_with_token_budget(user_id, token_budget)?;
+        let current_user_idx = history.iter().rposition(|m| m.role == "user");
+        // Render only the CURRENT user turn with fresh context; older turns stay raw.
+        let rendered_current_user =
+            crate::gateway::prompt::render_user(state, &ctx, &user_message).await?;
 
-        // Find the indices of the last 2 messages that have content_parts
-        // Only those will get image data sent to the LLM
-        let mut image_msg_indices: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
-        let mut found = 0;
-        for (i, msg) in history.iter().enumerate().rev() {
-            if msg.content_parts.as_ref().map_or(false, |p| !p.is_empty()) {
-                image_msg_indices.insert(i);
-                found += 1;
-                if found >= 2 {
-                    break;
-                }
-            }
+        let image_msg_indices = crate::gateway::prompt::history_image_indices(
+            &history, &current_tool_ids, state.llm.get().history_image_messages(),
+        );
+        let omitted_history_images = history.iter()
+            .filter(|m| m.content_parts.as_ref().is_some_and(|p| !p.is_empty()))
+            .count().saturating_sub(image_msg_indices.len());
+        if omitted_history_images > 0 {
+            messages.push(ChatMessage {
+    reasoning_content: None,
+                role: "system".into(),
+                content: Some(crate::gateway::prompt::OMITTED_HISTORY_IMAGES_NOTICE.into()),
+                content_parts: None, tool_calls: None, tool_call_id: None, tool_name: None,
+            });
         }
 
         for (msg_idx, msg) in history.iter().enumerate() {
-            // Skip tool-call messages if setting is disabled
+            // The history preference may hide OLD tool conversations, but not
+            // this task's pending tool chain (including loaded skill bodies).
+            let current_tool_message = msg.tool_call_id.as_ref().is_some_and(|id| current_tool_ids.contains(id))
+                || msg.tool_calls.as_ref().is_some_and(|calls| calls.iter().any(|call| current_tool_ids.contains(&call.id)));
             if !ctx.settings.history_with_toolcalls
+                && !current_tool_message
                 && (msg.role == "tool" || msg.tool_calls.is_some())
             {
                 continue;
@@ -362,8 +341,11 @@ pub async fn run_agent_loop(
                     .collect()
             });
             messages.push(ChatMessage {
+    reasoning_content: None,
                 role: msg.role.clone(),
-                content: if msg.content.is_empty() {
+                content: if Some(msg_idx) == current_user_idx {
+                    Some(rendered_current_user.clone())
+                } else if msg.content.is_empty() {
                     None
                 } else {
                     Some(msg.content.clone())
@@ -389,22 +371,25 @@ pub async fn run_agent_loop(
             });
         }
 
-        // Get tool definitions from database + plugins
-        let mut tools = crate::db::tools::to_tool_definitions(&state.db).unwrap_or_default();
-        tools.extend(state.plugins.tool_definitions());
+        // Only bootstrap tools and schemas discovered during this owned task.
+        let tools = build_tool_definitions_for_user(&ctx.settings, Some(&state.plugins.tool_definitions()), Some(&state.db), user_id);
 
         // Clone tool names and definitions for validation before moving tools into request
         let tool_names: Vec<String> = tools.iter().map(|t| t.function.name.clone()).collect();
         let tools_for_validation = tools.clone();
 
+        if tool_calls_used >= tool_limit {
+            messages.push(ChatMessage { role:"system".into(), content:Some("The task's tool budget is exhausted. No further actions may run. Give an honest final answer using existing results; state unfinished work explicitly.".into()), reasoning_content:None, content_parts:None, tool_calls:None, tool_call_id:None, tool_name:None });
+        }
         let request = ChatRequest {
             messages: messages.clone(),
-            tools: if tools.is_empty() { None } else { Some(tools) },
+            tools: if tools.is_empty() || tool_calls_used >= tool_limit { None } else { Some(tools) },
             temperature: Some(0.7),
-            max_tokens: Some(4096),
+            max_tokens: Some(state.llm.get().task_output_tokens()),
             model: ctx.settings.model.clone(),
             vision_provider: ctx.settings.vision_provider.clone().or_else(|| state.config.vision_provider.clone()),
             vision_model: ctx.settings.vision_model.clone().or_else(|| state.config.vision_model.clone()),
+            thinking: crate::gateway::llm::provider::ThinkingMode::from_setting(&ctx.settings.thinking_mode),
         };
 
         // Log LLM request details
@@ -415,6 +400,8 @@ pub async fn run_agent_loop(
             turn = ctx.turn,
             message_count = msg_count,
             tool_count = tool_count,
+            history_images_included = image_msg_indices.len(),
+            history_images_omitted = omitted_history_images,
             model = ?request.model,
             provider = ?ctx.settings.provider,
             ">>> LLM REQUEST >>>"
@@ -434,13 +421,30 @@ pub async fn run_agent_loop(
             );
         }
 
+        // Select provider: free_router when use_freerouter is enabled
+        let provider = if ctx.settings.use_freerouter {
+            Some("free_router")
+        } else {
+            ctx.settings.provider.as_deref()
+        };
+
         // Call LLM
+        let llm_start = std::time::Instant::now();
         let response = match state
-            .llm
-            .streaming_chat(request, ctx.settings.provider.as_deref(), user_id)
+            .llm.get()
+            .streaming_chat(request, provider, user_id)
             .await
         {
-            Ok(r) => r,
+            Ok(r) => {
+                let elapsed = llm_start.elapsed();
+                cumulative_generation_ms += elapsed.as_millis() as u64;
+                if let Some(ref usage) = r.usage {
+                    cumulative_prompt_tokens = cumulative_prompt_tokens.saturating_add(usage.prompt_tokens);
+                    cumulative_completion_tokens = cumulative_completion_tokens.saturating_add(usage.completion_tokens);
+                    cumulative_total_tokens = cumulative_total_tokens.saturating_add(usage.total_tokens);
+                }
+                r
+            },
             Err(e) => {
                 tracing::error!(user_id = %user_id, error = %e, "<<< LLM ERROR <<<");
                 {
@@ -490,6 +494,7 @@ pub async fn run_agent_loop(
 
         // Handle tool calls
         if let Some(tool_calls) = &response.tool_calls {
+            current_tool_ids.extend(tool_calls.iter().map(|call| call.id.clone()));
             // Persist the assistant message with tool_calls
             let db_tool_calls: Vec<crate::db::messages::ToolCallData> = tool_calls
                 .iter()
@@ -524,44 +529,27 @@ pub async fn run_agent_loop(
                 }
             }
 
-            let mut tool_call_count = 0;
             for tc in tool_calls {
-                if tool_call_count >= config.max_tool_calls {
-                    tracing::warn!(user_id = %user_id, "Max tool calls reached");
-                    break;
-                }
-
-                // Validate tool exists before executing
-                if !tool_names.contains(&tc.function.name) {
-                    let result = format!("Error: Unknown tool '{}'. Check the tool name and try again.", tc.function.name);
-                    tracing::warn!(user_id = %user_id, tool = %tc.function.name, "Unknown tool called");
-                    
-                    // Add error as tool result so LLM can recover
-                    messages.push(ChatMessage {
-                        role: "tool".to_string(),
-                        content: Some(result.clone()),
-                        content_parts: None,
-                        tool_calls: None,
-                        tool_call_id: Some(tc.id.clone()),
-                        tool_name: Some(tc.function.name.clone()),
-                    });
-                    continue;
-                }
-
-                // Validate required parameters
+                let exhausted = tool_calls_used >= tool_limit;
+                tool_calls_used = tool_calls_used.saturating_add(1);
                 let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
-                if let Err(e) = validate_tool_params(&tc.function.name, &args, &tools_for_validation) {
-                    let result = format!("Error: {}", e);
-                    tracing::warn!(user_id = %user_id, tool = %tc.function.name, error = %e, "Invalid tool parameters");
-                    
-                    messages.push(ChatMessage {
-                        role: "tool".to_string(),
-                        content: Some(result.clone()),
-                        content_parts: None,
-                        tool_calls: None,
-                        tool_call_id: Some(tc.id.clone()),
-                        tool_name: Some(tc.function.name.clone()),
-                    });
+                let skipped = if should_stop(user_id).await {
+                    Some("Task cancelled; tool not executed".to_string())
+                } else if exhausted {
+                    Some("Maximum tool calls reached; tool not executed".to_string())
+                } else if !tool_names.contains(&tc.function.name)
+                    || !crate::tools::discovery::enabled(&state.db, &state.plugins, &tc.function.name)
+                {
+                    Some(format!("Unknown tool '{}'; tool not executed", tc.function.name))
+                } else {
+                    validate_tool_params(&tc.function.name, &args, &tools_for_validation).err().map(|e| e.to_string())
+                };
+                if let Some(reason) = skipped {
+                    // Persist every tool result, including skipped calls. The
+                    // next turn rebuilds history from DB, not this local Vec.
+                    let mut message = crate::db::messages::Message::tool(format!("Error: {reason}"), tc.id.clone());
+                    message.tool_name = Some(tc.function.name.clone());
+                    state.db.add_message(user_id, &message)?;
                     continue;
                 }
 
@@ -571,17 +559,51 @@ pub async fn run_agent_loop(
                     }
                 }
 
-                // Log tool call start with full details
+                // Keep invocation diagnostics without logging speech/image prompts.
                 tracing::info!(
                     user_id = %user_id,
                     tool = %tc.function.name,
                     call_id = %tc.id,
-                    arguments = %tc.function.arguments,
+                    args_bytes = tc.function.arguments.len(),
                     "=== TOOL CALL START ==="
                 );
 
+                // Dashboard chat visibility: announce the tool call so the user
+                // sees what the agent is doing right now.
+                {
+                    let args_preview: serde_json::Value =
+                        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                    let preview = match tc.function.name.as_str() {
+                        "write_file" | "edit_file" => serde_json::json!({
+                            "path": args_preview.get("path").cloned().unwrap_or_default(),
+                            "content_bytes": tc.function.arguments.len(),
+                        }),
+                        "read_file" | "get_context" | "rag_search" => serde_json::json!({
+                            "path": args_preview.get("path").cloned().unwrap_or_default(),
+                            "query": args_preview.get("query").cloned().unwrap_or_default(),
+                        }),
+                        _ => serde_json::json!({
+                            "args": crate::util::truncate_chars(
+                                &tc.function.arguments, 200),
+                        }),
+                    };
+                    crate::dashboard::stream::send(
+                        user_id,
+                        "tool_call",
+                        &serde_json::json!({
+                            "tool": tc.function.name,
+                            "call_id": tc.id,
+                            "args_preview": preview,
+                        })
+                        .to_string(),
+                    );
+                }
+
                 let tool_start_time = chrono::Local::now();
                 let result = execute_tool_call(&state.db, user_id, tc, &state.plugins).await;
+                // The tool may have changed settings, state, or custom_data.
+                // Start history/screenshot updates from that fresh snapshot.
+                ctx = state.db.load_context(user_id)?;
                 let tool_duration = chrono::Local::now().signed_duration_since(tool_start_time);
                 let mut final_result = result.clone();
                 let mut image_content_parts: Option<Vec<serde_json::Value>> = None;
@@ -607,8 +629,8 @@ pub async fn run_agent_loop(
                                 "timestamp": tool_start_time.format("%Y-%m-%d %H:%M:%S").to_string(),
                                 "duration_ms": tool_duration.num_milliseconds()
                             }));
-                            // Trim history to configured limit
-                            let limit = config.tool_history_limit;
+                            // Respect context-tool changes made during this loop.
+                            let limit = ctx.settings.tool_history_limit;
                             if history.len() > limit {
                                 let drain_count = history.len() - limit;
                                 history.drain(0..drain_count);
@@ -627,19 +649,40 @@ pub async fn run_agent_loop(
                     }
                 }
 
-                // Log tool call result
-                let result_preview = if result.chars().count() > 500 {
-                    format!("{} ({} chars total)", crate::util::truncate_chars_ascii(&result, 500), result.chars().count())
-                } else {
-                    result.clone()
-                };
+                // Tool text can contain private data; diagnostics record metadata only.
                 tracing::info!(
                     user_id = %user_id,
                     tool = %tc.function.name,
                     call_id = %tc.id,
-                    result = %result_preview,
+                    result_bytes = result.len(),
                     "=== TOOL CALL END ==="
                 );
+
+                // Dashboard chat visibility: report the tool result so the user
+                // can follow what happened.
+                {
+                    let result_for_stream = if tc.function.name == "understand_image" {
+                        // Keep the chat payload small: text summary only, the
+                        // image itself is streamed separately as chat_image.
+                        serde_json::from_str::<serde_json::Value>(&result)
+                            .ok()
+                            .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                            .unwrap_or_else(|| crate::util::truncate_chars(&result, 400))
+                    } else {
+                        crate::util::truncate_chars(&result, 400)
+                    };
+                    crate::dashboard::stream::send(
+                        user_id,
+                        "tool_result",
+                        &serde_json::json!({
+                            "tool": tc.function.name,
+                            "call_id": tc.id,
+                            "duration_ms": tool_duration.num_milliseconds(),
+                            "result": result_for_stream,
+                        })
+                        .to_string(),
+                    );
+                }
 
                 // Check if understand_image returned image data
                 if tc.function.name == "understand_image" {
@@ -658,6 +701,25 @@ pub async fn run_agent_loop(
                                     parts.len(),
                                     final_result
                                 );
+                                // Show the image directly in the dashboard chat so
+                                // the user sees what the agent is looking at.
+                                for part in parts {
+                                    if let Some(url) = part
+                                        .get("image_url")
+                                        .and_then(|iu| iu.get("url"))
+                                        .and_then(|u| u.as_str())
+                                    {
+                                        crate::dashboard::stream::send(
+                                            user_id,
+                                            "chat_image",
+                                            &serde_json::json!({
+                                                "url": url,
+                                                "caption": final_result,
+                                            })
+                                            .to_string(),
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -707,32 +769,34 @@ pub async fn run_agent_loop(
                     }
                 }
 
+                let stored_result = crate::gateway::tool_results::prepare_for_call(&state.db, user_id, tc, &final_result)?;
                 let msg = if let Some(parts) = image_content_parts {
                     crate::db::messages::Message::tool_with_image(
-                        final_result,
+                        stored_result,
                         tc.id.clone(),
                         parts,
                     )
                 } else {
-                    crate::db::messages::Message::tool(final_result, tc.id.clone())
+                    crate::db::messages::Message::tool(stored_result, tc.id.clone())
                 };
                 // Set tool_name for Ollama compatibility
                 let mut msg = msg;
                 msg.tool_name = Some(tc.function.name.clone());
                 state.db.add_message(user_id, &msg)?;
-                tool_call_count += 1;
+                state.db.save_context(&ctx)?;
+                // The attempt was charged before validation/execution.
             }
-            // Continue loop for next LLM turn
-            // Save context (with used_tools) before reloading from DB
-            let _ = state.db.save_context(&ctx);
-            // Reload context to check if agent_complete set done=true
             ctx = state.db.load_context(user_id)?;
             if ctx.settings.done {
+                tracing::info!(user_id, turn, "Current task explicitly marked complete");
                 completed = true;
+                break;
             }
             continue;
         }
 
+        // Preserve context/skill commands received while the provider was busy.
+        ctx = state.db.load_context(user_id)?;
         // No tool calls — process response (final answer)
         let raw_response = response.content.unwrap_or_default();
         tracing::info!(
@@ -786,8 +850,8 @@ pub async fn run_agent_loop(
 
         // Parse and execute tags if enabled
         if config.tags_enabled {
-            let tag_result = tags::parse_tags(&response_text);
-            let tag_exec = tags::execute_tags(&tag_result, &mut ctx);
+            let mut tag_result = tags::parse_tags_with_prefix(&response_text, &ctx.settings.tag_prefix)?;
+            let mut tag_exec = tags::execute_tags(&tag_result, &mut ctx);
 
             // Send feedback messages
             for msg in &tag_exec.feedback_messages {
@@ -808,129 +872,69 @@ pub async fn run_agent_loop(
                 || !tag_exec.learned_preferences.is_empty()
                 || !tag_exec.learned_topics.is_empty()
             {
-                let mut memory = crate::db::memory::load_memory(&state.db, user_id);
-                for fact in &tag_exec.learned_facts {
-                    crate::db::memory::add_learned_fact(&mut memory, fact);
+                let saved = crate::db::memory_profiles::update_for_context(&state.db, &ctx, None, |memory| {
+                    for fact in &tag_exec.learned_facts {
+                        crate::db::memory::add_learned_fact(memory, fact);
+                    }
+                    for (key, val) in &tag_exec.learned_preferences {
+                        crate::db::memory::update_preference(memory, key, val);
+                    }
+                    for topic in &tag_exec.learned_topics {
+                        crate::db::memory::add_topic(memory, topic);
+                    }
+                    Ok(())
+                });
+                if saved.is_err() {
+                    // Missing categories must not dump into standard or discard
+                    // the answer. Make failed persistence explicit, not claimed.
+                    let notice = "Memory was NOT saved. Inspect/create/load the relevant profile before an explicit retry; no other profile was changed.";
+                    tag_result.cleaned_response.push_str(&format!("\n\n{notice}"));
+                    tag_exec.learned_facts.clear();
+                    tag_exec.learned_preferences.clear();
+                    tag_exec.learned_topics.clear();
+                    tag_exec.feedback_messages.push(notice.to_owned());
+                    if let Some(ref tx) = feedback_tx { let _ = tx.send(notice.to_owned()); }
+                    tracing::warn!("Profile learning write failed; no fallback or automatic retry");
                 }
-                for (key, val) in &tag_exec.learned_preferences {
-                    crate::db::memory::update_preference(&mut memory, key, val);
-                }
-                for topic in &tag_exec.learned_topics {
-                    crate::db::memory::add_topic(&mut memory, topic);
-                }
-                let _ = crate::db::memory::save_memory(&state.db, user_id, &memory);
             }
 
             last_tag_execution = Some(tag_exec);
 
-            // Store cleaned response
-            state.db.add_message(
-                user_id,
-                &crate::db::messages::Message::assistant(tag_result.cleaned_response.clone()),
-            )?;
-        } else {
-            // Store raw response
-            state.db.add_message(
-                user_id,
-                &crate::db::messages::Message::assistant(response_text.clone()),
-            )?;
+            if !tag_result.cleaned_response.trim().is_empty() {
+                final_response = Some(tag_result.cleaned_response.clone());
+                let mut msg = crate::db::messages::Message::assistant(tag_result.cleaned_response.clone());
+                if cumulative_total_tokens > 0 {
+                    msg.prompt_tokens = Some(cumulative_prompt_tokens);
+                    msg.completion_tokens = Some(cumulative_completion_tokens);
+                    msg.total_tokens = Some(cumulative_total_tokens);
+                    msg.generation_ms = Some(cumulative_generation_ms);
+                }
+                final_message_id = Some(state.db.add_message(user_id, &msg)?);
+            }
+        } else if !response_text.trim().is_empty() {
+            final_response = Some(response_text.clone());
+            let mut msg = crate::db::messages::Message::assistant(response_text.clone());
+            if cumulative_total_tokens > 0 {
+                msg.prompt_tokens = Some(cumulative_prompt_tokens);
+                msg.completion_tokens = Some(cumulative_completion_tokens);
+                msg.total_tokens = Some(cumulative_total_tokens);
+                msg.generation_ms = Some(cumulative_generation_ms);
+            }
+            final_message_id = Some(state.db.add_message(user_id, &msg)?);
         }
 
-        // Advance CL state if needed
         if advanced {
-            if let Some(ref cl_path) = config.cl_file {
-                if let Ok(cl) = cl::load_file(cl_path) {
-                    let ctx_val = serde_json::to_value(&ctx)?;
-                    if let Some(new_state) = cl::advance_state(&cl, &ctx_val) {
-                        ctx.settings.active_state = Some(new_state.clone());
-                        tracing::info!(user_id = %user_id, new_state = %new_state, "CL state advanced");
-                    }
-                }
+            let sm = sm::load_file(crate::gateway::prompt::workflow_name(&ctx)).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut value = serde_json::to_value(&ctx)?;
+            if let Some(next) = sm::advance_workflow(&sm, &value) {
+                anyhow::ensure!(sm::transition_to(&sm, &mut value, &next), "SM target state does not exist: {next}");
+                ctx = serde_json::from_value(value)?;
+                ctx.settings.active_state = ctx.active_state.clone();
             }
             advanced = false;
         }
 
-        let _ = state.db.save_context(&ctx);
-
-        // Auto-compact if enabled and total history tokens exceed limit
-        if ctx.settings.compaction_enabled {
-            let compaction_limit = ctx.settings.compaction_token_limit.unwrap_or(500000);
-            let msg_count = state.db.count_messages(user_id).unwrap_or(0);
-            let (_all_messages, total_tokens) = state
-                .db
-                .get_messages_with_token_budget(user_id, usize::MAX)
-                .unwrap_or((vec![], 0));
-            tracing::info!(
-                user_id = %user_id,
-                msg_count = msg_count,
-                total_tokens = total_tokens,
-                compaction_limit = compaction_limit,
-                compaction_enabled = ctx.settings.compaction_enabled,
-                "Compaction check"
-            );
-            if total_tokens > compaction_limit {
-                tracing::info!(user_id = %user_id, tokens = total_tokens, limit = compaction_limit, "Auto-compacting conversation");
-                if let Ok(summary) = generate_compaction_summary(
-                    state,
-                    user_id,
-                    ctx.settings.compaction_template.as_deref(),
-                )
-                .await
-                {
-                    ctx.settings.compaction_summary = summary;
-                    let _ = state.db.save_context(&ctx);
-
-                    let keep_budget = ctx.settings.history_token_limit.unwrap_or(500000) / 2;
-                    if let Ok((recent, _)) = state
-                        .db
-                        .get_messages_with_token_budget(user_id, keep_budget)
-                    {
-                        // Filter out orphaned tool results (tool messages without preceding tool_calls)
-                        let mut valid_tool_call_ids: std::collections::HashSet<String> =
-                            std::collections::HashSet::new();
-                        for msg in &recent {
-                            if let Some(ref tcs) = msg.tool_calls {
-                                for tc in tcs {
-                                    valid_tool_call_ids.insert(tc.id.clone());
-                                }
-                            }
-                        }
-                        let filtered: Vec<_> = recent
-                            .into_iter()
-                            .filter(|msg| {
-                                if msg.role == "tool" {
-                                    msg.tool_call_id
-                                        .as_ref()
-                                        .map(|id| valid_tool_call_ids.contains(id))
-                                        .unwrap_or(false)
-                                } else {
-                                    true
-                                }
-                            })
-                            .collect();
-
-                        let _ = state.db.clear_messages(user_id);
-                        for msg in &filtered {
-                            let _ = state.db.add_message(user_id, msg);
-                        }
-                        tracing::info!(user_id = %user_id, kept = filtered.len(), "Compaction: kept recent messages, deleted older ones");
-                    }
-                }
-            }
-        } else {
-            let msg_count = state.db.count_messages(user_id).unwrap_or(0);
-            let (_all_messages, total_tokens) = state
-                .db
-                .get_messages_with_token_budget(user_id, usize::MAX)
-                .unwrap_or((vec![], 0));
-            tracing::info!(
-                user_id = %user_id,
-                msg_count = msg_count,
-                total_tokens = total_tokens,
-                compaction_enabled = false,
-                "Compaction skipped (disabled)"
-            );
-        }
+        state.db.save_context(&ctx)?;
 
         if completed {
             break;
@@ -941,14 +945,10 @@ pub async fn run_agent_loop(
         if !injected.is_empty() {
             tracing::info!(user_id = %user_id, injected_count = injected.len(), "Injecting {} user messages into conversation", injected.len());
             for msg in &injected {
-                state.db.add_message(
-                    user_id,
-                    &crate::db::messages::Message::user(msg.clone()),
-                )?;
+                crate::gateway::prompt::append_injected_message(state, user_id, msg).await?;
             }
-            // Use last injected message as current user_message, reset turn for more turns
+            // New input cannot refill this task's immutable turn budget.
             user_message = injected.last().cloned().unwrap_or(user_message);
-            turn = 0;
             continue;
         }
 
@@ -956,31 +956,33 @@ pub async fn run_agent_loop(
         break;
     }
 
-    // Unregister this loop and clean up stop signal
-    unregister_active_loop(user_id).await;
-    STOP_SIGNALS.write().await.remove(user_id);
-
-    // Notify the dashboard chat that the agent loop has stopped.
-    crate::dashboard::stream::send(user_id, "agent_stop", "{}");
-
-    // Find the last assistant message with actual content
-    let all_msgs = state.db.get_messages(user_id, 50)?;
-    let final_response = all_msgs
-        .iter()
-        .rev()
-        .find(|m| m.role == "assistant" && !m.content.is_empty() && m.tool_calls.is_none())
-        .map(|m| m.content.clone())
-        .unwrap_or_else(|| {
-            tracing::warn!(user_id = %user_id, "No assistant response found after agent loop");
-            "I processed your request but have no text response to share.".to_string()
-        });
+    // Never substitute an older task's answer after a tool-only turn, limit or
+    // cancellation. Only a text response from THIS invocation is a final reply.
+    if should_stop(user_id).await {
+        return Err(crate::gateway::llm::error::ProviderError::new(
+            crate::gateway::llm::error::ErrorKind::Cancelled,
+        ).into());
+    }
+    if turn_limit_reached {
+        anyhow::bail!("Agent turn limit reached after {turn} LLM turns before a final answer. Tool results are saved; increase settings.max_llm_turns to allow a longer task.");
+    }
+    let final_response = match final_response {
+        Some(text) => text,
+        None if completed => "The agent marked the task complete without a text reply.".to_string(),
+        None => anyhow::bail!("Agent stopped without a final text reply. Tool results are saved."),
+    };
 
     Ok(AgentLoopResult {
         response: final_response,
+        response_message_id: final_message_id,
         turns_used: turn,
         tag_execution: last_tag_execution,
         completed,
         advanced,
+        prompt_tokens: cumulative_prompt_tokens,
+        completion_tokens: cumulative_completion_tokens,
+        total_tokens: cumulative_total_tokens,
+        generation_ms: cumulative_generation_ms,
     })
 }
 
@@ -991,157 +993,10 @@ pub async fn generate_compaction_summary(
     user_id: &str,
     compaction_template: Option<&str>,
 ) -> anyhow::Result<String> {
-    let (messages, _tokens) = state.db.get_messages_with_token_budget(user_id, 30000)?;
-
-    let conversation_text = messages
-        .iter()
-        .map(|m| format!("{}: {}", m.role, m.content))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let template_name = compaction_template.unwrap_or("compaction");
-    let template_path = format!("templates/{}.poml", template_name);
-    let prompt = if std::path::Path::new(&template_path).exists() {
-        let tmpl_ctx = serde_json::json!({ "conversation_text": conversation_text });
-        crate::gateway::poml::render(&template_path, &tmpl_ctx)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Compaction template render failed: {}, using fallback", e);
-                format!(
-                    "Summarize this conversation in 3-5 sentences. Reply with only the summary:\n\n{}",
-                    conversation_text
-                )
-            })
-    } else {
-        tracing::warn!(
-            "Compaction template '{}' not found, using fallback",
-            template_path
-        );
-        format!(
-            "Summarize this conversation in 3-5 sentences. Reply with only the summary:\n\n{}",
-            conversation_text
-        )
-    };
-
-    let request = ChatRequest {
-        messages: vec![ChatMessage {
-            role: "user".to_string(),
-            content: Some(prompt),
-            content_parts: None,
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-        }],
-        tools: None,
-        temperature: Some(0.3),
-        max_tokens: Some(500),
-        model: None,
-        vision_provider: None,
-        vision_model: None,
-    };
-
-    let response = state.llm.chat(request, None).await?;
-    let summary = response
-        .content
-        .unwrap_or_else(|| "Summary not available.".to_string());
-
-    tracing::info!(user_id = %user_id, summary_len = summary.len(), "Compaction summary generated");
-    Ok(summary)
-}
-
-async fn build_system_prompt(
-    _state: &GatewayState,
-    ctx: &crate::db::contexts::Context,
-    user_message: &str,
-) -> String {
-    tracing::info!(user_id = %ctx.user_id, "build_system_prompt called with user_message: {}", user_message);
-    let mut context_json = serde_json::json!({
-        "user_id": ctx.user_id,
-        "turn": ctx.turn,
-        "mode": ctx.mode,
-        "system_info": format!("Praxis v{}", env!("CARGO_PKG_VERSION")),
-        "user_message": user_message,
-        "user_prompt": user_message,
-        "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-    });
-    
-    tracing::info!(user_id = %ctx.user_id, "context_json user_prompt: {}", context_json["user_prompt"]);
-
-    context_json["username"] = serde_json::json!(ctx.username.as_deref().unwrap_or("User"));
-
-    let effective_path = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "/".to_string());
-    context_json["path"] = serde_json::json!(effective_path);
-
-    if let Some(ref state) = ctx.settings.active_state {
-        context_json["active_state"] = serde_json::json!(state);
-    }
-
-    // Add tag instructions if enabled
-    if ctx.settings.tags_enabled {
-        context_json["tag_instructions"] = serde_json::json!(crate::tags::get_tag_instructions());
-    }
-
-    // Load skills for context
-    let mut skills_registry = crate::skills::SkillRegistry::new();
-    let _ = skills_registry.load_from_dir(std::path::Path::new("skills"));
-    context_json["skills"] = skills_registry.to_context_array();
-
-    // Load memory
-    let memory = crate::db::memory::load_memory(&_state.db, &ctx.user_id);
-    context_json["memory"] = serde_json::json!({
-        "facts": memory.learned_facts,
-        "topics": memory.last_topics,
-        "preferences": memory.user_preferences,
-        "variables": memory.custom_variables,
-    });
-
-    // Load tools for context (so system prompt can list them)
-    let tools = crate::db::tools::to_tool_definitions(&_state.db).unwrap_or_default();
-    tracing::debug!(target: "agent_loop", "Loaded {} tool definitions", tools.len());
-    let tools_context: Vec<serde_json::Value> = tools.iter().map(|t| {
-        serde_json::json!({
-            "name": t.function.name,
-            "description": t.function.description,
-            "parameters": t.function.parameters
-        })
-    }).collect();
-    tracing::debug!(target: "agent_loop", "Tools context: {}", serde_json::to_string(&tools_context).unwrap_or_default());
-    context_json["tools"] = serde_json::json!(tools_context);
-
-    context_json["custom_data"] = if ctx.custom_data.is_null() {
-        serde_json::json!({})
-    } else {
-        ctx.custom_data.clone()
-    };
-
-    context_json["used_tools_history_size"] = serde_json::json!(ctx.settings.tool_history_limit);
-
-    context_json["cl_data"] = if ctx.cl_data.is_null() {
-        serde_json::json!({})
-    } else {
-        ctx.cl_data.clone()
-    };
-
-        let template_name = ctx.settings.system_template.as_deref().unwrap_or("system");
-        let template_path = format!("templates/{}.poml", template_name);
-        tracing::info!(user_id = %ctx.user_id, template_name = %template_name, template_path = %template_path, "Building system prompt");
-        match crate::gateway::poml::render(&template_path, &context_json).await {
-            Ok(rendered) => {
-                tracing::info!(user_id = %ctx.user_id, "Rendered system prompt (first 500 chars): {}", crate::util::truncate_chars(&rendered, 500));
-                rendered
-            },
-        Err(e) => {
-            tracing::warn!("Failed to render POML: {}, using fallback", e);
-            format!(
-                "You are Praxis, an AI agent. Mode: {}. User: {}. Turn: {}.",
-                ctx.mode,
-                ctx.username.as_deref().unwrap_or("unknown"),
-                ctx.turn
-            )
-        }
-    }
+    let (messages, _) = state.db.get_messages_with_token_budget(user_id, usize::MAX)?;
+    let ctx = state.db.load_context(user_id)?;
+    crate::gateway::compaction::summarize(state, user_id, &messages,
+        &ctx.settings.compaction_summary, compaction_template).await
 }
 
 async fn execute_tool_call(
@@ -1150,27 +1005,45 @@ async fn execute_tool_call(
     tc: &ToolCall,
     plugins: &crate::plugins::PluginRegistry,
 ) -> String {
-    tracing::info!(tool = %tc.function.name, args = %tc.function.arguments, "execute_tool_call: dispatching");
+    tracing::info!(tool = %tc.function.name, args_bytes = tc.function.arguments.len(), "execute_tool_call: dispatching");
 
     let args: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
         Ok(v) => v,
         Err(e) => return format!("Error parsing arguments: {}", e),
     };
 
+    let args = match crate::tools::tool_output::execution_args(&args) {
+        Ok(args) => args,
+        Err(error) => return format!("Error: {error}; tool not executed"),
+    };
     let ctx_data = db
         .load_context(user_id)
         .ok()
         .map(|ctx| ctx.custom_data)
         .filter(|v| !v.is_null());
 
-    let plugin_secret_keys = plugins.collect_secrets();
     let all_secrets = crate::db::secrets::get_secrets();
-    let plugin_secrets: std::collections::HashMap<String, String> = plugin_secret_keys
-        .iter()
-        .filter_map(|k| all_secrets.custom.get(k).map(|v| (k.clone(), v.clone())))
-        .collect();
+    let plugin_secrets = plugins.secrets_for_tool(&tc.function.name, &all_secrets);
 
     match tc.function.name.as_str() {
+        "read_tool_result" => crate::tools::tool_output::run(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "search_tools" => crate::tools::discovery::search(db, plugins, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_profile_create" => crate::tools::memory::profile_create(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_profile_load" => crate::tools::memory::profile_load(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_profile_list" => crate::tools::memory::profile_list(db, user_id)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_get" => crate::tools::memory::get(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "memory_set" => crate::tools::memory::set(db, user_id, &args)
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "search_skills" => crate::tools::search_skills::run(db, &args).await
+            .unwrap_or_else(|e| format!("Error: {e}")),
+        "use_skill" => crate::tools::use_skill::run(db, &args).await
+            .unwrap_or_else(|e| format!("Error: {}", e)),
         "execute_terminal" => {
             // If VM_MODE=vm, redirect to VM
             let vm_mode = std::env::var("VM_MODE").unwrap_or_else(|_| "shared".to_string());
@@ -1191,23 +1064,62 @@ async fn execute_tool_call(
             } else {
                 let command = args["command"].as_str().unwrap_or("");
                 match crate::tools::execute_terminal::execute_terminal(command, None).await {
-                    Ok(result) => {
-                        if result.exit_code == 0 {
-                            if result.stdout.is_empty() {
-                                "Command executed successfully (no output)".to_string()
-                            } else {
-                                result.stdout
-                            }
-                        } else {
-                            format!(
-                                "Exit code: {}\nStdout: {}\nStderr: {}",
-                                result.exit_code, result.stdout, result.stderr
-                            )
-                        }
-                    }
+                    Ok(result) => result.render(),
                     Err(e) => format!("Error: {}", e),
                 }
             } // end else (shared mode)
+        }
+        "run_background" => {
+            let command = args["command"].as_str().unwrap_or("");
+            let cwd = args["cwd"].as_str();
+            match crate::tools::execute_terminal::start_background(command, cwd, Some(user_id)).await {
+                Ok(job_id) => format!(
+                    "Background job started: {} (command: {}). You can keep working; it will announce completion automatically. Check with background_status job_id={}.",
+                    job_id, command, job_id
+                ),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "background_status" => {
+            match args["job_id"].as_str() {
+                Some(id) => match crate::tools::execute_terminal::job_status(id) {
+                    Some(job) => serde_json::to_string_pretty(&job).unwrap_or_else(|_| format!("{}", id)),
+                    None => format!("Unknown job id: {}. Use no job_id to list all jobs.", id),
+                },
+                None => {
+                    let jobs = crate::tools::execute_terminal::list_jobs();
+                    if jobs.is_empty() {
+                        "No background jobs.".to_string()
+                    } else {
+                        serde_json::to_string_pretty(&jobs).unwrap_or_else(|_| "jobs".to_string())
+                    }
+                }
+            }
+        }
+        "delegate_task" => {
+            // Needs GatewayState for the child agent loop; fetch it from the
+            // global gateway state accessor used by the message handler.
+            // Boxed to break the async recursion (loop -> tool -> child loop).
+            match crate::gateway::state_ref() {
+                Some(state) => {
+                    let state = state.clone();
+                    let user_id = user_id.to_string();
+                    let args = args.clone();
+                    Box::pin(async move {
+                        crate::gateway::delegation::delegate_task(&state, &user_id, &args).await
+                    })
+                    .await
+                }
+                None => "Error: gateway state unavailable for delegation.".to_string(),
+            }
+        }
+        "list_delegations" => {
+            match crate::gateway::delegation::list_delegations(db, user_id) {
+                Ok(list) if list.is_empty() => "No delegations yet.".to_string(),
+                Ok(list) => serde_json::to_string_pretty(&list)
+                    .unwrap_or_else(|_| format!("{} delegations", list.len())),
+                Err(e) => format!("Error: {}", e),
+            }
         }
         "write_file" => {
             let vm_mode = std::env::var("VM_MODE").unwrap_or_else(|_| "shared".to_string());
@@ -1299,20 +1211,7 @@ async fn execute_tool_call(
                 }
             } else {
                 let path = args["path"].as_str().unwrap_or("");
-                match std::fs::read_to_string(path) {
-                    Ok(content) => {
-                        if content.len() > 10000 {
-                            format!(
-                                "{}...\n\n[File truncated - {} bytes total]",
-                                crate::util::truncate_chars(&content, 10000),
-                                content.len()
-                            )
-                        } else {
-                            content
-                        }
-                    }
-                    Err(e) => format!("Error reading file: {}", e),
-                }
+                crate::tools::read_file::run(path).await.unwrap_or_else(|e| format!("Error reading file: {e}"))
             } // end else (shared mode)
         }
         "get_context" => match db.load_context(user_id) {
@@ -1326,14 +1225,14 @@ async fn execute_tool_call(
                 .get("value")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            match db.merge_context(user_id, serde_json::json!({key: value})) {
+            match db.merge_context_from_agent(user_id, serde_json::json!({key: value})) {
                 Ok(_) => format!("Context key '{}' set", key),
                 Err(e) => format!("Error: {}", e),
             }
         }
         "delete_context" => {
             let key = args["key"].as_str().unwrap_or("");
-            match db.merge_context(user_id, serde_json::json!({key: null})) {
+            match db.merge_context_from_agent(user_id, serde_json::json!({key: null})) {
                 Ok(_) => format!("Context key '{}' deleted", key),
                 Err(e) => format!("Error: {}", e),
             }
@@ -1373,15 +1272,22 @@ async fn execute_tool_call(
             .unwrap_or_else(|e| format!("Error: {}", e))
         }
         "discord_upload_file" => {
+            let settings_upload_ch = db
+                .load_context(user_id)
+                .ok()
+                .and_then(|c| c.settings.upload_channel_id.clone())
+                .filter(|s| !s.is_empty());
             let fallback_ch = ctx_data
                 .as_ref()
                 .and_then(|c| c.get("channel_id"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
+                .map(|s| s.to_string())
+                .or(settings_upload_ch)
+                .unwrap_or_default();
             let channel_id = args["channel_id"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(fallback_ch);
+                .unwrap_or(&fallback_ch);
             let filename = args["filename"].as_str().unwrap_or("file");
             let base64_content = args["base64_content"].as_str().unwrap_or("");
             // Decode base64 to temp file, then upload
@@ -1415,15 +1321,22 @@ async fn execute_tool_call(
             }
         }
         "discord_send_message" => {
+            let settings_upload_ch = db
+                .load_context(user_id)
+                .ok()
+                .and_then(|c| c.settings.upload_channel_id.clone())
+                .filter(|s| !s.is_empty());
             let fallback_ch = ctx_data
                 .as_ref()
                 .and_then(|c| c.get("channel_id"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
+                .map(|s| s.to_string())
+                .or(settings_upload_ch)
+                .unwrap_or_default();
             let channel_id = args["channel_id"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(fallback_ch);
+                .unwrap_or(&fallback_ch);
             let message = args["message"].as_str().unwrap_or("");
             match crate::tools::discord_send_message::send_message(channel_id, message).await {
                 Ok(_) => "Message sent".to_string(),
@@ -1475,25 +1388,24 @@ async fn execute_tool_call(
         }
         "learn_fact" => {
             let fact = args["fact"].as_str().unwrap_or("");
-            match db.add_memory(user_id, fact, Some("fact")) {
+            match crate::db::memory_profiles::learn_fact(db, user_id, fact) {
                 Ok(_) => format!("Learned: {}", fact),
                 Err(e) => format!("Error: {}", e),
             }
         }
         "learn_preference" => {
             let key = args["key"].as_str().unwrap_or("");
-            let value = args["value"].as_str().unwrap_or("");
-            match db.merge_context(
-                user_id,
-                serde_json::json!({"custom_data": {format!("pref_{}", key): value}}),
-            ) {
+            let value = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
+            match crate::db::memory_profiles::update_memory(db, user_id, |memory| {
+                crate::db::memory::update_preference(memory, key, &value);
+            }) {
                 Ok(_) => format!("Preference '{}' = '{}'", key, value),
                 Err(e) => format!("Error: {}", e),
             }
         }
         "learn_topic" => {
             let topic = args["topic"].as_str().unwrap_or("");
-            match db.add_memory(user_id, topic, Some("topic")) {
+            match crate::db::memory_profiles::learn_topic(db, user_id, topic) {
                 Ok(_) => format!("Topic tracked: {}", topic),
                 Err(e) => format!("Error: {}", e),
             }
@@ -1800,45 +1712,8 @@ async fn execute_tool_call(
                 Err(e) => format!("Error fetching cron job: {}", e),
             }
         }
-        "update_template" => {
-            let name = args["name"].as_str().unwrap_or("");
-            let content = args["content"].as_str().unwrap_or("");
-            if name.is_empty() || content.is_empty() {
-                return "Error: name and content are required.".to_string();
-            }
-            let file_path = format!("templates/{}.poml", name);
-            if let Some(parent) = std::path::Path::new(&file_path).parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            // Validate by rendering with POML
-            let ctx = db.load_context(user_id).unwrap_or_default();
-            let test_context = serde_json::json!({
-                "user_id": user_id,
-                "mode": ctx.mode,
-                "turn": 0,
-                "user_message": "Validation test",
-                "user_prompt": "Validation test",
-                "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            });
-            // Write temp file first for validation
-            if let Err(e) = std::fs::write(&file_path, content) {
-                return format!("Error writing template file: {}", e);
-            }
-            match crate::gateway::poml::render(&file_path, &test_context).await {
-                Ok(rendered) if !rendered.trim().is_empty() => {
-                    // POML compiled successfully - persist to DB
-                    let _ = db.save_template(name, content, None, false);
-                    let preview = crate::util::truncate_chars_ascii(&rendered, 500);
-                    format!("Template '{}' updated and validated. POML renders successfully. Preview: {}", name, preview)
-                }
-                Ok(_) => {
-                    format!("Template '{}' saved but POML render returned empty output. Template may be invalid.", name)
-                }
-                Err(e) => {
-                    format!("POML validation failed: {}. Template saved to disk but may not render correctly.", e)
-                }
-            }
-        }
+        "update_template" => crate::tools::update_template::run(db, &args).await
+            .unwrap_or_else(|e| format!("Error: {}", e)),
         _ => {
             // Check VM tools first
             if tc.function.name.starts_with("vm_") {
@@ -1858,7 +1733,7 @@ async fn execute_tool_call(
                 .await
             {
                 Ok(result) => result,
-                Err(e) => format!("Unknown tool: {} ({})", tc.function.name, e),
+                Err(e) => format!("Plugin tool {} failed: {}", tc.function.name, e),
             }
         }
     }
@@ -1870,6 +1745,7 @@ pub fn validate_tool_params(
     args: &serde_json::Value,
     tool_defs: &[crate::gateway::llm::provider::ToolDefinition],
 ) -> Result<(), String> {
+    let args = crate::tools::tool_output::execution_args(args).map_err(|e| e.to_string())?;
     let tool_def = tool_defs.iter().find(|t| t.function.name == tool_name);
     if let Some(def) = tool_def {
         let params = &def.function.parameters;
@@ -1894,6 +1770,14 @@ pub fn validate_tool_params(
 }
 
 #[cfg(test)]
+#[path = "skill_dispatch_tests.rs"]
+mod skill_dispatch_tests;
+
+#[cfg(test)]
+#[path = "backend_dispatch_tests.rs"]
+mod backend_dispatch_tests;
+
+#[cfg(test)]
 mod agent_tests {
     use super::*;
 
@@ -1903,7 +1787,7 @@ mod agent_tests {
         assert_eq!(config.max_turns, 10);
         assert_eq!(config.max_tool_calls, 5);
         assert!(config.tags_enabled);
-        assert!(config.cl_file.is_none());
+        assert!(config.sm_file.is_none());
         assert!(!config.feedback_enabled);
     }
 
@@ -1927,10 +1811,15 @@ mod agent_tests {
     fn test_agent_loop_result_debug() {
         let result = AgentLoopResult {
             response: "test".to_string(),
+            response_message_id: None,
             turns_used: 1,
             tag_execution: None,
             completed: false,
             advanced: false,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            generation_ms: 0,
         };
         let debug = format!("{:?}", result);
         assert!(debug.contains("test"));
@@ -2036,5 +1925,55 @@ mod agent_tests {
         let hist = used["history"].as_array().unwrap();
         assert_eq!(hist.len(), 1);
         assert_eq!(hist[0]["tool"], "execute_terminal");
+    }
+
+    #[test]
+    fn test_tool_stream_event_payloads() {
+        // tool_call payload: tool name + call id + safe args preview.
+        let call_payload = serde_json::json!({
+            "tool": "write_file",
+            "call_id": "call_1",
+            "args_preview": {"path": "/tmp/x.txt", "content_bytes": 42},
+        });
+        assert_eq!(call_payload["tool"], "write_file");
+        assert_eq!(call_payload["args_preview"]["path"], "/tmp/x.txt");
+        assert!(call_payload["args_preview"]["content_bytes"].is_u64());
+        // The preview must NOT contain the file content itself.
+        assert!(call_payload["args_preview"].get("content").is_none());
+
+        // tool_result payload: tool name + duration + truncated result.
+        let result_payload = serde_json::json!({
+            "tool": "execute_terminal",
+            "call_id": "call_2",
+            "duration_ms": 150,
+            "result": "total 248...",
+        });
+        assert_eq!(result_payload["tool"], "execute_terminal");
+        assert_eq!(result_payload["duration_ms"], 150);
+        assert_eq!(result_payload["result"], "total 248...");
+
+        // understand_image results stream text only (image goes as chat_image).
+        let image_tool_result = serde_json::json!({
+            "text": "Image loaded: /tmp/x.png. describe",
+            "content_parts": [{"image_url": {"url": "data:image/png;base64,AAAA"}}],
+        });
+        let text_only = image_tool_result.get("text").and_then(|t| t.as_str()).unwrap_or_default();
+        assert!(text_only.contains("Image loaded"));
+        assert!(image_tool_result.get("content_parts").is_some());
+    }
+
+    #[test]
+    fn test_chat_image_event_extracts_data_url() {
+        // understand_image returns content_parts with a data URL; the chat
+        // event must carry that URL so the browser can render it inline.
+        let data_url = "data:image/png;base64,AAAA";
+        let part = serde_json::json!({"image_url": {"url": data_url, "detail": "high"}});
+        let extracted = part
+            .get("image_url")
+            .and_then(|iu| iu.get("url"))
+            .and_then(|u| u.as_str())
+            .unwrap_or("");
+        assert_eq!(extracted, data_url);
+        assert!(extracted.starts_with("data:image/"));
     }
 }

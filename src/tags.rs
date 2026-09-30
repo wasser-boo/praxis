@@ -54,12 +54,28 @@ impl Default for TagParser {
 
 /// Parse tags from LLM response.
 /// Tags are §-prefixed commands: §tag or §tag="value" or §tag="key":"value"
+pub const DEFAULT_TAG_PREFIX: &str = "§";
+
+pub fn validate_tag_prefix(prefix: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!prefix.is_empty() && prefix.chars().count() <= 16
+        && !prefix.chars().any(|ch| ch.is_whitespace() || ch.is_control()),
+        "tag_prefix must contain 1–16 non-whitespace, non-control characters");
+    Ok(())
+}
+
 pub fn parse_tags(response: &str) -> TagResult {
+    parse_tags_with_prefix(response, DEFAULT_TAG_PREFIX).expect("constant tag prefix is valid")
+}
+
+/// Literal prefix, not a regex. Slash syntax is canonical; prefix+command
+/// remains accepted for backwards compatibility with existing templates.
+pub fn parse_tags_with_prefix(response: &str, prefix: &str) -> anyhow::Result<TagResult> {
+    validate_tag_prefix(prefix)?;
     let mut actions = Vec::new();
     let mut context_updates = HashMap::new();
     let mut cleaned = response.to_string();
 
-    let tag_regex = regex::Regex::new(r#"§(\w+)(?:="([^"]*)")?(?::"([^"]*)")?"#).unwrap();
+    let tag_regex = regex::Regex::new(&format!(r#"{}(?:/)?(\w+)(?:="([^"]*)")?(?::"([^"]*)")?"#,regex::escape(prefix)))?;
 
     let mut found_tags = Vec::new();
     for cap in tag_regex.captures_iter(response) {
@@ -156,11 +172,11 @@ pub fn parse_tags(response: &str) -> TagResult {
         context_updates.insert("last_tag_names".to_string(), serde_json::json!(tag_names));
     }
 
-    TagResult {
+    Ok(TagResult {
         actions,
         cleaned_response: cleaned,
         context_updates,
-    }
+    })
 }
 
 /// Execute tag actions and return execution result.
@@ -265,6 +281,11 @@ pub fn execute_tags(result: &TagResult, ctx: &mut crate::db::contexts::Context) 
     execution
 }
 
+pub fn get_tag_instructions_with_prefix(prefix: &str) -> anyhow::Result<String> {
+    validate_tag_prefix(prefix)?;
+    Ok(get_tag_instructions().replace(DEFAULT_TAG_PREFIX, &format!("{prefix}/")))
+}
+
 pub fn get_tag_instructions() -> &'static str {
     r#"
 ## Response Tags
@@ -292,6 +313,37 @@ IMPORTANT: Tags are stripped before the user sees your response. Put them at the
 #[cfg(test)]
 mod tag_tests {
     use super::*;
+
+    #[test]
+    fn configurable_tag_prefix_is_literal_and_legacy_default_still_works() {
+        for prefix in ["§", "!praxis", "[px].*", "⚙️"] {
+            let result=parse_tags_with_prefix(&format!("answer {prefix}/done"),prefix).unwrap();
+            assert_eq!(result.cleaned_response,"answer");
+            assert_eq!(result.actions[0].tag,"done");
+            let other=parse_tags_with_prefix("answer §done",prefix).unwrap();
+            assert_eq!(other.actions.len(),usize::from(prefix=="§"));
+            assert!(get_tag_instructions_with_prefix(prefix).unwrap().contains(&format!("{prefix}/next")));
+        }
+        assert!(parse_tags_with_prefix("not a tag XXXdone",".*").unwrap().actions.is_empty());
+        for prefix in ["","has space","line\nbreak","\u{0}"] {
+            assert!(parse_tags_with_prefix("ordinary words",prefix).is_err());
+        }
+        assert_eq!(parse_tags("answer §done").actions.len(),1);
+    }
+
+    #[test]
+    fn configurable_tag_prefix_persists_and_is_not_model_writable() {
+        let dir=tempfile::tempdir().unwrap();
+        let db=crate::db::Database::new(dir.path()).unwrap();
+        let ctx=db.load_context("prefix-test").unwrap();
+        assert_eq!(ctx.settings.tag_prefix,"§");
+        db.save_context(&ctx).unwrap();
+        db.merge_context("prefix-test",serde_json::json!({"settings.tag_prefix":"!praxis"})).unwrap();
+        assert_eq!(db.load_context("prefix-test").unwrap().settings.tag_prefix,"!praxis");
+        assert!(db.merge_context("prefix-test",serde_json::json!({"settings.tag_prefix":""})).is_err());
+        assert!(db.merge_context_from_agent("prefix-test",serde_json::json!({"settings.tag_prefix":"!evil"})).is_err());
+        assert_eq!(db.load_context("prefix-test").unwrap().settings.tag_prefix,"!praxis");
+    }
 
     #[test]
     fn test_parse_done() {

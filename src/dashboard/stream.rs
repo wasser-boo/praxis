@@ -76,16 +76,26 @@ pub fn remove(user_id: &str) {
     tracing::info!(user_id = %user_id, "[STREAM] channel removed");
 }
 
+/// Bind a streamed reply to its durable DB identity before delayed TTS arrives.
+pub fn assistant_saved(user_id: &str, id: i64, content: &str) {
+    send(user_id, "assistant_saved", &serde_json::json!({
+        "id": id, "role": "assistant", "content": content,
+    }).to_string());
+}
+
+/// Keep connected players in sync with context edits from any frontend/tool.
+/// Never publish the full context: it can contain private provider settings.
+/// Disconnected clients reload this permission on reconnect/before autoplay.
+pub fn chat_tts_settings(user_id: &str, enabled: bool) {
+    if has_subscriber(user_id) {
+        send(user_id, "chat_tts_settings", &serde_json::json!({ "enabled": enabled }).to_string());
+    }
+}
+
 pub fn send(user_id: &str, event: &str, data: &str) {
-    // Build a UTF-8-safe preview without slicing on byte boundaries
-    // (slicing a &str at a non-char-boundary panics).
-    let data_preview: String = if data.chars().count() > 80 {
-        let mut s: String = data.chars().take(80).collect();
-        s.push_str("...");
-        s
-    } else {
-        data.to_string()
-    };
+    // Stream payloads include prompts, reasoning and tool arguments. Log only
+    // metadata, even with debug enabled; previews are for authenticated UIs.
+    let data_bytes = data.len();
     let tx = get_or_create(user_id);
     match tx.send(StreamEvent {
         event: event.to_string(),
@@ -95,11 +105,11 @@ pub fn send(user_id: &str, event: &str, data: &str) {
             // High-frequency events (per-character streaming) are logged at
             // debug level to avoid drowning the log; everything else stays
             // at info.
-            if event == "char" {
+            if matches!(event, "char" | "reasoning_delta" | "tool_call_delta") {
                 tracing::debug!(
                     user_id = %user_id,
                     event = %event,
-                    data_preview = %data_preview,
+                    data_bytes,
                     num_receivers = num_receivers,
                     "[STREAM] event sent"
                 );
@@ -107,7 +117,7 @@ pub fn send(user_id: &str, event: &str, data: &str) {
                 tracing::info!(
                     user_id = %user_id,
                     event = %event,
-                    data_preview = %data_preview,
+                    data_bytes,
                     num_receivers = num_receivers,
                     "[STREAM] event sent"
                 );
@@ -117,7 +127,7 @@ pub fn send(user_id: &str, event: &str, data: &str) {
             tracing::warn!(
                 user_id = %user_id,
                 event = %event,
-                data_preview = %data_preview,
+                data_bytes,
                 "[STREAM] send failed: no receivers"
             );
         }

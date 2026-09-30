@@ -120,6 +120,7 @@ impl DiscordBot {
             GatewayIntents::GUILDS
                 | GatewayIntents::MESSAGE_CONTENT
                 | GatewayIntents::DIRECT_MESSAGES
+                | GatewayIntents::DIRECT_MESSAGE_REACTIONS
                 | GatewayIntents::GUILD_MESSAGES
                 | GatewayIntents::GUILD_MESSAGE_REACTIONS
                 | GatewayIntents::GUILD_VOICE_STATES
@@ -379,9 +380,22 @@ async fn play_tts_audio(user_id: String, audio_data: Vec<u8>) {
                         Ok(_) => tracing::warn!("No audio samples"),
                         Err(e) => tracing::error!("Audio decode failed: {}", e),
                     }
+                } else {
+                    tracing::warn!(
+                        "Voice TTS dropped: no songbird handler for guild {} (bot not in that voice channel)",
+                        guild_id
+                    );
                 }
+            } else {
+                tracing::warn!("Voice TTS dropped: songbird manager not initialised");
             }
+        } else {
+            tracing::warn!(
+                "Voice TTS dropped: bot/user not connected to a voice channel (guild_id is None)"
+            );
         }
+    } else {
+        tracing::warn!("Voice TTS dropped: voice state not initialised");
     }
     // Next TTS from the mpsc channel will play after this returns
 }

@@ -21,7 +21,7 @@ praxis/
 │   ├── main.rs                   # CLI + Service-Start
 │   ├── lib.rs                    # Module exports
 │   ├── config.rs                 # Configuration
-│   ├── cl.rs                     # Context Language Parser
+│   ├── sm.rs                     # Statemachine Parser
 │   ├── tags.rs                   # §-Tag Parser
 │   ├── event_channel.rs          # Event Bus
 │   ├── gateway/                  # Core Gateway
@@ -85,7 +85,7 @@ praxis/
 ├── reference/                    # ALTER CODE (nur Referenz)
 │   └── src/                      # Kopie des alten Projekts
 ├── templates/                    # POML Templates
-├── contexts/                     # CL Workflows
+├── contexts/                     # SM Workflows
 ├── migrations/                   # SQL Migrations
 ├── skills/                       # User Skills
 └── plugins/                      # Plugin-Definitionen

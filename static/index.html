@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Praxis Dashboard</title>
-    <link rel="icon" type="image/svg+xml" href="/logo.svg">
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -12,7 +13,7 @@
         <div id="login-screen" class="screen active">
             <div class="login-container">
                 <div class="logo">
-                    <img src="/logo.svg" alt="Praxis" class="logo-img">
+                    <img src="/logo.png" alt="Praxis" class="logo-img">
                     <p>AI Agent Platform</p>
                 </div>
                 <form id="login-form">
@@ -36,6 +37,7 @@
                     <li data-tab="contexts">Contexts</li>
                     <li data-tab="messages">Messages</li>
                     <li data-tab="templates">Templates</li>
+                    <li data-tab="decision-profiles">Decision Routing</li>
                     <li data-tab="tools">Tools</li>
                     <li data-tab="memory">Memory</li>
                     <li data-tab="secrets">Secrets</li>
@@ -47,7 +49,7 @@
                     <button id="theme-toggle" class="btn btn-sm btn-secondary" style="width:100%;margin-bottom:0.5rem" onclick="toggleTheme()">🌙 Dark</button>
                     <button id="logout-btn" class="btn btn-secondary">Logout</button>
                 </div>
-                <button id="sidebar-toggle" class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">&#9776;</button>
+                <button id="sidebar-toggle" type="button" class="sidebar-toggle" onclick="toggleSidebar()" title="Dashboard menu" aria-label="Dashboard menu" aria-controls="sidebar" aria-expanded="true">&#9776;</button>
             </nav>
 
             <main class="content">
@@ -55,6 +57,7 @@
                     <h2>Overview</h2>
                     <div class="stats-grid">
                         <div class="stat-card"><h3>Status</h3><p id="status-indicator" class="status ok">Running</p></div>
+                        <div class="stat-card"><h3>GPU-Router</h3><p id="gpu-router-state" class="status" title="Slot-States + Budget heute (pgpu)">–</p></div>
                         <div class="stat-card"><h3>Version</h3><p id="version">-</p></div>
                         <div class="stat-card"><h3>Contexts</h3><p id="context-count">0</p></div>
                         <div class="stat-card"><h3>Pairings</h3><p id="pairing-count">0</p></div>
@@ -67,7 +70,7 @@
                 </div>
 
                 <div id="tab-chat" class="tab">
-                    <button id="chat-sidebar-toggle" class="chat-sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">&#9776;</button>
+                    <button id="chat-sidebar-toggle" type="button" class="chat-sidebar-toggle" onclick="toggleChatConversations()" title="Toggle conversations" aria-label="Open conversations" aria-controls="chat-session-list" aria-expanded="false">☰ Chats</button>
                     <div class="chat-app">
                         <div class="chat-sidebar">
                             <div class="chat-sidebar-header">
@@ -77,11 +80,12 @@
                             <div id="chat-session-list" class="chat-session-list"></div>
                         </div>
                         <div class="chat-main">
-                            <div id="chat-cl-status" class="cl-status-bar" style="display:none">
-                                <span id="cl-status-file" class="cl-badge">-</span>
-                                <span id="cl-status-state" class="cl-badge">-</span>
-                                <span id="cl-status-temps" class="cl-badge">-</span>
-                                <span id="cl-status-vars" class="cl-badge" title="Variables changed in this state">-</span>
+                            <div id="chat-sm-status" class="sm-status-bar" style="display:none">
+                                <span id="sm-status-file" class="sm-badge">-</span>
+                                <span id="sm-status-state" class="sm-badge">-</span>
+                                <span id="sm-status-temps" class="sm-badge">-</span>
+                                <span id="sm-status-skill" class="sm-badge" style="display:none"></span>
+                                <span id="sm-status-vars" class="sm-badge" title="Variables changed in this state">-</span>
                             </div>
                             <div id="chat-agent-banner" class="agent-banner" style="display:none">
                                 <span class="agent-badge" id="chat-agent-badge">Agent: Inactive</span>
@@ -90,7 +94,7 @@
                                 <div style="margin-left:auto;display:flex;align-items:center;gap:0.75rem">
                                     <div style="display:flex;flex-direction:column;align-items:center;gap:0.5rem">
                                         <div style="display:flex;flex-direction:column;align-items:center;gap:0.15rem">
-                                            <img id="chat-bot-avatar" class="avatar-sm" src="/logo.svg" alt="Bot" title="Bot avatar" onclick="showAvatarModal('bot')" style="cursor:pointer">
+                                            <img id="chat-bot-avatar" class="avatar-sm" src="/logo.png" alt="Bot" title="Bot avatar" onclick="showAvatarModal('bot')" style="cursor:pointer">
                                             <span id="chat-bot-name" class="avatar-label">Praxis</span>
                                         </div>
                                         <div style="display:flex;flex-direction:column;align-items:center;gap:0.15rem">
@@ -108,11 +112,16 @@
                                     <div class="chat-timer-fill" id="chat-timer-fill"></div>
                                     <span class="chat-timer-text" id="chat-timer-text">30s</span>
                                 </div>
+                                <button type="button" id="chat-tts-indicator" class="chat-tts-indicator" style="display:none" onclick="chatTtsActive(false)" title="Audio stoppen">
+                                    🔊 Praxis spricht … ■ Stop
+                                </button>
                                 <div id="chat-options-box" class="chat-options" style="display:none"></div>
                                 <div id="chat-attachments-preview" class="chat-attachments" style="display:none"></div>
                                 <div class="chat-input-row">
                                     <button class="btn btn-sm btn-secondary chat-upload-btn" onclick="document.getElementById('chat-file-input').click()" title="Upload files">&#128206;</button>
                                     <input type="file" id="chat-file-input" multiple style="display:none" onchange="chatHandleFiles(this.files)">
+                                    <button class="btn btn-sm btn-secondary" id="chat-mic-btn" onclick="chatToggleMic()" title="Speak to Praxis (speech-to-text)">&#127908;</button>
+                                    <button class="btn btn-sm btn-secondary" id="chat-tts-btn" onclick="chatToggleTts()" title="Read replies aloud (configured TTS provider)" aria-pressed="false">&#128266;</button>
                                     <div style="position:relative;flex:1">
                                         <textarea id="chat-input" class="chat-input" placeholder="Type a message... (try /clear, /start, /stop, /new, /status)" rows="3" onkeydown="chatKeyDown(event)" oninput="chatInput(event)"></textarea>
                                         <div id="slash-commands" class="slash-commands" style="display:none"></div>
@@ -171,6 +180,7 @@
                     <div id="messages-list" class="data-list"></div>
                 </div>
                 <div id="tab-templates" class="tab"><h2>Templates</h2><div id="templates-list" class="data-list"></div></div>
+                <div id="tab-decision-profiles" class="tab"><h2>Decision Routing</h2><p>JSON profiles in <code>decisions/*.json</code>. Select one with <code>settings.decision_profile</code> in a context or .sm state. Set it to <code>off</code> to disable. State-map targets must exist in the active workflow. Probabilities are not calibrated certainty.</p><button class="btn btn-primary" onclick="editDecisionProfile()">New profile</button><div id="decision-profiles-list" class="data-list"></div></div>
                 <div id="tab-tools" class="tab"><h2>Tools</h2><div id="tools-list" class="data-list"></div></div>
                 <div id="tab-memory" class="tab">
                     <h2>Memory</h2>
@@ -199,6 +209,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=14"></script>
+    <script src="/static/chat-audio.js?v=1"></script>
 </body>
 </html>

@@ -214,6 +214,7 @@ async fn test_stt() -> anyhow::Result<()> {
     // Test the unified transcribe_audio function
     println!("\nTesting unified transcribe_audio...");
     let stt_config = voice::STTConfig {
+        vosk_url: None,
         engine: "elevenlabs".to_string(),
         api_key: std::env::var("ELEVENLABS_API_KEY").ok(),
         model_path: None,

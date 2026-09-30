@@ -1,0 +1,31 @@
+{
+  "name": "openrouter_image",
+  "description": "Generate downloadable PNG/JPEG/WebP images through the OpenRouter Image API",
+  "version": "1.0.0",
+  "enabled": true,
+  "context": {"openrouter_image_model": ""},
+  "secrets": ["openrouter_api_key"],
+  "tools": [
+    {
+      "name": "openrouter_image_generate",
+      "description": "Generate raster images through OpenRouter only when the user requests image generation or editing. Uses the dedicated Image API and a configurable model (default openai/gpt-image-2). Paid call: no automatic retries or provider fallback. Returns saved image paths and dashboard download URLs, never base64. Only use optional parameters supported by the chosen image model. Does not generate SVG or automatically download returned URLs.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "prompt": {"type": "string", "minLength": 1, "maxLength": 12000, "description": "Description of the requested image, composition, style, text and constraints"},
+          "model": {"type": "string", "minLength": 1, "maxLength": 256, "description": "OpenRouter image model slug, e.g. openai/gpt-image-2 or bytedance-seed/seedream-4.5. Overrides context/environment default."},
+          "n": {"type": "integer", "minimum": 1, "maximum": 4, "default": 1, "description": "Maximum images to generate (1-4). More images can cost more; not all models support multiple outputs."},
+          "resolution": {"type": "string", "enum": ["512", "1K", "2K", "4K"]},
+          "aspect_ratio": {"type": "string", "enum": ["auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4", "1:2", "2:1", "1:4", "4:1", "1:8", "8:1", "9:21", "21:9"]},
+          "quality": {"type": "string", "enum": ["auto", "low", "medium", "high"]},
+          "output_format": {"type": "string", "enum": ["png", "jpeg", "webp"]},
+          "background": {"type": "string", "enum": ["auto", "transparent", "opaque"]},
+          "reference_images": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "string", "maxLength": 4096}, "description": "Optional 1-4 HTTPS reference-image URLs for models supporting image-to-image. URLs are sent to OpenRouter; local files/data URLs are not accepted."}
+        },
+        "required": ["prompt"]
+      },
+      "handler": {"type": "script", "path": "generate.py", "interpreter": "python3"}
+    }
+  ]
+}

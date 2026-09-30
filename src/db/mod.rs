@@ -3,11 +3,15 @@ pub mod cron_jobs;
 pub mod enc2;
 pub mod logs;
 pub mod memory;
+#[cfg(test)]
+mod memory_profile_tests;
+pub mod memory_profiles;
 pub mod messages;
 pub mod pairings;
 pub mod secrets;
 pub mod templates;
 pub mod tools;
+pub mod tool_outputs;
 
 use rusqlite::Connection;
 use std::path::Path;
@@ -74,6 +78,49 @@ impl Database {
         if version < 8 {
             conn.execute_batch(include_str!("../../migrations/008_sessions.sql"))?;
             conn.pragma_update(None, "user_version", 8)?;
+        }
+        if version < 9 {
+            conn.execute_batch(include_str!("../../migrations/009_delegations.sql"))?;
+            conn.pragma_update(None, "user_version", 9)?;
+        }
+        if version < 10 {
+            conn.execute_batch(include_str!("../../migrations/010_discord_mirror.sql"))?;
+            conn.pragma_update(None, "user_version", 10)?;
+        }
+        if version < 11 {
+            conn.execute_batch(include_str!("../../migrations/011_message_audio.sql"))?;
+            conn.pragma_update(None, "user_version", 11)?;
+        }
+        if version < 12 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../../migrations/012_memory_profiles.sql"))?;
+            tx.pragma_update(None, "user_version", 12)?;
+            tx.commit()?;
+        }
+
+        if version < 13 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../../migrations/013_tool_outputs.sql"))?;
+            tx.pragma_update(None, "user_version", 13)?;
+            tx.commit()?;
+        }
+
+        if version < 14 {
+            let tx = conn.unchecked_transaction()?;
+            // SQLite doesn't support IF NOT EXISTS for ALTER TABLE.
+            // Check if columns exist before adding them.
+            let has_col: bool = tx.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('messages') WHERE name='prompt_tokens'",
+                [], |row| row.get(0),
+            ).unwrap_or(false);
+            if !has_col {
+                tx.execute_batch("ALTER TABLE messages ADD COLUMN prompt_tokens INTEGER")?;
+                tx.execute_batch("ALTER TABLE messages ADD COLUMN completion_tokens INTEGER")?;
+                tx.execute_batch("ALTER TABLE messages ADD COLUMN total_tokens INTEGER")?;
+                tx.execute_batch("ALTER TABLE messages ADD COLUMN generation_ms INTEGER")?;
+            }
+            tx.pragma_update(None, "user_version", 14)?;
+            tx.commit()?;
         }
 
         Ok(())
