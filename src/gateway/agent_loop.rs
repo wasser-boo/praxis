@@ -49,6 +49,10 @@ pub struct AgentLoopResult {
     pub tag_execution: Option<TagExecution>,
     pub completed: bool,
     pub advanced: bool,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+    pub generation_ms: u64,
 }
 
 pub struct AgentLoopConfig {
@@ -133,12 +137,24 @@ pub(crate) async fn run_agent_loop_in_task(
     if let Ok(reply) = &result {
         if let Some(id) = reply.response_message_id {
             crate::dashboard::stream::assistant_saved(user_id, id, &reply.response);
+            // Emit usage event for TUI/dashboard token display.
+            if reply.total_tokens > 0 {
+                let usage_data = serde_json::json!({
+                    "prompt_tokens": reply.prompt_tokens,
+                    "completion_tokens": reply.completion_tokens,
+                    "total_tokens": reply.total_tokens,
+                    "generation_ms": reply.generation_ms,
+                    "tokens_per_sec": if reply.generation_ms > 0 {
+                        (reply.completion_tokens as f64 / (reply.generation_ms as f64 / 1000.0)).round()
+                    } else { 0.0 },
+                });
+                crate::dashboard::stream::send(user_id, "usage", &usage_data.to_string());
+            }
         }
     }
     crate::dashboard::stream::send(user_id, "agent_stop", "{}");
     result
 }
-
 async fn run_agent_loop_inner(
     state: &GatewayState,
     user_id: &str,
@@ -170,6 +186,11 @@ async fn run_agent_loop_inner(
     let turn_limit = ctx.settings.max_llm_turns.unwrap_or(config.max_turns).clamp(1, 128);
     let tool_limit = ctx.settings.max_tool_calls.unwrap_or(config.max_tool_calls).clamp(0, 128) as usize;
     let mut tool_calls_used = 0usize;
+    // Accumulate token usage and generation timing across all LLM turns.
+    let mut cumulative_prompt_tokens: u32 = 0;
+    let mut cumulative_completion_tokens: u32 = 0;
+    let mut cumulative_total_tokens: u32 = 0;
+    let mut cumulative_generation_ms: u64 = 0;
     // Config supplies only an initial default. Subsequent tool changes/clears
     // are loaded from DB, never shadowed by a frozen loop configuration.
     if ctx.settings.sm_file.is_none() && ctx.sm_file.is_none() {
@@ -408,12 +429,22 @@ role: "system".to_string(),
         };
 
         // Call LLM
+        let llm_start = std::time::Instant::now();
         let response = match state
             .llm.get()
             .streaming_chat(request, provider, user_id)
             .await
         {
-            Ok(r) => r,
+            Ok(r) => {
+                let elapsed = llm_start.elapsed();
+                cumulative_generation_ms += elapsed.as_millis() as u64;
+                if let Some(ref usage) = r.usage {
+                    cumulative_prompt_tokens = cumulative_prompt_tokens.saturating_add(usage.prompt_tokens);
+                    cumulative_completion_tokens = cumulative_completion_tokens.saturating_add(usage.completion_tokens);
+                    cumulative_total_tokens = cumulative_total_tokens.saturating_add(usage.total_tokens);
+                }
+                r
+            },
             Err(e) => {
                 tracing::error!(user_id = %user_id, error = %e, "<<< LLM ERROR <<<");
                 {
@@ -871,17 +902,25 @@ role: "system".to_string(),
 
             if !tag_result.cleaned_response.trim().is_empty() {
                 final_response = Some(tag_result.cleaned_response.clone());
-                final_message_id = Some(state.db.add_message(
-                    user_id,
-                    &crate::db::messages::Message::assistant(tag_result.cleaned_response.clone()),
-                )?);
+                let mut msg = crate::db::messages::Message::assistant(tag_result.cleaned_response.clone());
+                if cumulative_total_tokens > 0 {
+                    msg.prompt_tokens = Some(cumulative_prompt_tokens);
+                    msg.completion_tokens = Some(cumulative_completion_tokens);
+                    msg.total_tokens = Some(cumulative_total_tokens);
+                    msg.generation_ms = Some(cumulative_generation_ms);
+                }
+                final_message_id = Some(state.db.add_message(user_id, &msg)?);
             }
         } else if !response_text.trim().is_empty() {
             final_response = Some(response_text.clone());
-            final_message_id = Some(state.db.add_message(
-                user_id,
-                &crate::db::messages::Message::assistant(response_text.clone()),
-            )?);
+            let mut msg = crate::db::messages::Message::assistant(response_text.clone());
+            if cumulative_total_tokens > 0 {
+                msg.prompt_tokens = Some(cumulative_prompt_tokens);
+                msg.completion_tokens = Some(cumulative_completion_tokens);
+                msg.total_tokens = Some(cumulative_total_tokens);
+                msg.generation_ms = Some(cumulative_generation_ms);
+            }
+            final_message_id = Some(state.db.add_message(user_id, &msg)?);
         }
 
         if advanced {
@@ -940,6 +979,10 @@ role: "system".to_string(),
         tag_execution: last_tag_execution,
         completed,
         advanced,
+        prompt_tokens: cumulative_prompt_tokens,
+        completion_tokens: cumulative_completion_tokens,
+        total_tokens: cumulative_total_tokens,
+        generation_ms: cumulative_generation_ms,
     })
 }
 
@@ -1773,6 +1816,10 @@ mod agent_tests {
             tag_execution: None,
             completed: false,
             advanced: false,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            generation_ms: 0,
         };
         let debug = format!("{:?}", result);
         assert!(debug.contains("test"));
