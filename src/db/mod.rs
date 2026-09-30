@@ -105,6 +105,24 @@ impl Database {
             tx.commit()?;
         }
 
+        if version < 14 {
+            let tx = conn.unchecked_transaction()?;
+            // SQLite doesn't support IF NOT EXISTS for ALTER TABLE.
+            // Check if columns exist before adding them.
+            let has_col: bool = tx.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('messages') WHERE name='prompt_tokens'",
+                [], |row| row.get(0),
+            ).unwrap_or(false);
+            if !has_col {
+                tx.execute_batch("ALTER TABLE messages ADD COLUMN prompt_tokens INTEGER")?;
+                tx.execute_batch("ALTER TABLE messages ADD COLUMN completion_tokens INTEGER")?;
+                tx.execute_batch("ALTER TABLE messages ADD COLUMN total_tokens INTEGER")?;
+                tx.execute_batch("ALTER TABLE messages ADD COLUMN generation_ms INTEGER")?;
+            }
+            tx.pragma_update(None, "user_version", 14)?;
+            tx.commit()?;
+        }
+
         Ok(())
     }
 

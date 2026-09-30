@@ -40,6 +40,16 @@ pub struct Message {
     /// Only set for mirrored Discord messages; never sent to the LLM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discord_meta: Option<serde_json::Value>,
+    /// Per-message provider-reported token usage (assistant messages only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u32>,
+    /// Wall-clock milliseconds for model generation (excluding tool execution).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_ms: Option<u64>,
 }
 
 /// Roles that only exist for the dashboard/TUI chat mirror and must never be
@@ -62,6 +72,10 @@ impl Message {
             tool_calls: None,
             content_parts: None,
             discord_meta: Self::empty_meta(),
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            generation_ms: None,
         }
     }
 
@@ -76,6 +90,34 @@ impl Message {
             tool_calls: None,
             content_parts: None,
             discord_meta: Self::empty_meta(),
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            generation_ms: None,
+        }
+    }
+
+    pub fn assistant_with_usage(
+        content: String,
+        prompt_tokens: Option<u32>,
+        completion_tokens: Option<u32>,
+        total_tokens: Option<u32>,
+        generation_ms: Option<u64>,
+    ) -> Self {
+        Self {
+            id: None,
+            audio_mime: None,
+            role: "assistant".to_string(),
+            content,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            content_parts: None,
+            discord_meta: Self::empty_meta(),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            generation_ms,
         }
     }
 
@@ -90,6 +132,10 @@ impl Message {
             tool_calls: Some(tool_calls),
             content_parts: None,
             discord_meta: Self::empty_meta(),
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            generation_ms: None,
         }
     }
 
@@ -104,6 +150,10 @@ impl Message {
             tool_calls: None,
             content_parts: None,
             discord_meta: Self::empty_meta(),
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            generation_ms: None,
         }
     }
 
@@ -122,6 +172,10 @@ impl Message {
             tool_calls: None,
             content_parts: Some(content_parts),
             discord_meta: Self::empty_meta(),
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            generation_ms: None,
         }
     }
 
@@ -153,6 +207,10 @@ impl Message {
                 "channel_id": channel_id,
                 "channel_kind": channel_kind,
             })),
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            generation_ms: None,
         }
     }
 
@@ -212,8 +270,8 @@ impl Database {
             .as_ref()
             .map(|dm| serde_json::to_string(dm).unwrap_or_default());
         conn.execute(
-            "INSERT INTO messages (user_id, role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![key, msg.role, msg.content, msg.tool_call_id, msg.tool_name, tool_calls_json, content_parts_json, discord_meta_json],
+            "INSERT INTO messages (user_id, role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta, prompt_tokens, completion_tokens, total_tokens, generation_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![key, msg.role, msg.content, msg.tool_call_id, msg.tool_name, tool_calls_json, content_parts_json, discord_meta_json, msg.prompt_tokens, msg.completion_tokens, msg.total_tokens, msg.generation_ms],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -255,7 +313,7 @@ impl Database {
         let conn = self.conn();
         let key = self.resolve_user_key(&conn, user_id);
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta, id FROM messages WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2"
+            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta, id, prompt_tokens, completion_tokens, total_tokens, generation_ms FROM messages WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2"
         )?;
 
         let messages = stmt
@@ -279,6 +337,10 @@ impl Database {
                     tool_calls,
                     content_parts,
                     discord_meta,
+                    prompt_tokens: row.get(8)?,
+                    completion_tokens: row.get(9)?,
+                    total_tokens: row.get(10)?,
+                    generation_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -294,7 +356,7 @@ impl Database {
         let conn = self.conn();
         let key = self.resolve_user_key(&conn, user_id);
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta, id FROM messages WHERE user_id = ?1 ORDER BY id DESC",
+            "SELECT role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta, id, prompt_tokens, completion_tokens, total_tokens, generation_ms FROM messages WHERE user_id = ?1 ORDER BY id DESC",
         )?;
 
         let mut messages = Vec::new();
@@ -319,6 +381,10 @@ impl Database {
                 tool_calls,
                 content_parts,
                 discord_meta,
+                prompt_tokens: row.get(8)?,
+                completion_tokens: row.get(9)?,
+                total_tokens: row.get(10)?,
+                generation_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
             })
         })?;
 
@@ -377,7 +443,7 @@ impl Database {
         let conn = self.conn();
         let key = self.resolve_user_key(&conn, user_id);
         let mut stmt = conn.prepare(
-            "SELECT id, role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta, audio_mime FROM messages WHERE user_id = ?1 ORDER BY id DESC",
+            "SELECT id, role, content, tool_call_id, tool_name, tool_calls, content_parts, discord_meta, audio_mime, prompt_tokens, completion_tokens, total_tokens, generation_ms FROM messages WHERE user_id = ?1 ORDER BY id DESC",
         )?;
 
         let mut messages = Vec::new();
@@ -403,6 +469,10 @@ impl Database {
                 tool_calls,
                 content_parts,
                 discord_meta,
+                prompt_tokens: row.get(9)?,
+                completion_tokens: row.get(10)?,
+                total_tokens: row.get(11)?,
+                generation_ms: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
             }))
         })?;
 

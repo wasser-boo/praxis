@@ -678,3 +678,15 @@ body.agent-loop-running .agent-badge { animation: agent-pulse 2s ease-in-out inf
 .tool-result-controls button { font-size: 0.75rem; }
 .tool-result-controls button:focus-visible { outline: 2px solid var(--accent-purple); outline-offset: 2px; }
 .tool-result-note { color: var(--text-secondary); font-size: 0.75rem; }
+
+/* Token usage display */
+.usage-info { padding: 0.2rem 0.5rem; text-align: right; }
+.usage-badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    background: rgba(106, 234, 255, 0.08);
+    border: 1px solid rgba(106, 234, 255, 0.2);
+    border-radius: 999px;
+    padding: 0.15rem 0.6rem;
+}

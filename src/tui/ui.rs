@@ -172,6 +172,27 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     } else {
         Span::styled(" ○ Idle ", Style::default().fg(TEXT_DIM))
     };
+    // Show last response tokens/sec if available.
+    let usage_span = if let Some(ref usage) = app.last_response_usage {
+        if usage.tokens_per_sec > 0.0 {
+            Span::styled(
+                format!(" {:.1} tok/s ", usage.tokens_per_sec),
+                Style::default().fg(ACCENT_GREEN),
+            )
+        } else {
+            Span::raw("")
+        }
+    } else {
+        Span::raw("")
+    };
+    let session_tokens = if app.session_total_tokens > 0 {
+        Span::styled(
+            format!(" {} tok ", app.session_total_tokens),
+            Style::default().fg(TEXT_DIM),
+        )
+    } else {
+        Span::raw("")
+    };
     let title = Line::from(vec![
         Span::styled(
             "  Praxis ",
@@ -192,6 +213,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw("  "),
         agent,
+        usage_span,
+        session_tokens,
     ]);
     let block = Block::default()
         .borders(Borders::BOTTOM)
@@ -245,6 +268,26 @@ fn draw_transcript(f: &mut Frame, app: &mut App, area: Rect) {
                     }
                 }
                 selection_start = Some(lines.len());
+                &snapshot
+            } else if app.folded_bubbles.contains(&idx) {
+                // Show collapsed representation for folded tool outputs.
+                let line_count = match b {
+                    Bubble::Tool { content, .. } | Bubble::ToolResult { content, .. } => {
+                        content.lines().count()
+                    }
+                    _ => 0,
+                };
+                snapshot = match b {
+                    Bubble::Tool { name, .. } => Bubble::Banner {
+                        kind: BannerKind::Info,
+                        content: format!("⚙ {} — {} lines hidden (Tab/fold to expand)", name, line_count),
+                    },
+                    Bubble::ToolResult { name, .. } => Bubble::Banner {
+                        kind: BannerKind::Info,
+                        content: format!("⚙ {} — {} lines hidden (Tab/fold to expand)", name, line_count),
+                    },
+                    other => (*other).clone(),
+                };
                 &snapshot
             } else { b };
             let bubble_lines = render_bubble(rendered, bubble_max, app.username());

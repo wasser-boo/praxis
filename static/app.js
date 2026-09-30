@@ -998,6 +998,21 @@ function startChatStream() {
         if (!current()) return;
         for (const p of toolPreviews.values()) previewText(p.node, `Tool call — received; execution reported separately\n${p.name}\n${p.args}`);
     });
+    // Display token usage after each response.
+    es.addEventListener('usage', (e) => {
+        try {
+            const d = JSON.parse(e.data);
+            const data = d.data ? JSON.parse(d.data) : d;
+            if (data.total_tokens > 0) {
+                const tps = data.tokens_per_sec > 0 ? ` (${data.tokens_per_sec.toFixed(1)} tok/s)` : '';
+                const msg = document.createElement('div');
+                msg.className = 'message usage-info';
+                msg.innerHTML = `<span class="usage-badge">${data.prompt_tokens} in / ${data.completion_tokens} out / ${data.total_tokens} tokens${tps}</span>`;
+                const chat = document.getElementById('chat-messages');
+                if (chat) { chat.appendChild(msg); chat.scrollTop = chat.scrollHeight; }
+            }
+        } catch (err) { console.error('[SSE usage error]', err); }
+    });
     es.addEventListener('stream_abort', () => {
         if (current()) for (const p of toolPreviews.values()) previewText(p.node, `Tool call — aborted, not executed\n${p.name}\n${p.args}`);
         if (!current()) return;

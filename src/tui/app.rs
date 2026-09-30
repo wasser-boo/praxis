@@ -43,6 +43,8 @@ pub const SLASH_COMMANDS: &[SlashCmd] = &[
     SlashCmd { name: "/logout", desc: "Remove a provider credential: /logout <provider>" },
     SlashCmd { name: "/mouse", desc: "Toggle mouse capture (F2); OFF enables native selection" },
     SlashCmd { name: "/copy", desc: "Select a saved message to copy (F3); arrows select, Ctrl+C/y copies" },
+    SlashCmd { name: "/usage", desc: "Show token usage for current response and session" },
+    SlashCmd { name: "/fold", desc: "Toggle output folding for long tool results" },
     SlashCmd { name: "/help", desc: "Show available commands" },
     SlashCmd { name: "/quit", desc: "Exit the TUI" },
 ];
@@ -143,6 +145,16 @@ pub struct App {
     pub status_msg: Option<(String, Instant)>,
 
     pub should_quit: bool,
+
+    // Session usage tracking.
+    pub session_prompt_tokens: u32,
+    pub session_completion_tokens: u32,
+    pub session_total_tokens: u32,
+    pub session_generation_ms: u64,
+    pub last_response_usage: Option<super::streaming::UsageInfo>,
+
+    // Output folding state: indices of folded bubbles.
+    pub folded_bubbles: std::collections::HashSet<usize>,
 }
 
 impl App {
@@ -180,6 +192,12 @@ impl App {
             agent_active: false,
             status_msg: None,
             should_quit: false,
+            session_prompt_tokens: 0,
+            session_completion_tokens: 0,
+            session_total_tokens: 0,
+            session_generation_ms: 0,
+            last_response_usage: None,
+            folded_bubbles: std::collections::HashSet::new(),
         }
     }
 
@@ -335,6 +353,16 @@ impl App {
             "connection_error" => self.flash(data),
             "agent_start" => self.agent_active = true,
             "agent_stop" => { self.agent_active = false; self.live.tools.clear(); }
+            "usage" => {
+                self.live.apply(event, data);
+                if let Some(ref usage) = self.live.last_usage {
+                    self.session_prompt_tokens = self.session_prompt_tokens.saturating_add(usage.prompt_tokens);
+                    self.session_completion_tokens = self.session_completion_tokens.saturating_add(usage.completion_tokens);
+                    self.session_total_tokens = self.session_total_tokens.saturating_add(usage.total_tokens);
+                    self.session_generation_ms = self.session_generation_ms.saturating_add(usage.generation_ms);
+                    self.last_response_usage = Some(usage.clone());
+                }
+            }
             _ => self.live.apply(event, data),
         }
     }
@@ -355,6 +383,12 @@ impl App {
         self.cursor = 0;
         self.attachments.clear();
         self.popup = Popup::None;
+        self.session_prompt_tokens = 0;
+        self.session_completion_tokens = 0;
+        self.session_total_tokens = 0;
+        self.session_generation_ms = 0;
+        self.last_response_usage = None;
+        self.folded_bubbles.clear();
     }
 
     /// Refresh the transcript from the DB. Idempotent — uses `seen_keys` to
@@ -646,6 +680,55 @@ impl App {
             }
             "/mouse" => self.toggle_mouse_capture(),
             "/copy" => self.toggle_copy_mode(),
+            "/usage" => {
+                let mut lines = Vec::new();
+                if let Some(ref usage) = self.last_response_usage {
+                    let tps = if usage.tokens_per_sec > 0.0 {
+                        format!("{:.1} tok/s", usage.tokens_per_sec)
+                    } else {
+                        "-".to_string()
+                    };
+                    lines.push(format!("Last response: {} in / {} out / {} total tokens ({})",
+                        usage.prompt_tokens, usage.completion_tokens, usage.total_tokens, tps));
+                } else {
+                    lines.push("Last response: no usage data".to_string());
+                }
+                if self.session_total_tokens > 0 {
+                    let avg_tps = if self.session_generation_ms > 0 {
+                        (self.session_completion_tokens as f64 / (self.session_generation_ms as f64 / 1000.0)).round()
+                    } else { 0.0 };
+                    lines.push(format!("Session total: {} in / {} out / {} tokens (avg {:.1} tok/s)",
+                        self.session_prompt_tokens, self.session_completion_tokens, self.session_total_tokens, avg_tps));
+                }
+                self.transcript.push(Bubble::Banner {
+                    kind: BannerKind::Info,
+                    content: lines.join("\n"),
+                });
+            }
+            "/fold" => {
+                // Toggle folding for all tool/result bubbles, or specific index.
+                let arg = _rest.trim();
+                if arg.is_empty() {
+                    // Toggle global: if any folded, unfold all; else fold all tool results.
+                    if self.folded_bubbles.is_empty() {
+                        for (i, bubble) in self.transcript.iter().enumerate() {
+                            if matches!(bubble, Bubble::Tool { .. } | Bubble::ToolResult { .. }) {
+                                self.folded_bubbles.insert(i);
+                            }
+                        }
+                        self.flash("Folded all tool outputs");
+                    } else {
+                        self.folded_bubbles.clear();
+                        self.flash("Unfolded all tool outputs");
+                    }
+                } else if let Ok(idx) = arg.parse::<usize>() {
+                    if self.folded_bubbles.contains(&idx) {
+                        self.folded_bubbles.remove(&idx);
+                    } else {
+                        self.folded_bubbles.insert(idx);
+                    }
+                }
+            }
             "/help" => {
                 let body = SLASH_COMMANDS
                     .iter()
@@ -1202,6 +1285,23 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
     if code == KeyCode::F(3) { app.toggle_copy_mode(); return; }
+    // Tab toggles folding for tool output bubbles when no popup is active.
+    if code == KeyCode::Tab && mods.is_empty() && matches!(app.popup, Popup::None) {
+        // Fold/unfold the last visible tool bubble, or toggle all.
+        let last_tool = app.transcript.iter().enumerate().rev()
+            .find_map(|(i, b)| match b {
+                Bubble::Tool { .. } | Bubble::ToolResult { .. } => Some(i),
+                _ => None,
+            });
+        if let Some(idx) = last_tool {
+            if app.folded_bubbles.contains(&idx) {
+                app.folded_bubbles.remove(&idx);
+            } else {
+                app.folded_bubbles.insert(idx);
+            }
+        }
+        return;
+    }
     if code == KeyCode::Char('q') && mods == KeyModifiers::CONTROL {
         app.should_quit = true;
         app.pending_clipboard = None;

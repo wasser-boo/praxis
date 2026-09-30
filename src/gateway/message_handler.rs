@@ -150,6 +150,16 @@ role: "system".to_string(),
         .streaming_chat(request, provider, user_id)
         .await?;
 
+    // Track cumulative usage across tool-call continuations.
+    let mut cumulative_prompt_tokens: u32 = 0;
+    let mut cumulative_completion_tokens: u32 = 0;
+    let mut cumulative_total_tokens: u32 = 0;
+    if let Some(ref usage) = response.usage {
+        cumulative_prompt_tokens = cumulative_prompt_tokens.saturating_add(usage.prompt_tokens);
+        cumulative_completion_tokens = cumulative_completion_tokens.saturating_add(usage.completion_tokens);
+        cumulative_total_tokens = cumulative_total_tokens.saturating_add(usage.total_tokens);
+    }
+
     while let Some(tool_calls) = &response.tool_calls {
         current_tool_ids.extend(tool_calls.iter().map(|call| call.id.clone()));
         // Persist the assistant message with tool_calls
@@ -367,15 +377,32 @@ role: "system".to_string(),
             .llm.get()
             .streaming_chat(followup_request, ctx.settings.provider.as_deref(), user_id)
             .await?;
+        if let Some(ref usage) = response.usage {
+            cumulative_prompt_tokens = cumulative_prompt_tokens.saturating_add(usage.prompt_tokens);
+            cumulative_completion_tokens = cumulative_completion_tokens.saturating_add(usage.completion_tokens);
+            cumulative_total_tokens = cumulative_total_tokens.saturating_add(usage.total_tokens);
+        }
     }
 
     let reply = response.content.unwrap_or_default();
 
-    let message_id = state.db.add_message(
-        user_id,
-        &crate::db::messages::Message::assistant(reply.clone()),
-    )?;
+    let mut msg = crate::db::messages::Message::assistant(reply.clone());
+    if cumulative_total_tokens > 0 {
+        msg.prompt_tokens = Some(cumulative_prompt_tokens);
+        msg.completion_tokens = Some(cumulative_completion_tokens);
+        msg.total_tokens = Some(cumulative_total_tokens);
+    }
+    let message_id = state.db.add_message(user_id, &msg)?;
     crate::dashboard::stream::assistant_saved(user_id, message_id, &reply);
+    // Emit usage event for TUI/dashboard token display.
+    if cumulative_total_tokens > 0 {
+        let usage_data = serde_json::json!({
+            "prompt_tokens": cumulative_prompt_tokens,
+            "completion_tokens": cumulative_completion_tokens,
+            "total_tokens": cumulative_total_tokens,
+        });
+        crate::dashboard::stream::send(user_id, "usage", &usage_data.to_string());
+    }
 
     let mut updated_ctx = state.db.load_context(user_id)?;
     state.db.increment_turn(&mut updated_ctx);

@@ -8,6 +8,17 @@ pub struct LiveOutput {
     pub reasoning: String,
     pub tools: BTreeMap<usize, (String, String)>,
     pub disconnected: bool,
+    /// Last usage event from the gateway.
+    pub last_usage: Option<UsageInfo>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UsageInfo {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+    pub generation_ms: u64,
+    pub tokens_per_sec: f64,
 }
 impl LiveOutput {
     pub fn apply(&mut self, event: &str, data: &str) {
@@ -22,6 +33,17 @@ impl LiveOutput {
             "assistant" => { self.text = data.into(); self.disconnected = false; }
             // assistant_saved is reconciled by App before text is removed.
             "stream_end" => self.tools.clear(),
+            "usage" => {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
+                    self.last_usage = Some(UsageInfo {
+                        prompt_tokens: value["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+                        completion_tokens: value["completion_tokens"].as_u64().unwrap_or(0) as u32,
+                        total_tokens: value["total_tokens"].as_u64().unwrap_or(0) as u32,
+                        generation_ms: value["generation_ms"].as_u64().unwrap_or(0),
+                        tokens_per_sec: value["tokens_per_sec"].as_f64().unwrap_or(0.0),
+                    });
+                }
+            },
             "tool_call_delta" if !self.disconnected => {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(index) = value["index"].as_u64().filter(|n| *n < 128) {

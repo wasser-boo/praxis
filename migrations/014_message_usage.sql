@@ -1,0 +1,3 @@
+-- Per-message token usage and generation timing.
+-- Nullable: older rows and messages without provider usage remain NULL.
+-- Use idempotent checks so repeated runs don't fail.
