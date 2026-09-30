@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Praxis — Self-hosted AI Agent Harness</title>
+    <meta name="description" content="Your data, your keys, your rules. Self-hosted AI agent platform with multi-provider LLM, tool calling, Discord, QEMU VM control, and more.">
+    <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a href="/" class="nav-logo">
+                <img src="assets/logo.svg" alt="Praxis" width="32" height="32">
+                <span>Praxis</span>
+            </a>
+            <div class="nav-links" id="nav-links">
+                <a href="#features">Features</a>
+                <a href="#quickstart">Quick Start</a>
+                <a href="https://github.com/Marvin/praxis" target="_blank" rel="noopener">GitHub</a>
+                <a href="mailto:hello@getpraxis.boo">Contact</a>
+            </div>
+            <button class="nav-toggle" id="nav-toggle" aria-label="Menu">
+                <span></span><span></span><span></span>
+            </button>
+        </div>
+    </nav>
+
+    <main>
+        <!-- Hero -->
+        <section class="hero">
+            <div class="container">
+                <img src="assets/logo.svg" alt="Praxis Logo" class="hero-logo" width="120" height="120">
+                <h1>Praxis</h1>
+                <p class="hero-subtitle">Self-hosted AI agent harness</p>
+                <p class="hero-pitch">Your data, your keys, your rules.</p>
+                <div class="hero-actions">
+                    <a href="#quickstart" class="btn btn-primary">Quick Start</a>
+                    <a href="https://github.com/Marvin/praxis" class="btn btn-secondary" target="_blank" rel="noopener">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                        GitHub
+                    </a>
+                </div>
+            </div>
+        </section>
+
+        <!-- Terminal Demo -->
+        <section class="terminal-section">
+            <div class="container">
+                <div class="terminal">
+                    <div class="terminal-header">
+                        <div class="terminal-dots">
+                            <span></span><span></span><span></span>
+                        </div>
+                        <span class="terminal-title">bash</span>
+                    </div>
+                    <div class="terminal-body">
+                        <div class="terminal-line">
+                            <span class="terminal-prompt">$</span>
+                            <span class="terminal-cmd">git clone https://github.com/Marvin/praxis.git && cd praxis</span>
+                            <button class="copy-btn" data-copy="git clone https://github.com/Marvin/praxis.git && cd praxis" aria-label="Copy">Copy</button>
+                        </div>
+                        <div class="terminal-line">
+                            <span class="terminal-prompt">$</span>
+                            <span class="terminal-cmd">cargo build --release</span>
+                            <button class="copy-btn" data-copy="cargo build --release" aria-label="Copy">Copy</button>
+                        </div>
+                        <div class="terminal-line">
+                            <span class="terminal-prompt">$</span>
+                            <span class="terminal-cmd">./target/release/praxis run</span>
+                            <button class="copy-btn" data-copy="./target/release/praxis run" aria-label="Copy">Copy</button>
+                        </div>
+                        <div class="terminal-line terminal-output">
+                            <span class="terminal-success">✓ Gateway running on :3537</span>
+                        </div>
+                        <div class="terminal-line terminal-output">
+                            <span class="terminal-success">✓ Dashboard at http://localhost:3537</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Features -->
+        <section class="features" id="features">
+            <div class="container">
+                <h2>Features</h2>
+                <div class="features-grid">
+                    <div class="feature-card">
+                        <div class="feature-icon">🧠</div>
+                        <h3>Multi-Provider LLM</h3>
+                        <p>OpenAI, Anthropic, Codex, Ollama, llama.cpp, OpenRouter, and more. Switch providers without changing your workflow.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">💬</div>
+                        <h3>Discord + Voice</h3>
+                        <p>Full Discord bot with voice channels, threads, and TTS. Chat naturally or use slash commands.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">🖥️</div>
+                        <h3>QEMU VM Control</h3>
+                        <p>LLM-controlled virtual machines. Keyboard, mouse, screenshots — full automation of desktop environments.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">🔧</div>
+                        <h3>Tool Calling</h3>
+                        <p>Shell execution, file operations, context management, web search. Extend with custom tools via plugins.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">🧩</div>
+                        <h3>Plugin System</h3>
+                        <p>Install custom tools via plugin.json. Community-driven extensibility without touching core code.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">🔐</div>
+                        <h3>Encrypted Secrets</h3>
+                        <p>AES-256-GCM encrypted at rest. Your API keys never leave your server in plaintext.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Why a Harness -->
+        <section class="why-section">
+            <div class="container">
+                <h2>Why a harness?</h2>
+                <p class="why-text">
+                    A chatbot answers questions. A <strong>harness</strong> gives an AI agent tools, context, and execution control — 
+                    turning a language model into a capable operator that can read, write, run commands, and interact with your systems.
+                </p>
+                <div class="why-grid">
+                    <div class="why-item">
+                        <span class="why-label">Tools</span>
+                        <p>Shell, file I/O, web search, VM control — anything you can script.</p>
+                    </div>
+                    <div class="why-item">
+                        <span class="why-label">Context</span>
+                        <p>State machines, memory profiles, templates. The agent knows what it needs to know.</p>
+                    </div>
+                    <div class="why-item">
+                        <span class="why-label">Control</span>
+                        <p>Budgets, turn limits, tool gating. You decide how far the agent can go.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Quick Start -->
+        <section class="quickstart" id="quickstart">
+            <div class="container">
+                <h2>Get started in 3 commands</h2>
+                <div class="quickstart-steps">
+                    <div class="step">
+                        <span class="step-num">1</span>
+                        <h3>Clone</h3>
+                        <code>git clone https://github.com/Marvin/praxis.git</code>
+                    </div>
+                    <div class="step">
+                        <span class="step-num">2</span>
+                        <h3>Build</h3>
+                        <code>cargo build --release</code>
+                    </div>
+                    <div class="step">
+                        <span class="step-num">3</span>
+                        <h3>Run</h3>
+                        <code>./target/release/praxis run</code>
+                    </div>
+                </div>
+                <p class="quickstart-note">
+                    Requires <a href="https://www.rust-lang.org/tools/install" target="_blank" rel="noopener">Rust 1.75+</a> and SQLite3. 
+                    For QEMU VM support: <code>apt install qemu-system-x86</code>
+                </p>
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-inner">
+                <div class="footer-left">
+                    <img src="assets/logo.svg" alt="Praxis" width="24" height="24">
+                    <span>Praxis</span>
+                </div>
+                <div class="footer-links">
+                    <a href="https://github.com/Marvin/praxis" target="_blank" rel="noopener">GitHub</a>
+                    <a href="https://github.com/Marvin/praxis/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+                    <a href="mailto:hello@getpraxis.boo">hello@getpraxis.boo</a>
+                </div>
+                <p class="footer-note">Self-hosted. Your server, your rules.</p>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // Mobile menu toggle
+        const toggle = document.getElementById('nav-toggle');
+        const links = document.getElementById('nav-links');
+        toggle?.addEventListener('click', () => {
+            links.classList.toggle('open');
+            toggle.classList.toggle('open');
+        });
+
+        // Copy buttons
+        document.querySelectorAll('.copy-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const text = btn.dataset.copy;
+                try {
+                    await navigator.clipboard.writeText(text);
+                    btn.textContent = 'Copied!';
+                    setTimeout(() => btn.textContent = 'Copy', 1500);
+                } catch {
+                    // Fallback for non-HTTPS
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    btn.textContent = 'Copied!';
+                    setTimeout(() => btn.textContent = 'Copy', 1500);
+                }
+            });
+        });
+
+        // Smooth scroll
+        document.querySelectorAll('a[href^="#"]').forEach(a => {
+            a.addEventListener('click', e => {
+                const target = document.querySelector(a.getAttribute('href'));
+                if (target) {
+                    e.preventDefault();
+                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    links.classList.remove('open');
+                    toggle.classList.remove('open');
+                }
+            });
+        });
+    </script>
+</body>
+</html>
